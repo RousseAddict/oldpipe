@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   version="1.1"
+   viewBox="0 0 1024 1024"
+   width="1024"
+   height="1024">
+  <defs>
+    <linearGradient id="bgGradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8f1414"/>
+      <stop offset="1" stop-color="#6e0f0f"/>
+    </linearGradient>
+    <radialGradient
+       id="radialGradient4453"
+       cx="0.56012386"
+       cy="0.35701406"
+       fx="0.56012386"
+       fy="0.35701406"
+       r="88"
+       gradientUnits="userSpaceOnUse"
+       gradientTransform="matrix(0.00132321,2.1587518,-2.1815784,0.00133718,1.1369842,-0.39215567)">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- iOS-style squircle background card. Full bleed to the 1024 edge;
+       Apple's own mask will round this at render time, but the gradient
+       card gives it a polished "icon on a tile" look even before masking. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#bgGradient)"/>
+
+  <!-- Original logo, uniformly scaled and centered.
+       Original art occupies a 192x192 box; place it within a safe area
+       (about 75% of canvas) so nothing is clipped by the iOS corner mask. -->
+  <g transform="translate(112,112) scale(4.1666)">
+    <circle
+       style="fill:#ff7575"
+       cx="96"
+       cy="96"
+       r="88" />
+    <path
+       style="fill:#cc4242"
+       d="M 184,96 A 88,88 0 0 1 96.12296,183.99991 88,88 0 0 1 8.0003436,96.24592" />
+    <ellipse
+       style="fill:#cd201f"
+       cx="96"
+       cy="96"
+       rx="88"
+       ry="87" />
+    <circle
+       style="fill:url(#radialGradient4453)"
+       cx="96.001991"
+       cy="96.021873"
+       r="88" />
+    <path
+       style="fill:#ffffff"
+       d="M 62.03771,154.84774 79.885207,143.47161 80.258503,68.06594 126.18321,95.333 92.950545,114.49592 v 21.92836 L 161.9848,95.333 61.944386,36.538494 Z" />
+  </g>
+</svg>
