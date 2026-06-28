@@ -1,14 +1,19 @@
 import UIKit
 import AVFoundation
-import MediaPlayer
+
+// VideoPlayerVC is a thin view onto VideoPlayer.shared. It does NOT own the AVPlayer —
+// the singleton does, so audio keeps playing when this VC is popped (the mini bar takes
+// over). On appear it attaches the shared AVPlayerLayer into its video container; on
+// disappear it detaches the layer (does NOT stop playback). Audio session, Now Playing
+// metadata, remote-control transport, and resume persistence all live in the singleton.
 
 class VideoPlayerVC: UIViewController {
 
     private let video: Video
     private var streams: [VideoStream] = []
-    private var player: AVPlayer?
-    private var playerLayer: AVPlayerLayer?
-    private var playerItem: AVPlayerItem?
+    private var didRequestStreams = false
+
+    private var sp: VideoPlayer { return VideoPlayer.shared }
 
     // UI
     private var scrollView: UIScrollView?
@@ -33,13 +38,9 @@ class VideoPlayerVC: UIViewController {
     private var isScrubbing = false
     private var fsAngle: CGFloat = CGFloat(Double.pi / 2)
     private var fsActive = false
-    private var lastSavedPos: Double = 0   // throttle for resume-position writes
 
     // iOS 7+ view-controller-based status bar control (ignored on iOS 6).
     override var prefersStatusBarHidden: Bool { return fsActive }
-
-    // Required so we receive lock-screen / headset remote-control events.
-    override var canBecomeFirstResponder: Bool { return true }
 
     // MARK: - Init
 
@@ -68,88 +69,66 @@ class VideoPlayerVC: UIViewController {
         NotificationCenter.default.addObserver(
             self, selector: #selector(appDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification, object: nil)
-        // Lock-screen / headset transport controls (legacy path — iOS 6+).
-        UIApplication.shared.beginReceivingRemoteControlEvents()
-        becomeFirstResponder()
-        guard scrollView == nil else { return }
-        setupUI()
-        loadStreams()
+
+        if scrollView == nil { setupUI() }
+
+        // If the singleton is already playing this video (reopened from the mini bar, or
+        // returning from a pushed VC), reattach onto the live playback. Otherwise load.
+        if sp.isActive(video.id) {
+            showActivePlayback()
+        } else if !didRequestStreams {
+            loadStreams()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
-        UIApplication.shared.endReceivingRemoteControlEvents()
-        resignFirstResponder()
-        stopPlayback()
-    }
-
-    // Lock-screen / headset transport buttons (the legacy responder-chain API; the
-    // modern MPRemoteCommandCenter is iOS 7.1+ and crashes on iOS 6).
-    override func remoteControlReceived(with event: UIEvent?) {
-        guard let event = event, event.type == .remoteControl else { return }
-        switch event.subtype {
-        case .remoteControlPlay:
-            player?.play()
-            playPauseBtn?.setTitle("||", for: .normal)
-            updateNowPlayingInfo()
-        case .remoteControlPause:
-            player?.pause()
-            playPauseBtn?.setTitle(">", for: .normal)
-            updateNowPlayingInfo()
-        case .remoteControlTogglePlayPause:
-            togglePlayPause()
-            updateNowPlayingInfo()
-        default:
-            break
-        }
+        if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
+        if fsOverlay != nil { exitFullscreen() }
+        // Detach the shared layer — do NOT stop. Playback (audio) continues; the mini bar
+        // takes over the UI. The layer is reattached on the next appear.
+        detachLayer()
     }
 
     @objc private func appDidBecomeActive() {
         // The audio session can be deactivated by the system in the background; re-arm it
-        // and resync the scrubber/now-playing to the player's real position.
-        try? AVAudioSession.sharedInstance().setActive(true)
+        // and resync the scrubber to the player's real position.
+        sp.reactivateSession()
         updateProgress()
-        updateNowPlayingInfo()
     }
 
-    // Route audio to the Playback category so it keeps playing when the screen is locked
-    // or the app is backgrounded (paired with the UIBackgroundModes "audio" Info.plist key).
-    private func configureAudioSession() {
-        let s = AVAudioSession.sharedInstance()
-        try? s.setCategory(.playback)
-        try? s.setActive(true)
+    // MARK: - Shared layer attach / detach
+
+    private func attachLayer() {
+        guard let container = videoContainer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        sp.layer.frame = container.bounds
+        sp.layer.videoGravity = AVLayerVideoGravity.resizeAspect
+        if let thumbLayer = thumbView?.layer {
+            container.layer.insertSublayer(sp.layer, below: thumbLayer)
+        } else {
+            container.layer.addSublayer(sp.layer)
+        }
+        CATransaction.commit()
     }
 
-    // MARK: - Now Playing (lock screen) metadata
-
-    private func updateNowPlayingInfo() {
-        var info: [String: Any] = [:]
-        info[MPMediaItemPropertyTitle] = video.title
-        info[MPMediaItemPropertyArtist] = video.channelName
-        if let item = playerItem {
-            let dur = CMTimeGetSeconds(item.duration)
-            if dur.isFinite, dur > 0 { info[MPMediaItemPropertyPlaybackDuration] = dur }
-            let cur = CMTimeGetSeconds(item.currentTime())
-            if cur.isFinite { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = cur }
-        }
-        info[MPNowPlayingInfoPropertyPlaybackRate] = (player?.rate ?? 0)
-        if let img = thumbView?.image {
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(image: img)
-        }
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    private func detachLayer() {
+        sp.layer.removeFromSuperlayer()
     }
 
-    // Lightweight per-tick update of just the elapsed time + rate (no artwork rebuild).
-    private func refreshNowPlayingElapsed() {
-        guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
-        if let item = playerItem {
-            let cur = CMTimeGetSeconds(item.currentTime())
-            if cur.isFinite { info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = cur }
-        }
-        info[MPNowPlayingInfoPropertyPlaybackRate] = (player?.rate ?? 0)
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    // Reattach onto already-running playback (from mini bar / returning to the VC).
+    private func showActivePlayback() {
+        playBtn?.isHidden = true
+        statusLabel?.isHidden = true
+        thumbView?.isHidden = true
+        attachLayer()
+        sp.setArtwork(thumbView?.image)
+        showControls()
+        updateProgress()
     }
 
     // MARK: - Orientation → fullscreen
@@ -157,7 +136,7 @@ class VideoPlayerVC: UIViewController {
     // The app window stays portrait (iOS 6-safe); rotating the device drives the
     // fullscreen overlay's rotation so the video fills the screen in landscape.
     @objc private func orientationChanged() {
-        guard playerLayer != nil else { return }   // only while a video is loaded
+        guard sp.isActive(video.id) else { return }   // only while a video is loaded
         switch UIDevice.current.orientation {
         case .landscapeLeft:
             setFullscreen(true, angle: CGFloat(Double.pi / 2))
@@ -416,9 +395,8 @@ class VideoPlayerVC: UIViewController {
 
     private func showControls() {
         controlsView?.isHidden = false
-        playPauseBtn?.setTitle("||", for: .normal)
+        playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
         startProgressTimer()
-        updateNowPlayingInfo()
     }
 
     private func startProgressTimer() {
@@ -431,29 +409,17 @@ class VideoPlayerVC: UIViewController {
     }
 
     private func updateProgress() {
-        guard let item = playerItem, item.status == .readyToPlay else { return }
-        let dur = CMTimeGetSeconds(item.duration)
-        let cur = CMTimeGetSeconds(item.currentTime())
-        guard dur.isFinite, dur > 0, cur.isFinite else { return }
+        guard sp.isReady else { return }
+        let dur = sp.durationSeconds
+        let cur = sp.currentSeconds
+        guard dur > 0 else { return }
         durationLabel?.text = timeString(dur)
         if !isScrubbing {
             scrubber?.value = Float(cur / dur)
             currentTimeLabel?.text = timeString(cur)
         }
-        // Keep button glyph in sync with actual rate
-        playPauseBtn?.setTitle((player?.rate ?? 0) > 0 ? "||" : ">", for: .normal)
-        refreshNowPlayingElapsed()
-
-        // Persist resume position for downloaded videos (throttled to ~5s).
-        if DownloadManager.isDownloaded(video.id) {
-            if cur >= dur - 2 {
-                DownloadManager.clearPosition(for: video.id)   // finished → restart next time
-                lastSavedPos = 0
-            } else if abs(cur - lastSavedPos) >= 5 {
-                lastSavedPos = cur
-                DownloadManager.savePosition(cur, for: video.id)
-            }
-        }
+        // Keep button glyph in sync with actual rate.
+        playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
     }
 
     private func timeString(_ seconds: Double) -> String {
@@ -462,40 +428,27 @@ class VideoPlayerVC: UIViewController {
     }
 
     @objc private func togglePlayPause() {
-        guard let p = player else { return }
-        if p.rate > 0 {
-            p.pause()
-            playPauseBtn?.setTitle(">", for: .normal)
-        } else {
-            p.play()
-            playPauseBtn?.setTitle("||", for: .normal)
-        }
-        updateNowPlayingInfo()
+        sp.togglePlayPause()
+        playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
     }
 
     @objc private func scrubTouchDown() { isScrubbing = true }
 
     @objc private func scrubChanged() {
-        guard let item = playerItem else { return }
-        let dur = CMTimeGetSeconds(item.duration)
-        guard dur.isFinite, dur > 0, let v = scrubber?.value else { return }
+        let dur = sp.durationSeconds
+        guard dur > 0, let v = scrubber?.value else { return }
         currentTimeLabel?.text = timeString(Double(v) * dur)
     }
 
     @objc private func scrubTouchUp() {
-        guard let p = player, let item = playerItem, let v = scrubber?.value else { isScrubbing = false; return }
-        let dur = CMTimeGetSeconds(item.duration)
-        if dur.isFinite, dur > 0 {
-            let target = CMTimeMakeWithSeconds(Double(v) * dur, preferredTimescale: 600)
-            p.seek(to: target)
-        }
+        if let v = scrubber?.value { sp.seek(toFraction: Double(v)) }
         isScrubbing = false
-        updateNowPlayingInfo()
     }
 
     // MARK: - Stream loading
 
     private func loadStreams() {
+        didRequestStreams = true
         // Already downloaded — no network needed, play offline.
         if DownloadManager.isDownloaded(video.id) {
             statusLabel?.text = "Downloaded \u{2022} tap > to play"
@@ -529,7 +482,7 @@ class VideoPlayerVC: UIViewController {
         if DownloadManager.isDownloaded(video.id) {
             playBtn?.isHidden = true
             statusLabel?.isHidden = true
-            playLocalFile(path: DownloadManager.filePath(for: video.id))
+            startPlayback(url: URL(fileURLWithPath: DownloadManager.filePath(for: video.id)), isLocal: true)
             return
         }
 
@@ -548,7 +501,7 @@ class VideoPlayerVC: UIViewController {
         let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
         if iosVersion >= 7.0 {
             statusLabel?.text = "Loading stream..."
-            tryAVPlayer(url: preferred.url, fallbackDownload: preferred.url)
+            tryStream(urlStr: preferred.url, fallbackDownload: preferred.url)
         } else {
             statusLabel?.text = "Downloading..."
             download(url: preferred.url, autoPlay: true)
@@ -567,53 +520,68 @@ class VideoPlayerVC: UIViewController {
         download(url: preferred.url, autoPlay: false)
     }
 
-    private func tryAVPlayer(url: String, fallbackDownload: String) {
-        guard let nsurl = URL(string: url) else {
+    // Load a URL into the singleton, attach the shared layer, and play once ready.
+    private func startPlayback(url: URL, isLocal: Bool) {
+        let resume = DownloadManager.isDownloaded(video.id) ? DownloadManager.position(for: video.id) : 0
+        sp.load(video: video, url: url, isLocal: isLocal, resume: resume, artwork: thumbView?.image)
+        attachLayer()
+        pollUntilReady(maxTicks: 40, interval: 0.25, onReady: { [weak self] in
+            guard let self = self else { return }
+            self.thumbView?.isHidden = true
+            self.statusLabel?.isHidden = true
+            self.sp.applyResumeAndPlay()
+            self.showControls()
+        }, onFail: { [weak self] in
+            guard let self = self else { return }
+            self.statusLabel?.text = "Playback failed"
+            self.statusLabel?.isHidden = false
+            self.playBtn?.isHidden = false
+        })
+    }
+
+    // iOS 7+ direct streaming with a quick download-then-play fallback.
+    private func tryStream(urlStr: String, fallbackDownload: String) {
+        guard let nsurl = URL(string: urlStr) else {
             statusLabel?.text = "Invalid stream URL"
             statusLabel?.isHidden = false
             playBtn?.isHidden = false
             return
         }
+        sp.load(video: video, url: nsurl, isLocal: false, resume: 0, artwork: thumbView?.image)
+        attachLayer()
+        pollUntilReady(maxTicks: 8, interval: 0.5, onReady: { [weak self] in
+            guard let self = self else { return }
+            self.thumbView?.isHidden = true
+            self.statusLabel?.isHidden = true
+            self.sp.applyResumeAndPlay()
+            self.showControls()
+        }, onFail: { [weak self] in
+            guard let self = self else { return }
+            self.detachLayer()
+            self.statusLabel?.text = "Downloading..."
+            self.statusLabel?.isHidden = false
+            self.download(url: fallbackDownload, autoPlay: true)
+        })
+    }
 
-        stopPlayback()
-        configureAudioSession()
-
-        let item = AVPlayerItem(url: nsurl)
-        playerItem = item
-        let p = AVPlayer(playerItem: item)
-        player = p
-
-        let container = videoContainer!
-        let pLayer = AVPlayerLayer(player: p)
-        pLayer.frame = container.bounds
-        pLayer.videoGravity = AVLayerVideoGravity.resizeAspect
-        container.layer.insertSublayer(pLayer, below: thumbView?.layer)
-        playerLayer = pLayer
-
-        // Poll for status — if not ready in ~4s, fall back to download-then-play.
-        var checkCount = 0
-        let checkTimer = Timer(timeInterval: 0.5, target: BlockTarget {
-            [weak self, weak item, weak p] in
-            guard let self = self, let item = item else { return }
-            checkCount += 1
-            if item.status == .readyToPlay {
-                self.thumbView?.isHidden = true
-                self.statusLabel?.isHidden = true
-                p?.play()
-                self.showControls()
-                return
-            }
-            if item.status == .failed || checkCount > 8 {
+    // Poll the singleton's item status; fire onReady when ready, onFail on failure/timeout.
+    private func pollUntilReady(maxTicks: Int, interval: TimeInterval,
+                                onReady: @escaping () -> Void, onFail: @escaping () -> Void) {
+        if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+        var count = 0
+        let timer = Timer(timeInterval: interval, target: BlockTarget { [weak self] in
+            guard let self = self else { return }
+            count += 1
+            if self.sp.isReady {
                 if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
-                self.statusLabel?.text = "Downloading..."
-                self.statusLabel?.isHidden = false
-                pLayer.removeFromSuperlayer()
-                self.playerLayer = nil
-                self.download(url: fallbackDownload, autoPlay: true)
+                onReady()
+            } else if self.sp.isFailed || count > maxTicks {
+                if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+                onFail()
             }
         }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
-        RunLoop.main.add(checkTimer, forMode: .common)
-        objc_setAssociatedObject(self, &timerKey, checkTimer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        RunLoop.main.add(timer, forMode: .common)
+        objc_setAssociatedObject(self, &timerKey, timer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     // Download to persistent storage, register for offline, optionally play when done.
@@ -633,7 +601,7 @@ class VideoPlayerVC: UIViewController {
                 if autoPlay {
                     self.statusLabel?.isHidden = true
                     self.thumbView?.isHidden = true
-                    self.playLocalFile(path: path)
+                    self.startPlayback(url: URL(fileURLWithPath: path), isLocal: true)
                 } else {
                     self.statusLabel?.text = "Saved for offline"
                     self.statusLabel?.isHidden = false
@@ -647,81 +615,10 @@ class VideoPlayerVC: UIViewController {
         }
     }
 
-    private func playLocalFile(path: String) {
-        let url = URL(fileURLWithPath: path)
-        stopPlayback()
-        configureAudioSession()
-        let item = AVPlayerItem(url: url)
-        playerItem = item
-        let p = AVPlayer(playerItem: item)
-        player = p
-        let container = videoContainer!
-        let pLayer = AVPlayerLayer(player: p)
-        pLayer.frame = container.bounds
-        pLayer.videoGravity = AVLayerVideoGravity.resizeAspect
-        container.layer.insertSublayer(pLayer, below: thumbView?.layer)
-        playerLayer = pLayer
-
-        // Wait for the local item to be ready before playing (iOS 6 won't reliably
-        // auto-start if play() is called before the asset's tracks are loaded).
-        var readyCount = 0
-        let readyTimer = Timer(timeInterval: 0.25, target: BlockTarget {
-            [weak self, weak item, weak p] in
-            guard let self = self, let item = item else { return }
-            readyCount += 1
-            if item.status == .readyToPlay {
-                if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
-                self.thumbView?.isHidden = true
-                // Resume where we left off (skip if at the very start or near the end).
-                let resume = DownloadManager.position(for: self.video.id)
-                let dur = CMTimeGetSeconds(item.duration)
-                if resume > 5, !(dur.isFinite && dur > 0 && resume >= dur - 5) {
-                    self.lastSavedPos = resume
-                    p?.seek(to: CMTimeMakeWithSeconds(resume, preferredTimescale: 600))
-                }
-                p?.play()
-                self.showControls()
-            } else if item.status == .failed || readyCount > 40 {
-                if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
-                self.statusLabel?.text = "Playback failed"
-                self.statusLabel?.isHidden = false
-                self.playBtn?.isHidden = false
-            }
-        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
-        RunLoop.main.add(readyTimer, forMode: .common)
-        objc_setAssociatedObject(self, &timerKey, readyTimer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-    }
-
-    private func stopPlayback() {
-        if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
-        if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
-        if fsOverlay != nil { exitFullscreen() }
-        // Save the resume position on exit for downloaded videos.
-        if let item = playerItem, DownloadManager.isDownloaded(video.id) {
-            let dur = CMTimeGetSeconds(item.duration)
-            let cur = CMTimeGetSeconds(item.currentTime())
-            if cur.isFinite, cur > 5 {
-                if dur.isFinite, dur > 0, cur >= dur - 5 {
-                    DownloadManager.clearPosition(for: video.id)
-                } else {
-                    DownloadManager.savePosition(cur, for: video.id)
-                }
-            }
-        }
-        player?.pause()
-        player = nil
-        playerItem = nil
-        playerLayer?.removeFromSuperlayer()
-        playerLayer = nil
-        controlsView?.isHidden = true
-        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
-    }
-
     // MARK: - Fullscreen
 
     @objc private func fullscreenTapped() {
-        guard playerLayer != nil else {
+        guard sp.isActive(video.id) else {
             statusLabel?.text = "Start playback first"
             statusLabel?.isHidden = false
             return
@@ -737,7 +634,8 @@ class VideoPlayerVC: UIViewController {
     }
 
     private func enterFullscreen() {
-        guard let pLayer = playerLayer, let window = view.window else { return }
+        guard sp.isActive(video.id), let window = view.window else { return }
+        let pLayer = sp.layer
 
         // The app is portrait-locked, so UIScreen.main.bounds is always the portrait
         // (320x568) frame. The overlay is sized to landscape (dims swapped) and rotated
@@ -806,7 +704,8 @@ class VideoPlayerVC: UIViewController {
     private func exitFullscreen() {
         guard let overlay = fsOverlay else { return }
         setFSStatusBar(hidden: false)
-        if let pLayer = playerLayer, let container = videoContainer {
+        let pLayer = sp.layer
+        if let container = videoContainer {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             pLayer.frame = container.bounds

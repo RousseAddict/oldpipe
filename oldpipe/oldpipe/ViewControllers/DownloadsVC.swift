@@ -8,6 +8,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
     private var videos: [Video] = []
     private var sizeText: [String: String] = [:]   // precomputed per CLAUDE.md (no per-cell file I/O)
     private var incomplete: Set<String> = []       // ids of partial (unfinished) downloads
+    private var playedFrac: [String: CGFloat] = [:] // resume-position / duration, for the progress bar
     private var didSetupUI = false
 
     private lazy var tableView: UITableView = {
@@ -62,9 +63,15 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         videos = DownloadManager.all()
         sizeText.removeAll()
         incomplete.removeAll()
+        playedFrac.removeAll()
         for v in videos {
             sizeText[v.id] = DownloadManager.fileSizeText(for: v.id)
             if !DownloadManager.isComplete(v.id) { incomplete.insert(v.id) }
+            let dur = DownloadsVC.durationSeconds(v.durationText)
+            if dur > 0 {
+                let f = CGFloat(DownloadManager.position(for: v.id) / dur)
+                playedFrac[v.id] = max(0, min(1, f))
+            }
         }
         emptyLabel.isHidden = !videos.isEmpty
         tableView.reloadData()
@@ -83,7 +90,8 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let id = "DownloadCell"
-        let cell = tableView.dequeueReusableCell(withIdentifier: id) ?? UITableViewCell(style: .subtitle, reuseIdentifier: id)
+        let cell = (tableView.dequeueReusableCell(withIdentifier: id) as? DownloadCell)
+            ?? DownloadCell(style: .subtitle, reuseIdentifier: id)
         let video = videos[indexPath.row]
 
         cell.backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
@@ -107,6 +115,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         cell.imageView?.image = placeholderImage()
         cell.imageView?.layer.cornerRadius = 4
         cell.imageView?.clipsToBounds = true
+        cell.playedFraction = playedFrac[video.id] ?? 0
         AsyncImageView.loadCell(url: video.thumbnailURL) { [weak cell] img in
             guard let cell = cell else { return }
             cell.imageView?.image = img
@@ -158,5 +167,53 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         let img = UIGraphicsGetImageFromCurrentImageContext()
         UIGraphicsEndImageContext()
         return img
+    }
+
+    // Parse "8:00" / "1:02:03" → seconds. Returns 0 if unparseable.
+    private static func durationSeconds(_ text: String) -> Double {
+        let parts = text.split(separator: ":")
+        guard !parts.isEmpty else { return 0 }
+        var total = 0
+        for p in parts { total = total * 60 + (Int(p) ?? 0) }
+        return Double(total)
+    }
+}
+
+// MARK: - DownloadCell
+// Stock subtitle cell with a thin "watched progress" bar pinned to the bottom edge of the
+// thumbnail (red fill over a dark track). Positioned in layoutSubviews from imageView.bounds
+// so it tracks the thumb's frame after the async image loads.
+
+private class DownloadCell: UITableViewCell {
+
+    var playedFraction: CGFloat = 0 { didSet { setNeedsLayout() } }
+
+    private let progressTrack = UIView()
+    private let progressFill = UIView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        progressTrack.backgroundColor = UIColor(white: 0, alpha: 0.5)
+        progressTrack.isHidden = true
+        progressFill.backgroundColor = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
+        progressTrack.addSubview(progressFill)
+        imageView?.addSubview(progressTrack)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let iv = imageView else { return }
+        let b = iv.bounds
+        guard playedFraction > 0.01, b.width > 0, b.height > 0 else {
+            progressTrack.isHidden = true
+            return
+        }
+        let barH: CGFloat = 3
+        progressTrack.isHidden = false
+        progressTrack.frame = CGRect(x: 0, y: b.height - barH, width: b.width, height: barH)
+        progressFill.frame = CGRect(x: 0, y: 0, width: b.width * min(1, playedFraction), height: barH)
+        iv.bringSubviewToFront(progressTrack)
     }
 }
