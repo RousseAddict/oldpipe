@@ -36,16 +36,37 @@ private class CurlDownloadBox {
 
 class CurlFetcher {
     private static var active: [CurlFetcher] = []
-    // Serial queue — prevents concurrent curl_global_init race on first use
-    private static let curlQueue = DispatchQueue(label: "com.oldpipe.curl")
-    // dispatch_once via static let — runs exactly once, on first background access
+
+    // Concurrent worker queue — lets independent transfers (e.g. the Home feed's
+    // per-channel fetches + thumbnails) run in parallel instead of one-at-a-time.
+    private static let curlQueue = DispatchQueue(label: "com.oldpipe.curl", attributes: .concurrent)
+    // Serial gate: holds back dispatch to curlQueue until a slot frees, so we never spawn
+    // a worker thread per queued request (iPhone 4S has a hard thread/stack-memory budget).
+    private static let gateQueue = DispatchQueue(label: "com.oldpipe.curl.gate")
+    // Caps concurrent in-flight transfers. 4 = a real speedup for the feed without exhausting
+    // sockets/threads; a long download holds one slot, leaving the rest for browsing.
+    private static let curlLimit = DispatchSemaphore(value: 4)
+    // dispatch_once via static let — runs exactly once even under concurrent first access
+    // (Swift lazy-static init is thread-safe), so curl_global_init is never called concurrently.
     private static let curlGlobalInit: Bool = { curl_bridge_global_init(); return true }()
+
+    // Submit background work bounded by curlLimit: the serial gate waits for a free slot,
+    // then dispatches the work onto the concurrent queue and releases the slot when it returns.
+    private static func submit(_ work: @escaping () -> Void) {
+        gateQueue.async {
+            curlLimit.wait()
+            curlQueue.async {
+                work()
+                curlLimit.signal()
+            }
+        }
+    }
 
     // GET request
     static func fetchData(url: String, timeout: Int = 30, completion: @escaping (Data?) -> Void) {
         let fetcher = CurlFetcher()
         retain(fetcher)
-        CurlFetcher.curlQueue.async {
+        submit {
             let data = fetcher.syncFetchData(url: url, timeout: timeout)
             DispatchQueue.main.async { release(fetcher); completion(data) }
         }
@@ -60,7 +81,7 @@ class CurlFetcher {
                          completion: @escaping (Data?) -> Void) {
         let fetcher = CurlFetcher()
         retain(fetcher)
-        CurlFetcher.curlQueue.async {
+        submit {
             let data = fetcher.syncPostJSON(url: url, body: body, headers: headers,
                                             userAgent: userAgent, timeout: timeout)
             DispatchQueue.main.async { release(fetcher); completion(data) }
@@ -74,7 +95,7 @@ class CurlFetcher {
                                completion: @escaping (Bool) -> Void) {
         let fetcher = CurlFetcher()
         retain(fetcher)
-        CurlFetcher.curlQueue.async {
+        submit {
             let ok = fetcher.syncDownload(url: url, outputPath: outputPath, progress: progress)
             DispatchQueue.main.async { release(fetcher); completion(ok) }
         }

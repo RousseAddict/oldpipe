@@ -7,7 +7,7 @@ import UIKit
 // view (+ Copy button); Import parses pasted JSON and MERGES it into existing data
 // (subscriptions de-duplicated by channel id, playlists upserted by playlist id).
 
-class SettingsVC: UIViewController, UIGestureRecognizerDelegate {
+class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDelegate {
 
     private var scrollView: UIScrollView!
     private var exportView: UITextView!
@@ -97,6 +97,16 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate {
         let importBtn = makeButton("Import", at: y, width: contentW, pad: pad, accent: true)
         importBtn.addTarget(self, action: #selector(importTapped), for: .touchUpInside)
         scrollView.addSubview(importBtn)
+        y += 44 + 28
+
+        // ── Cache ──────────────────────────────────────────────────────────────────
+        y = addHeader("Cache", at: y, width: contentW, pad: pad)
+        y = addSubtitle("Clears the cached home feed and downloaded thumbnails. Your subscriptions and playlists are kept.",
+                        at: y, width: contentW, pad: pad)
+
+        let resetBtn = makeButton("Reset Cache", at: y, width: contentW, pad: pad, accent: true)
+        resetBtn.addTarget(self, action: #selector(resetTapped), for: .touchUpInside)
+        scrollView.addSubview(resetBtn)
         y += 44 + 12
 
         statusLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 40))
@@ -227,6 +237,28 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate {
         statusLabel.textColor = ok ? UIColor(red: 0.4, green: 0.8, blue: 0.4, alpha: 1)
                                    : UIColor(red: 0.95, green: 0.5, blue: 0.4, alpha: 1)
         statusLabel.text = text
+    }
+
+    // MARK: - Reset cache
+
+    // Empty-init + addButton (NOT the variadic otherButtonTitles: convenience init, which
+    // crashes on the 5.1.5 runtime). Cancel = index 0, Reset = index 1.
+    @objc private func resetTapped() {
+        let alert = UIAlertView()
+        alert.delegate = self
+        alert.title = "Reset Cache?"
+        alert.message = "This clears the cached home feed and downloaded thumbnails. Your subscriptions and playlists are kept."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Reset")
+        alert.cancelButtonIndex = 0
+        alert.show()
+    }
+
+    func alertView(_ alertView: UIAlertView, clickedButtonAt buttonIndex: Int) {
+        guard buttonIndex == 1 else { return }
+        HomeVC.clearFeedCache()
+        AsyncImageView.purgeCache()
+        setStatus("Cache cleared. Subscriptions and playlists kept.", ok: true)
     }
 }
 

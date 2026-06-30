@@ -40,6 +40,7 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         tableView.separatorColor = UIColor(white: 0.2, alpha: 1)
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.register(ChannelCell.self, forCellReuseIdentifier: ChannelCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         view.addSubview(tableView)
 
@@ -70,33 +71,8 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let id = "ChannelCell"
-        let cell = tableView.dequeueReusableCell(withIdentifier: id) ?? UITableViewCell(style: .default, reuseIdentifier: id)
-        let channel = channels[indexPath.row]
-
-        cell.backgroundColor = bg
-        cell.textLabel?.backgroundColor = .clear
-        cell.textLabel?.textColor = UIColor(white: 0.95, alpha: 1)
-        cell.textLabel?.font = UIFont.systemFont(ofSize: 15)
-        cell.textLabel?.text = channel.name.isEmpty ? channel.id : channel.name
-        cell.accessoryType = .disclosureIndicator
-
-        if cell.imageView?.image == nil {
-            cell.imageView?.image = placeholderImage()
-            cell.imageView?.layer.cornerRadius = 20
-            cell.imageView?.clipsToBounds = true
-        }
-        if !channel.thumbnailURL.isEmpty {
-            AsyncImageView.loadCell(url: channel.thumbnailURL) { [weak cell] img in
-                guard let cell = cell else { return }
-                cell.imageView?.image = img
-                cell.setNeedsLayout()
-            }
-        }
-
-        let selView = UIView()
-        selView.backgroundColor = UIColor(white: 0.15, alpha: 1)
-        cell.selectedBackgroundView = selView
+        let cell = tableView.dequeueReusableCell(withIdentifier: ChannelCell.reuseId, for: indexPath) as! ChannelCell
+        cell.configure(with: channels[indexPath.row])
         return cell
     }
 
@@ -123,14 +99,58 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         let vc = ChannelVC(channelId: channel.id, name: channel.name)
         navigationController?.pushViewController(vc, animated: true)
     }
+}
 
-    private func placeholderImage() -> UIImage? {
-        let size = CGSize(width: 40, height: 40)
-        UIGraphicsBeginImageContextWithOptions(size, false, UIScreen.main.scale)
-        UIColor(white: 0.15, alpha: 1).setFill()
-        UIRectFill(CGRect(origin: .zero, size: size))
-        let img = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return img
+// MARK: - ChannelCell
+// Circular avatar (AsyncImageView, with its own loadingURL reuse guard) + channel name.
+// Using a dedicated AsyncImageView — not the cell's built-in imageView + the unguarded static
+// loadCell — is what keeps the right avatar on the right row while scrolling/reusing.
+
+private class ChannelCell: UITableViewCell {
+
+    static let reuseId = "ChannelCell"
+
+    private let avatar = AsyncImageView()
+    private let nameLbl = UILabel()
+    private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = bg
+        accessoryType = .disclosureIndicator
+
+        avatar.frame = CGRect(x: 12, y: 8, width: 40, height: 40)
+        avatar.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        avatar.layer.cornerRadius = 20
+        avatar.clipsToBounds = true
+        avatar.contentMode = .scaleAspectFill
+        contentView.addSubview(avatar)
+
+        nameLbl.backgroundColor = .clear
+        nameLbl.textColor = UIColor(white: 0.95, alpha: 1)
+        nameLbl.font = UIFont.systemFont(ofSize: 15)
+        contentView.addSubview(nameLbl)
+
+        let sel = UIView()
+        sel.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        selectedBackgroundView = sel
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(with channel: Channel) {
+        nameLbl.text = channel.name.isEmpty ? channel.id : channel.name
+        if channel.thumbnailURL.isEmpty {
+            avatar.cancel()
+            avatar.image = nil
+        } else {
+            avatar.load(url: channel.thumbnailURL)   // load(url:) guards stale completions
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        nameLbl.frame = CGRect(x: 64, y: 0, width: contentView.bounds.width - 64 - 16,
+                               height: contentView.bounds.height)
     }
 }

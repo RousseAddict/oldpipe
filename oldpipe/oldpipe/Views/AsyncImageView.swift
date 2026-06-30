@@ -105,4 +105,15 @@ class AsyncImageView: UIImageView {
     private static func bitmapCost(_ image: UIImage) -> Int {
         Int(image.size.width * image.scale * image.size.height * image.scale) * 4
     }
+
+    // MARK: - Cache purge (Settings → Reset Cache)
+    // Clears decoded images from memory and every cached thumbnail on disk.
+    static func purgeCache() {
+        cache.removeAllObjects()
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: diskCacheDir) {
+            for f in files {
+                try? FileManager.default.removeItem(atPath: (diskCacheDir as NSString).appendingPathComponent(f))
+            }
+        }
+    }
 }

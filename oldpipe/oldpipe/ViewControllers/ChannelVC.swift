@@ -143,6 +143,9 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                     self.avatarURL = c.thumbnailURL
                     self.avatarView?.load(url: c.thumbnailURL)
                 }
+                // Keep the stored subscription avatar fresh (heals blank icons elsewhere).
+                SubscriptionManager.updateThumbnail(channelId: self.channelId,
+                                                    thumbnailURL: c.thumbnailURL, name: c.name)
             }
             self.statusLabel?.isHidden = !vids.isEmpty
             if vids.isEmpty { self.statusLabel?.text = "No videos found" }

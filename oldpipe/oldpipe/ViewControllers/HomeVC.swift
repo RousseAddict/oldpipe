@@ -25,6 +25,38 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
     private let accent = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
 
+    // MARK: - Feed cache (persisted) — avoids re-fetching every subscribed channel on each launch
+    private static let feedCacheKey = "home_feed_cache"
+    private static let feedCacheSubsKey = "home_feed_cache_subs"
+    private static let feedCacheTimeKey = "home_feed_cache_time"
+    private static let feedCacheTTL: TimeInterval = 1800  // 30 min — older cache refetches
+
+    // Wipe the cached feed (Settings → Reset Cache). Subscriptions/playlists are untouched.
+    static func clearFeedCache() {
+        UserDefaults.standard.removeObject(forKey: feedCacheKey)
+        UserDefaults.standard.removeObject(forKey: feedCacheSubsKey)
+        UserDefaults.standard.removeObject(forKey: feedCacheTimeKey)
+        UserDefaults.standard.synchronize()
+    }
+
+    // Return cached videos only if they were built from exactly this sub set and aren't stale.
+    private static func loadFeedCache(for ids: Set<String>) -> [Video]? {
+        let cachedSubs = Set((UserDefaults.standard.array(forKey: feedCacheSubsKey) as? [String]) ?? [])
+        guard cachedSubs == ids else { return nil }
+        let age = Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: feedCacheTimeKey)
+        guard age >= 0, age < feedCacheTTL else { return nil }
+        guard let dicts = UserDefaults.standard.array(forKey: feedCacheKey) as? [[String: Any]] else { return nil }
+        let vids = dicts.compactMap { Video.from(dict: $0) }
+        return vids.isEmpty ? nil : vids
+    }
+
+    private static func saveFeedCache(_ videos: [Video], subs ids: Set<String>) {
+        UserDefaults.standard.set(videos.map { $0.toDict() }, forKey: feedCacheKey)
+        UserDefaults.standard.set(Array(ids), forKey: feedCacheSubsKey)
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: feedCacheTimeKey)
+        UserDefaults.standard.synchronize()
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "oldpipe"
@@ -216,6 +248,15 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // Dirty flag: skip refetch if the subscription set is unchanged.
         guard ids != builtChannelIds, !isLoading else { return }
         builtChannelIds = ids
+
+        // Persisted cache: serve the saved feed instantly (no network) if it was built from
+        // this exact sub set and is still fresh. Pull-to-refresh bypasses this.
+        if let cached = HomeVC.loadFeedCache(for: ids) {
+            videos = cached
+            statusLabel?.isHidden = !cached.isEmpty
+            tableView?.reloadData()
+            return
+        }
         loadFeed(channels: subs)
     }
 
@@ -246,8 +287,14 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         var remaining = channels.count
 
         for (idx, channel) in channels.enumerated() {
-            YoutubeAPI.getChannelVideos(channelId: channel.id) { [weak self] vids, _, _ in
+            YoutubeAPI.getChannelVideos(channelId: channel.id) { [weak self] vids, fresh, _ in
                 guard let self = self else { return }
+                // Heal the stored avatar/name from the fresh channel result (fixes blank
+                // icons in ManageSubscriptionsVC for subs saved before their avatar was known).
+                if let c = fresh {
+                    SubscriptionManager.updateThumbnail(channelId: channel.id,
+                                                        thumbnailURL: c.thumbnailURL, name: c.name)
+                }
                 // Keep newest few per channel (channel browse returns newest-first).
                 collected[idx] = Array(vids.prefix(6))
                 remaining -= 1
@@ -272,6 +319,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // Sort latest-first using the relative "published" text (e.g. "3 days ago").
         merged.sort { HomeVC.approxAge($0.publishedText) < HomeVC.approxAge($1.publishedText) }
         videos = merged
+        HomeVC.saveFeedCache(merged, subs: builtChannelIds)
         isLoading = false
         refreshControl?.endRefreshing()
         statusLabel?.isHidden = !merged.isEmpty
