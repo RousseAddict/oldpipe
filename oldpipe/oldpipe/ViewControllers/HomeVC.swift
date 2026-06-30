@@ -110,6 +110,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
         let items: [(String, Selector)] = [
             ("Subscriptions", #selector(menuSubscriptions)),
+            ("Playlists", #selector(menuPlaylists)),
             ("Downloads", #selector(menuDownloads))
         ]
         var y: CGFloat = 110
@@ -175,6 +176,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     @objc private func menuSubscriptions() {
         closeMenu()
         navigationController?.pushViewController(ManageSubscriptionsVC(), animated: true)
+    }
+
+    @objc private func menuPlaylists() {
+        closeMenu()
+        navigationController?.pushViewController(PlaylistsVC(), animated: true)
     }
 
     @objc private func menuDownloads() {

@@ -10,6 +10,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
     private var incomplete: Set<String> = []       // ids of partial (unfinished) downloads
     private var playedFrac: [String: CGFloat] = [:] // resume-position / duration, for the progress bar
     private var didSetupUI = false
+    private var pollTimer: Timer?   // refreshes rows while a download is in flight
 
     private lazy var tableView: UITableView = {
         let tv = UITableView()
@@ -47,6 +48,26 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
             setupUI()
         }
         reload()
+        startPollTimer()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    // Poll on .common so it fires during scroll tracking. Reloads only while a download is
+    // in flight (and not editing), so a manager-owned download's % updates live.
+    private func startPollTimer() {
+        pollTimer?.invalidate()
+        let t = Timer(timeInterval: 0.5, target: DownloadsPollProxy { [weak self] in
+            guard let self = self, !self.tableView.isEditing else { return }
+            let active = self.videos.contains { DownloadManager.isDownloading($0.id) }
+            if active { self.reload() }
+        }, selector: #selector(DownloadsPollProxy.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        pollTimer = t
     }
 
     private func setupUI() {
@@ -103,11 +124,19 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         cell.detailTextLabel?.font = UIFont.systemFont(ofSize: 12)
 
         cell.textLabel?.text = video.title
+        let isDownloading = DownloadManager.isDownloading(video.id)
         let isPartial = incomplete.contains(video.id)
         let sz = sizeText[video.id] ?? ""
-        let status = isPartial ? ("Incomplete" + (sz.isEmpty ? "" : " (\(sz))")) : sz
-        cell.detailTextLabel?.textColor = isPartial
-            ? UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)   // amber for partial
+        let status: String
+        if isDownloading {
+            status = "Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%"
+        } else if isPartial {
+            status = "Incomplete" + (sz.isEmpty ? "" : " (\(sz))")
+        } else {
+            status = sz
+        }
+        cell.detailTextLabel?.textColor = (isDownloading || isPartial)
+            ? UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)   // amber for in-progress / partial
             : UIColor(white: 0.55, alpha: 1)
         cell.detailTextLabel?.text = [video.channelName, status]
             .filter { !$0.isEmpty }.joined(separator: " • ")
@@ -216,4 +245,12 @@ private class DownloadCell: UITableViewCell {
         progressFill.frame = CGRect(x: 0, y: 0, width: b.width * min(1, playedFraction), height: barH)
         iv.bringSubviewToFront(progressTrack)
     }
+}
+
+// MARK: - Timer helper (avoids retain cycles with the poll timer on iOS 6)
+
+private class DownloadsPollProxy: NSObject {
+    let block: () -> Void
+    init(_ block: @escaping () -> Void) { self.block = block }
+    @objc func fire() { block() }
 }

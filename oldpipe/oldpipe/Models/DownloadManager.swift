@@ -74,6 +74,32 @@ class DownloadManager {
         UserDefaults.standard.synchronize()
     }
 
+    // MARK: - Download lifecycle (manager-owned, so a transfer survives navigation)
+
+    // id → latest progress 0..1 for an in-flight download. Touched only on the main thread
+    // (CurlFetcher dispatches both its progress and completion callbacks to main), so no lock.
+    private static var inFlight: [String: Float] = [:]
+
+    static func isDownloading(_ videoId: String) -> Bool { return inFlight[videoId] != nil }
+    static func progress(for videoId: String) -> Float { return inFlight[videoId] ?? 0 }
+
+    // Owns the whole transfer + completion. Because the manager (not a VC) holds the
+    // completion, the download still registers as complete after you navigate away.
+    // No-op if this id is already downloading.
+    static func startDownload(_ video: Video, url: String) {
+        if inFlight[video.id] != nil { return }
+        let path = filePath(for: video.id)
+        try? FileManager.default.removeItem(atPath: path)
+        registerPartial(video)            // visible (flagged incomplete) while in progress
+        inFlight[video.id] = 0
+        CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
+            inFlight[video.id] = p
+        }) { success in
+            inFlight[video.id] = nil
+            if success { register(video) } // on failure the partial entry remains (Incomplete)
+        }
+    }
+
     // MARK: - Resume playback position (seconds)
 
     private static func positionsDict() -> [String: Any] {

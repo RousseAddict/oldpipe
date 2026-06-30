@@ -7,11 +7,14 @@ import AVFoundation
 // disappear it detaches the layer (does NOT stop playback). Audio session, Now Playing
 // metadata, remote-control transport, and resume persistence all live in the singleton.
 
-class VideoPlayerVC: UIViewController {
+class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegate {
 
     private let video: Video
     private var streams: [VideoStream] = []
     private var didRequestStreams = false
+
+    // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
+    private var pendingPlaylists: [Playlist] = []
 
     private var sp: VideoPlayer { return VideoPlayer.shared }
 
@@ -25,6 +28,8 @@ class VideoPlayerVC: UIViewController {
     private var metaLabel: UILabel?
     private var videoContainer: UIView?
     private var downloadBtn: UIButton?
+    private var shareBtn: UIButton?
+    private var addPlaylistBtn: UIButton?
     private var fsOverlay: UIView?
 
     // Playback controls (play/pause + scrubber)
@@ -79,6 +84,14 @@ class VideoPlayerVC: UIViewController {
         } else if !didRequestStreams {
             loadStreams()
         }
+
+        // A download started here may still be running in the manager after we navigated
+        // away and back — reattach its progress UI.
+        if DownloadManager.isDownloading(video.id) {
+            downloadBtn?.isEnabled = false
+            downloadBtn?.setTitle("Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%...", for: .normal)
+            observeDownload(autoPlay: false)
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -87,6 +100,7 @@ class VideoPlayerVC: UIViewController {
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
         if fsOverlay != nil { exitFullscreen() }
         // Detach the shared layer — do NOT stop. Playback (audio) continues; the mini bar
         // takes over the UI. The layer is reattached on the next appear.
@@ -280,6 +294,34 @@ class VideoPlayerVC: UIViewController {
         y += 44 + 12
         updateDownloadButton()
 
+        // Share + Add-to-playlist row (two equal buttons)
+        let gap: CGFloat = 10
+        let halfW = (w - padding * 2 - gap) / 2
+        let secondaryBg = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
+
+        let share = UIButton(type: .custom)
+        share.frame = CGRect(x: padding, y: y, width: halfW, height: 44)
+        share.layer.cornerRadius = 6
+        share.backgroundColor = secondaryBg
+        share.setTitle("Share", for: .normal)
+        share.setTitleColor(.white, for: .normal)
+        share.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        share.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
+        sv.addSubview(share)
+        shareBtn = share
+
+        let addPl = UIButton(type: .custom)
+        addPl.frame = CGRect(x: padding + halfW + gap, y: y, width: halfW, height: 44)
+        addPl.layer.cornerRadius = 6
+        addPl.backgroundColor = secondaryBg
+        addPl.setTitle("+ Playlist", for: .normal)
+        addPl.setTitleColor(.white, for: .normal)
+        addPl.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        addPl.addTarget(self, action: #selector(addToPlaylistTapped), for: .touchUpInside)
+        sv.addSubview(addPl)
+        addPlaylistBtn = addPl
+        y += 44 + 12
+
         sv.contentSize = CGSize(width: w, height: y + 20)
     }
 
@@ -299,6 +341,101 @@ class VideoPlayerVC: UIViewController {
             downloadBtn?.isEnabled = true
             downloadBtn?.backgroundColor = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
         }
+    }
+
+    // MARK: - Share
+
+    private func shareURL() -> String {
+        return "https://www.youtube.com/watch?v=\(video.id)"
+    }
+
+    @objc private func shareTapped() {
+        // UIActionSheet (NOT UIActivityViewController) — iOS-6-reliable; matches our pattern.
+        // Build buttons explicitly (the variadic otherButtonTitles: convenience init crashes
+        // on the 5.1.5 runtime — same reason addToPlaylistTapped builds buttons one by one).
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = shareURL()
+        sheet.addButton(withTitle: "Copy Link")
+        sheet.addButton(withTitle: "Open in Safari")
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 1
+        sheet.show(in: view)
+    }
+
+    // MARK: - Add to playlist
+
+    @objc private func addToPlaylistTapped() {
+        pendingPlaylists = PlaylistManager.all()
+        // Build buttons explicitly: [playlist…] then "New Playlist…" then "Cancel".
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Add to playlist"
+        for pl in pendingPlaylists { sheet.addButton(withTitle: pl.name) }
+        sheet.addButton(withTitle: "New Playlist\u{2026}")
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 2
+        sheet.show(in: view)
+    }
+
+    private func promptNewPlaylist() {
+        let alert = UIAlertView()
+        alert.delegate = self
+        alert.title = "New Playlist"
+        alert.message = "Enter a name"
+        alert.alertViewStyle = .plainTextInput
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Create")
+        alert.cancelButtonIndex = 0
+        alert.show()
+    }
+
+    // Briefly flash a button's title to confirm an action, then revert.
+    private func flash(_ btn: UIButton?, _ text: String, revertTo: String) {
+        btn?.setTitle(text, for: .normal)
+        let t = Timer(timeInterval: 1.5, target: BlockTarget { [weak btn] in
+            btn?.setTitle(revertTo, for: .normal)
+        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    // MARK: - UIActionSheetDelegate
+
+    func actionSheet(_ actionSheet: UIActionSheet, clickedButtonAt buttonIndex: Int) {
+        if actionSheet.tag == 1 {
+            // Compare titles (robust to button-index ordering across iOS versions).
+            switch actionSheet.buttonTitle(at: buttonIndex) {
+            case "Copy Link":
+                UIPasteboard.general.string = shareURL()
+                flash(shareBtn, "Copied \u{2713}", revertTo: "Share")
+            case "Open in Safari":
+                if let u = URL(string: shareURL()) { UIApplication.shared.openURL(u) }
+            default:
+                break
+            }
+        } else if actionSheet.tag == 2 {
+            if buttonIndex < pendingPlaylists.count {
+                let pl = pendingPlaylists[buttonIndex]
+                PlaylistManager.add(video: video, to: pl.id)
+                flash(addPlaylistBtn, "Added \u{2713}", revertTo: "+ Playlist")
+            } else if actionSheet.buttonTitle(at: buttonIndex) == "New Playlist\u{2026}" {
+                promptNewPlaylist()
+            }
+        }
+    }
+
+    // MARK: - UIAlertViewDelegate (new-playlist name entry)
+
+    func alertView(_ alertView: UIAlertView, clickedButtonAt buttonIndex: Int) {
+        guard buttonIndex == 1 else { return }   // 0 = Cancel, 1 = Create
+        let name = (alertView.textField(at: 0)?.text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        let pl = PlaylistManager.create(name: name)
+        PlaylistManager.add(video: video, to: pl.id)
+        flash(addPlaylistBtn, "Added \u{2713}", revertTo: "+ Playlist")
     }
 
     // MARK: - Playback controls UI
@@ -584,25 +721,36 @@ class VideoPlayerVC: UIViewController {
         objc_setAssociatedObject(self, &timerKey, timer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
-    // Download to persistent storage, register for offline, optionally play when done.
+    // Hand the transfer to DownloadManager (which owns the completion), then poll for UI.
+    // Because the manager — not this VC — holds the curl completion, the download keeps
+    // running and registers as complete even after this VC is popped.
     private func download(url: String, autoPlay: Bool) {
-        let path = DownloadManager.filePath(for: video.id)
-        try? FileManager.default.removeItem(atPath: path)
-        DownloadManager.registerPartial(video)   // visible in Downloads while in progress / if it fails
+        DownloadManager.startDownload(video, url: url)
+        observeDownload(autoPlay: autoPlay)
+    }
 
-        CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { [weak self] p in
-            self?.statusLabel?.text = "Downloading \(Int(p * 100))%..."
-            if !autoPlay { self?.downloadBtn?.setTitle("Downloading \(Int(p * 100))%...", for: .normal) }
-        }) { [weak self] success in
+    // VC-owned poll timer that mirrors the manager-owned download's state into the UI.
+    // Safe to lose (it's torn down on disappear) — the transfer itself lives in the manager.
+    private func observeDownload(autoPlay: Bool) {
+        if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
+        let t = Timer(timeInterval: 0.5, target: BlockTarget { [weak self] in
             guard let self = self else { return }
-            if success {
-                DownloadManager.register(self.video)
+            if DownloadManager.isDownloading(self.video.id) {
+                let pct = Int(DownloadManager.progress(for: self.video.id) * 100)
+                self.statusLabel?.text = "Downloading \(pct)%..."
+                self.statusLabel?.isHidden = false
+                if !autoPlay { self.downloadBtn?.setTitle("Downloading \(pct)%...", for: .normal) }
+                return
+            }
+            // Transfer finished (success or failure) — stop polling and resolve the UI.
+            if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
+            if DownloadManager.isDownloaded(self.video.id) {
                 self.updateDownloadButton()
-                if autoPlay {
+                if autoPlay && !self.sp.isActive(self.video.id) {
                     self.statusLabel?.isHidden = true
                     self.thumbView?.isHidden = true
-                    self.startPlayback(url: URL(fileURLWithPath: path), isLocal: true)
-                } else {
+                    self.startPlayback(url: URL(fileURLWithPath: DownloadManager.filePath(for: self.video.id)), isLocal: true)
+                } else if !autoPlay {
                     self.statusLabel?.text = "Saved for offline"
                     self.statusLabel?.isHidden = false
                 }
@@ -612,7 +760,9 @@ class VideoPlayerVC: UIViewController {
                 self.playBtn?.isHidden = false
                 self.updateDownloadButton()
             }
-        }
+        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        objc_setAssociatedObject(self, &downloadPollKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     // MARK: - Fullscreen
@@ -734,6 +884,7 @@ class VideoPlayerVC: UIViewController {
 
 private var timerKey = "timerKey"
 private var progressTimerKey = "progressTimerKey"
+private var downloadPollKey = "downloadPollKey"
 
 private class BlockTarget: NSObject {
     let block: () -> Void
