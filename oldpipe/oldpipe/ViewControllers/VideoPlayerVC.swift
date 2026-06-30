@@ -16,6 +16,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
     private var pendingPlaylists: [Playlist] = []
 
+    // Related videos (appended below the action buttons once fetched).
+    private var relatedVideos: [Video] = []
+    private var didRequestRelated = false
+    private var relatedAnchorY: CGFloat = 0
+    private var relatedRowViews: [UIView] = []
+
     private var sp: VideoPlayer { return VideoPlayer.shared }
 
     // UI
@@ -39,7 +45,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var currentTimeLabel: UILabel?
     private var durationLabel: UILabel?
     private var fsButton: UIButton?
-    private var fsCloseBtn: UIButton?
     private var isScrubbing = false
     private var fsAngle: CGFloat = CGFloat(Double.pi / 2)
     private var fsActive = false
@@ -92,6 +97,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             downloadBtn?.setTitle("Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%...", for: .normal)
             observeDownload(autoPlay: false)
         }
+
+        // Fetch related videos immediately on open (once per VC instance).
+        if !didRequestRelated { loadRelated() }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -171,7 +179,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             } else {
                 // Already fullscreen — just re-orient to the new landscape side.
                 fsOverlay?.transform = CGAffineTransform(rotationAngle: angle)
-                positionCloseButton()
             }
         } else if fsOverlay != nil {
             exitFullscreen()
@@ -322,6 +329,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         addPlaylistBtn = addPl
         y += 44 + 12
 
+        // Related videos get appended below this point once fetched (loadRelated).
+        relatedAnchorY = y
         sv.contentSize = CGSize(width: w, height: y + 20)
     }
 
@@ -341,6 +350,128 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             downloadBtn?.isEnabled = true
             downloadBtn?.backgroundColor = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
         }
+    }
+
+    // MARK: - Related videos
+
+    private func loadRelated() {
+        didRequestRelated = true
+        YoutubeAPI.getRelated(videoId: video.id) { [weak self] vids in
+            guard let self = self else { return }
+            self.relatedVideos = Array(vids.prefix(12))
+            self.buildRelatedSection()
+        }
+    }
+
+    // Rebuild the related list below the action buttons and resize the scroll content.
+    private func buildRelatedSection() {
+        guard let sv = scrollView else { return }
+        for v in relatedRowViews { v.removeFromSuperview() }
+        relatedRowViews.removeAll()
+
+        let w = sv.bounds.width
+        var y = relatedAnchorY
+
+        guard !relatedVideos.isEmpty else {
+            sv.contentSize = CGSize(width: w, height: y + 20)
+            return
+        }
+
+        let padding: CGFloat = 12
+
+        // Section separator + header
+        let sep = UIView(frame: CGRect(x: 0, y: y, width: w, height: 0.5))
+        sep.backgroundColor = UIColor(white: 0.2, alpha: 1)
+        sv.addSubview(sep)
+        relatedRowViews.append(sep)
+        y += 12
+
+        let header = UILabel()
+        header.backgroundColor = .clear
+        header.textColor = UIColor(white: 0.95, alpha: 1)
+        header.font = UIFont.boldSystemFont(ofSize: 16)
+        header.text = "Related videos"
+        header.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 22)
+        sv.addSubview(header)
+        relatedRowViews.append(header)
+        y += 30
+
+        for (i, v) in relatedVideos.enumerated() {
+            let row = makeRelatedRow(v, index: i, width: w)
+            row.frame = CGRect(x: 0, y: y, width: w, height: 80)
+            sv.addSubview(row)
+            relatedRowViews.append(row)
+            y += 80
+        }
+
+        sv.contentSize = CGSize(width: w, height: y + 80)   // +80 clears the mini player bar
+    }
+
+    private func makeRelatedRow(_ v: Video, index: Int, width w: CGFloat) -> UIView {
+        let padding: CGFloat = 12
+        let row = UIView()
+
+        let thumbW: CGFloat = 120
+        let thumbH: CGFloat = 68
+        let thumb = AsyncImageView(frame: CGRect(x: padding, y: 6, width: thumbW, height: thumbH))
+        thumb.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        thumb.contentMode = .scaleAspectFill
+        thumb.clipsToBounds = true
+        thumb.layer.cornerRadius = 4
+        if !v.thumbnailURL.isEmpty { thumb.load(url: v.thumbnailURL) }
+        row.addSubview(thumb)
+
+        if !v.durationText.isEmpty {
+            let dur = UILabel()
+            dur.backgroundColor = UIColor(white: 0, alpha: 0.75)
+            dur.textColor = .white
+            dur.font = UIFont.boldSystemFont(ofSize: 10)
+            dur.textAlignment = .center
+            dur.text = " \(v.durationText) "
+            let dW = dur.sizeThatFits(CGSize(width: 100, height: 16)).width + 6
+            dur.frame = CGRect(x: thumb.frame.maxX - dW - 4, y: thumb.frame.maxY - 18, width: dW, height: 14)
+            dur.layer.cornerRadius = 2
+            dur.clipsToBounds = true
+            row.addSubview(dur)
+        }
+
+        let textX = thumbW + padding + 8
+        let textW = w - textX - padding
+
+        let titleL = UILabel()
+        titleL.backgroundColor = .clear
+        titleL.textColor = UIColor(white: 0.95, alpha: 1)
+        titleL.font = UIFont.systemFont(ofSize: 13)
+        titleL.numberOfLines = 2
+        titleL.text = v.title
+        titleL.frame = CGRect(x: textX, y: 6, width: textW, height: 34)
+        row.addSubview(titleL)
+
+        let subParts = [v.channelName, v.viewCountText, v.publishedText].filter { !$0.isEmpty }
+        let subL = UILabel()
+        subL.backgroundColor = .clear
+        subL.textColor = UIColor(white: 0.5, alpha: 1)
+        subL.font = UIFont.systemFont(ofSize: 11)
+        subL.numberOfLines = 2
+        subL.text = subParts.joined(separator: " • ")
+        subL.frame = CGRect(x: textX, y: 42, width: textW, height: 30)
+        row.addSubview(subL)
+
+        let tapBtn = UIButton(type: .custom)
+        tapBtn.frame = CGRect(x: 0, y: 0, width: w, height: 80)
+        tapBtn.backgroundColor = .clear
+        tapBtn.tag = index
+        tapBtn.addTarget(self, action: #selector(relatedRowTapped(_:)), for: .touchUpInside)
+        row.addSubview(tapBtn)
+
+        return row
+    }
+
+    @objc private func relatedRowTapped(_ sender: UIButton) {
+        let idx = sender.tag
+        guard idx >= 0, idx < relatedVideos.count else { return }
+        let vc = VideoPlayerVC(video: relatedVideos[idx])
+        navigationController?.pushViewController(vc, animated: true)
     }
 
     // MARK: - Share
@@ -810,37 +941,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         overlay.layer.addSublayer(pLayer)
         CATransaction.commit()
 
-        let close = UIButton(type: .custom)
-        close.bounds = CGRect(x: 0, y: 0, width: 58, height: 36)
-        close.backgroundColor = UIColor(white: 0, alpha: 0.5)
-        close.layer.cornerRadius = 6
-        close.setTitle("Close", for: .normal)
-        close.setTitleColor(.white, for: .normal)
-        close.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
-        close.addTarget(self, action: #selector(fullscreenTapped), for: .touchUpInside)
-        overlay.addSubview(close)
-        fsCloseBtn = close
-        positionCloseButton()
-
         // Move the controls bar into the (rotated) overlay so it's usable in fullscreen.
         if let bar = controlsView, !bar.isHidden {
             let barH: CGFloat = 40
             bar.frame = CGRect(x: 0, y: overlay.bounds.height - barH, width: overlay.bounds.width, height: barH)
             overlay.addSubview(bar)
             layoutControls(width: overlay.bounds.width)
-        }
-    }
-
-    // Keep the Close button at the viewer's top-right for either landscape side.
-    private func positionCloseButton() {
-        guard let overlay = fsOverlay, let close = fsCloseBtn else { return }
-        if fsAngle < 0 {
-            // landscapeRight — viewer top-right maps to overlay-local bottom-left
-            close.center = CGPoint(x: 16 + close.bounds.width / 2,
-                                   y: overlay.bounds.height - 16 - close.bounds.height / 2)
-        } else {
-            close.center = CGPoint(x: overlay.bounds.width - 16 - close.bounds.width / 2,
-                                   y: 16 + close.bounds.height / 2)
         }
     }
 
@@ -876,7 +982,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         overlay.removeFromSuperview()
         fsOverlay = nil
-        fsCloseBtn = nil
     }
 }
 

@@ -132,6 +132,40 @@ class YoutubeAPI {
         }
     }
 
+    // MARK: - Related videos (Next endpoint)
+
+    // Related ("Up next") videos for a watch page. WEB client returns the related panel
+    // under twoColumnWatchNextResults.secondaryResults as lockupViewModel items.
+    static func getRelated(videoId: String, completion: @escaping ([Video]) -> Void) {
+        let payload = body(client: webClient, extra: ["videoId": videoId])
+        guard let jsonStr = toJSON(payload) else { completion([]); return }
+        let url = "\(baseURL)/next?prettyPrint=false"
+        CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
+                             userAgent: webUserAgent, timeout: 30) { data in
+            guard let data = data else { completion([]); return }
+            parseQueue.async {
+                let results = parseRelated(data, excludeId: videoId)
+                DispatchQueue.main.async { completion(results) }
+            }
+        }
+    }
+
+    private static func parseRelated(_ data: Data, excludeId: String) -> [Video] {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            return []
+        }
+        captureVisitorData(root)
+        // The related panel lives under the secondaryResults column; walking just that
+        // subtree avoids picking up the primary (currently-playing) video's own renderer.
+        let twoCol = dict(dict(root["contents"])?["twoColumnWatchNextResults"])
+        let secondary = twoCol?["secondaryResults"]
+        var seen = Set<String>()
+        seen.insert(excludeId)   // never list the video we're already watching
+        var results: [Video] = []
+        collectVideoItems(secondary, fallbackChannelId: "", fallbackChannelName: "", seen: &seen, into: &results)
+        return results
+    }
+
     // Fetch a visitor identity token via a lightweight WEB search call.
     private static func bootstrapVisitorData(_ done: @escaping () -> Void) {
         let payload = body(client: webClient, extra: ["query": "youtube"])
@@ -257,9 +291,11 @@ class YoutubeAPI {
         let meta = dict(dict(lm["metadata"])?["lockupMetadataViewModel"])
         let title = str(dict(meta?["title"])?["content"]) ?? ""
 
-        // metadataRows → parts are typically [views, published-date]
+        // metadataRows: row 0 is the channel name; a later row is [views, published-date].
+        // Any part that's neither a view-count nor a relative date is taken as the channel.
         var views = ""
         var published = ""
+        var channel = ""
         if let rows = arr(dict(dict(meta?["metadata"])?["contentMetadataViewModel"])?["metadataRows"]) {
             for row in rows {
                 if let parts = arr(row["metadataParts"]) {
@@ -269,6 +305,8 @@ class YoutubeAPI {
                             if views.isEmpty { views = t }
                         } else if t.contains("ago") || t.contains("Streamed") {
                             if published.isEmpty { published = t }
+                        } else if channel.isEmpty {
+                            channel = t
                         }
                     }
                 }
@@ -278,10 +316,28 @@ class YoutubeAPI {
         var duration = ""
         findDurationBadge(lm["contentImage"], into: &duration)
 
+        // Prefer the page fallback (e.g. on a channel page every video shares one channel);
+        // otherwise use the channel parsed from the lockup (the related-videos case).
+        let channelName = fallbackChannelName.isEmpty ? channel : fallbackChannelName
+        var channelId = fallbackChannelId
+        if channelId.isEmpty { channelId = findChannelBrowseId(lm) ?? "" }
+
         let thumbURL = "https://i.ytimg.com/vi/\(videoId)/mqdefault.jpg"
-        return Video(id: videoId, title: title, channelName: fallbackChannelName, channelId: fallbackChannelId,
+        return Video(id: videoId, title: title, channelName: channelName, channelId: channelId,
                      thumbnailURL: thumbURL, durationText: duration, viewCountText: views,
                      publishedText: published)
+    }
+
+    // Find the first browseId that looks like a channel id (UC…) anywhere in a subtree.
+    // In a lockupViewModel the only UC id is the channel's (under the avatar's onTap command).
+    private static func findChannelBrowseId(_ obj: Any?) -> String? {
+        if let d = obj as? [String: Any] {
+            if let bid = str(d["browseId"]), bid.hasPrefix("UC") { return bid }
+            for (_, v) in d { if let r = findChannelBrowseId(v) { return r } }
+        } else if let a = obj as? [Any] {
+            for v in a { if let r = findChannelBrowseId(v) { return r } }
+        }
+        return nil
     }
 
     // Find the first thumbnailBadgeViewModel.text that looks like a duration ("0:30").
