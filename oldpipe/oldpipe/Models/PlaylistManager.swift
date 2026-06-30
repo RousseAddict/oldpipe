@@ -61,6 +61,26 @@ class PlaylistManager {
         }
     }
 
+    // Merge imported playlists into storage (config import). Upsert by id: an existing
+    // playlist keeps its position and gains any videos not already present (de-duplicated,
+    // appended in import order); a playlist with an unknown id is inserted newest-first.
+    static func merge(_ playlists: [Playlist]) {
+        var list = rawList()
+        for pl in playlists {
+            if let idx = list.firstIndex(where: { ($0["id"] as? String) == pl.id }) {
+                var videos = (list[idx]["videos"] as? [[String: Any]]) ?? []
+                let existing = Set(videos.compactMap { $0["id"] as? String })
+                for v in pl.videos where !existing.contains(v.id) {
+                    videos.append(v.toDict())
+                }
+                list[idx]["videos"] = videos
+            } else {
+                list.insert(pl.toDict(), at: 0)
+            }
+        }
+        save(list)
+    }
+
     // MARK: - Private
 
     private static func mutateVideos(of playlistId: String, _ body: (inout [[String: Any]]) -> Void) {

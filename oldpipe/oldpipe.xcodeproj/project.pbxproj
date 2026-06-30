@@ -26,6 +26,7 @@
 		BB000001000000000000BC0A /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0A /* DownloadManager.swift */; };
 		BB000001000000000000BC0B /* DownloadsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0B /* DownloadsVC.swift */; };
 		BB000001000000000000BC17 /* PlaylistDetailVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB17 /* PlaylistDetailVC.swift */; };
+		BB000001000000000000BC18 /* SettingsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB18 /* SettingsVC.swift */; };
 		BB000001000000000000BC0C /* Channel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0C /* Channel.swift */; };
 		BB000001000000000000BC14 /* Playlist.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB14 /* Playlist.swift */; };
 		BB000001000000000000BC0D /* SubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0D /* SubscriptionManager.swift */; };
@@ -79,6 +80,7 @@
 		BB000001000000000000BB0A /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0B /* DownloadsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB17 /* PlaylistDetailVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistDetailVC.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB18 /* SettingsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0C /* Channel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Channel.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB14 /* Playlist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Playlist.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0D /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
@@ -215,6 +217,7 @@
 				BB000001000000000000BB09 /* VideoPlayerVC.swift */,
 				BB000001000000000000BB0B /* DownloadsVC.swift */,
 				BB000001000000000000BB17 /* PlaylistDetailVC.swift */,
+				BB000001000000000000BB18 /* SettingsVC.swift */,
 				BB000001000000000000BB0E /* ChannelVC.swift */,
 				BB000001000000000000BB0F /* HomeVC.swift */,
 				BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */,
@@ -366,6 +369,7 @@
 				BB000001000000000000BC0A /* DownloadManager.swift in Sources */,
 				BB000001000000000000BC0B /* DownloadsVC.swift in Sources */,
 				BB000001000000000000BC17 /* PlaylistDetailVC.swift in Sources */,
+				BB000001000000000000BC18 /* SettingsVC.swift in Sources */,
 				BB000001000000000000BC0C /* Channel.swift in Sources */,
 				BB000001000000000000BC14 /* Playlist.swift in Sources */,
 				BB000001000000000000BC0D /* SubscriptionManager.swift in Sources */,

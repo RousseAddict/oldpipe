@@ -11,6 +11,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
     private var playedFrac: [String: CGFloat] = [:] // resume-position / duration, for the progress bar
     private var didSetupUI = false
     private var pollTimer: Timer?   // refreshes rows while a download is in flight
+    private var wasDownloading = false  // so we reload once more when the last download ends
 
     private lazy var tableView: UITableView = {
         let tv = UITableView()
@@ -64,7 +65,10 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         let t = Timer(timeInterval: 0.5, target: DownloadsPollProxy { [weak self] in
             guard let self = self, !self.tableView.isEditing else { return }
             let active = self.videos.contains { DownloadManager.isDownloading($0.id) }
-            if active { self.reload() }
+            // Reload while active, plus one final time when the last download finishes
+            // (otherwise the row stays stuck on "Downloading…"/"Incomplete").
+            if active || self.wasDownloading { self.reload() }
+            self.wasDownloading = active
         }, selector: #selector(DownloadsPollProxy.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
         pollTimer = t
@@ -88,10 +92,14 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         for v in videos {
             sizeText[v.id] = DownloadManager.fileSizeText(for: v.id)
             if !DownloadManager.isComplete(v.id) { incomplete.insert(v.id) }
-            let dur = DownloadsVC.durationSeconds(v.durationText)
-            if dur > 0 {
-                let f = CGFloat(DownloadManager.position(for: v.id) / dur)
-                playedFrac[v.id] = max(0, min(1, f))
+            if DownloadManager.isWatched(v.id) {
+                playedFrac[v.id] = 1   // fully played → full bar (resume position is cleared)
+            } else {
+                let dur = DownloadsVC.durationSeconds(v.durationText)
+                if dur > 0 {
+                    let f = CGFloat(DownloadManager.position(for: v.id) / dur)
+                    playedFrac[v.id] = max(0, min(1, f))
+                }
             }
         }
         emptyLabel.isHidden = !videos.isEmpty

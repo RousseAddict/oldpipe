@@ -8,6 +8,7 @@ class DownloadManager {
 
     private static let defaultsKey = "downloaded_videos"
     private static let positionsKey = "playback_positions"
+    private static let watchedKey = "watched_videos"
 
     // Documents/downloads — Documents is NOT auto-purged (unlike Caches), so offline
     // content survives. NSSearchPathForDirectoriesInDomains resolved once (static let).
@@ -71,6 +72,7 @@ class DownloadManager {
         list.removeAll { ($0["id"] as? String) == videoId }
         UserDefaults.standard.set(list, forKey: defaultsKey)
         clearPosition(for: videoId)
+        clearWatched(videoId)
         UserDefaults.standard.synchronize()
     }
 
@@ -116,12 +118,36 @@ class DownloadManager {
         var d = positionsDict()
         d[videoId] = seconds
         UserDefaults.standard.set(d, forKey: positionsKey)
+        clearWatched(videoId)   // a mid-video position means it's in progress again
     }
 
     static func clearPosition(for videoId: String) {
         var d = positionsDict()
         d[videoId] = nil
         UserDefaults.standard.set(d, forKey: positionsKey)
+    }
+
+    // MARK: - Watched (fully played to the end)
+
+    // Marked when playback reaches the end (see VideoPlayer). The resume position is
+    // cleared so it replays from the start, but the "watched" flag persists so DownloadsVC
+    // can show a full progress bar. Cleared again as soon as a new mid-video position saves.
+    static func markWatched(_ videoId: String) {
+        clearPosition(for: videoId)
+        var ids = (UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? []
+        if !ids.contains(videoId) { ids.append(videoId) }
+        UserDefaults.standard.set(ids, forKey: watchedKey)
+    }
+
+    static func isWatched(_ videoId: String) -> Bool {
+        let ids = (UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? []
+        return ids.contains(videoId)
+    }
+
+    static func clearWatched(_ videoId: String) {
+        var ids = (UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? []
+        ids.removeAll { $0 == videoId }
+        UserDefaults.standard.set(ids, forKey: watchedKey)
     }
 
     // All videos whose files still exist on disk — complete OR partial.

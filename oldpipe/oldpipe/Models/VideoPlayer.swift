@@ -149,7 +149,7 @@ class VideoPlayer {
         guard let v = currentVideo, DownloadManager.isDownloaded(v.id) else { return }
         let cur = currentSeconds, dur = durationSeconds
         if dur > 0, cur >= dur - 2 {
-            DownloadManager.clearPosition(for: v.id); lastSavedPos = 0
+            DownloadManager.markWatched(v.id); lastSavedPos = 0
         } else if abs(cur - lastSavedPos) >= 5 {
             lastSavedPos = cur; DownloadManager.savePosition(cur, for: v.id)
         }
@@ -159,7 +159,7 @@ class VideoPlayer {
         guard let v = currentVideo, DownloadManager.isDownloaded(v.id) else { return }
         let cur = currentSeconds, dur = durationSeconds
         guard cur > 5 else { return }
-        if dur > 0, cur >= dur - 5 { DownloadManager.clearPosition(for: v.id) }
+        if dur > 0, cur >= dur - 5 { DownloadManager.markWatched(v.id) }
         else { DownloadManager.savePosition(cur, for: v.id) }
     }
 
