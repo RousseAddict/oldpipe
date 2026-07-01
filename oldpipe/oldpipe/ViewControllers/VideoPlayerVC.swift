@@ -169,6 +169,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // fullscreen overlay's rotation so the video fills the screen in landscape.
     @objc private func orientationChanged() {
         guard sp.isActive(video.id) else { return }   // only while a video is loaded
+        // Short (portrait) videos stay portrait — device rotation doesn't drive a
+        // landscape fullscreen for them (fullscreen is entered only via the button).
+        if sp.isPortraitVideo { return }
         switch UIDevice.current.orientation {
         case .landscapeLeft:
             setFullscreen(true, angle: CGFloat(Double.pi / 2))
@@ -1013,10 +1016,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
         if fsOverlay == nil {
-            // Match the current device orientation if it's already landscape.
-            let o = UIDevice.current.orientation
-            let angle: CGFloat = (o == .landscapeRight) ? CGFloat(-Double.pi / 2) : CGFloat(Double.pi / 2)
-            setFullscreen(true, angle: angle)
+            if sp.isPortraitVideo {
+                // Short video → portrait fullscreen, no rotation.
+                setFullscreen(true, angle: 0)
+            } else {
+                // Match the current device orientation if it's already landscape.
+                let o = UIDevice.current.orientation
+                let angle: CGFloat = (o == .landscapeRight) ? CGFloat(-Double.pi / 2) : CGFloat(Double.pi / 2)
+                setFullscreen(true, angle: angle)
+            }
         } else {
             setFullscreen(false, angle: 0)
         }
@@ -1032,9 +1040,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let screen = UIScreen.main.bounds
         let overlay = UIView()
         overlay.backgroundColor = .black
-        overlay.bounds = CGRect(x: 0, y: 0, width: screen.height, height: screen.width)
-        overlay.center = CGPoint(x: screen.midX, y: screen.midY)
-        overlay.transform = CGAffineTransform(rotationAngle: fsAngle)
+        if sp.isPortraitVideo {
+            // Short video: a full portrait overlay, no rotation — fills the upright screen.
+            overlay.bounds = CGRect(x: 0, y: 0, width: screen.width, height: screen.height)
+            overlay.center = CGPoint(x: screen.midX, y: screen.midY)
+            overlay.transform = CGAffineTransform.identity
+        } else {
+            overlay.bounds = CGRect(x: 0, y: 0, width: screen.height, height: screen.width)
+            overlay.center = CGPoint(x: screen.midX, y: screen.midY)
+            overlay.transform = CGAffineTransform(rotationAngle: fsAngle)
+        }
         window.addSubview(overlay)
         fsOverlay = overlay
 

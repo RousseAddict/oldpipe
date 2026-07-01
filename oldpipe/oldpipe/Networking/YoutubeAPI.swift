@@ -122,6 +122,22 @@ class YoutubeAPI {
         }
     }
 
+    // completion: (shorts videos, continuation token for next page or nil)
+    static func getChannelShorts(channelId: String, completion: @escaping ([Video], String?) -> Void) {
+        // params "EgZzaG9ydHPyBgUKA5oBAA%3D%3D" = the channel's "Shorts" tab.
+        let payload = body(client: webClient, extra: ["browseId": channelId, "params": "EgZzaG9ydHPyBgUKA5oBAA%3D%3D"])
+        guard let jsonStr = toJSON(payload) else { completion([], nil); return }
+        let url = "\(baseURL)/browse?prettyPrint=false"
+        CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
+                             userAgent: webUserAgent, timeout: 30) { data in
+            guard let data = data else { completion([], nil); return }
+            parseQueue.async {
+                let result = parseChannelResponse(data, channelId: channelId)
+                DispatchQueue.main.async { completion(result.0, result.2) }
+            }
+        }
+    }
+
     // Fetch the next page of a channel's videos using a continuation token.
     // completion: (more videos, next continuation token or nil)
     static func getChannelContinuation(token: String, channelName: String, completion: @escaping ([Video], String?) -> Void) {
@@ -334,6 +350,34 @@ class YoutubeAPI {
                      publishedText: published)
     }
 
+    // Build a Video from a shortsLockupViewModel (the channel "Shorts" tab format).
+    // Shorts have no duration badge; title/views come from overlayMetadata, and the
+    // videoId lives under the reel-watch tap command.
+    private static func videoFromShortsLockup(_ sm: [String: Any], fallbackChannelId: String, fallbackChannelName: String) -> Video? {
+        // videoId: onTap.innertubeCommand.reelWatchEndpoint.videoId
+        var videoId = ""
+        if let cmd = dict(dict(sm["onTap"])?["innertubeCommand"]),
+           let reel = dict(cmd["reelWatchEndpoint"]),
+           let vid = str(reel["videoId"]), !vid.isEmpty {
+            videoId = vid
+        }
+        if videoId.isEmpty {
+            // Fallback: entityId is "shorts-shelf-item-<videoId>"
+            if let eid = str(sm["entityId"]), let r = eid.range(of: "shorts-shelf-item-") {
+                videoId = String(eid[r.upperBound...])
+            }
+        }
+        guard !videoId.isEmpty else { return nil }
+
+        let overlay = dict(sm["overlayMetadata"])
+        let title = str(dict(overlay?["primaryText"])?["content"]) ?? ""
+        let views = str(dict(overlay?["secondaryText"])?["content"]) ?? ""
+
+        let thumbURL = "https://i.ytimg.com/vi/\(videoId)/mqdefault.jpg"
+        return Video(id: videoId, title: title, channelName: fallbackChannelName, channelId: fallbackChannelId,
+                     thumbnailURL: thumbURL, durationText: "", viewCountText: views, publishedText: "")
+    }
+
     // Find the first browseId that looks like a channel id (UC…) anywhere in a subtree.
     // In a lockupViewModel the only UC id is the channel's (under the avatar's onTap command).
     private static func findChannelBrowseId(_ obj: Any?) -> String? {
@@ -374,6 +418,11 @@ class YoutubeAPI {
                !seen.contains(v.id) {
                 seen.insert(v.id); out.append(v)
             }
+            if let sm = dict(d["shortsLockupViewModel"]),
+               let v = videoFromShortsLockup(sm, fallbackChannelId: fallbackChannelId, fallbackChannelName: fallbackChannelName),
+               !seen.contains(v.id) {
+                seen.insert(v.id); out.append(v)
+            }
             for (_, v) in d {
                 collectVideoItems(v, fallbackChannelId: fallbackChannelId, fallbackChannelName: fallbackChannelName, seen: &seen, into: &out)
             }
@@ -405,6 +454,7 @@ class YoutubeAPI {
                 avatar = tu
             }
             channel = Channel(id: cid, name: channelName, thumbnailURL: avatar)
+            channel?.channelDescription = str(meta["description"]) ?? ""
         }
 
         var seen = Set<String>()

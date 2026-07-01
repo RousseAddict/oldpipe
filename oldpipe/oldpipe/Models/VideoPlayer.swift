@@ -55,6 +55,15 @@ class VideoPlayer {
 
     var isReady: Bool { return item?.status == .readyToPlay }
     var isFailed: Bool { return item?.status == .failed }
+
+    // True when the current video's display size is taller than wide (e.g. a Short).
+    // Uses the asset track's naturalSize + preferredTransform — iOS 4+ safe, unlike
+    // AVPlayerItem.presentationSize / AVPlayerLayer.videoRect (both iOS 7+).
+    var isPortraitVideo: Bool {
+        guard let track = item?.asset.tracks(withMediaType: AVMediaType.video).first else { return false }
+        let size = track.naturalSize.applying(track.preferredTransform)
+        return abs(size.height) > abs(size.width)
+    }
     func isActive(_ videoId: String) -> Bool { return currentVideo?.id == videoId && item != nil }
     var isPlaying: Bool { return (player?.rate ?? 0) > 0 }
 
