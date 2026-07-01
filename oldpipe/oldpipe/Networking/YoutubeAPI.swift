@@ -79,7 +79,8 @@ class YoutubeAPI {
 
     // MARK: - Player (stream URLs + video details)
 
-    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?) -> Void) {
+    // completion: (streams, video details, full description text)
+    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String) -> Void) {
         if cachedVisitorData.isEmpty {
             bootstrapVisitorData { performPlayer(videoId: videoId, completion: completion) }
         } else {
@@ -87,18 +88,18 @@ class YoutubeAPI {
         }
     }
 
-    private static func performPlayer(videoId: String, completion: @escaping ([VideoStream], Video?) -> Void) {
+    private static func performPlayer(videoId: String, completion: @escaping ([VideoStream], Video?, String) -> Void) {
         var client = vrClient
         if !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
         let payload = body(client: client, extra: ["videoId": videoId])
-        guard let jsonStr = toJSON(payload) else { completion([], nil); return }
+        guard let jsonStr = toJSON(payload) else { completion([], nil, ""); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: vrUserAgent, timeout: 30, priority: true) { data in
-            guard let data = data else { completion([], nil); return }
+            guard let data = data else { completion([], nil, ""); return }
             playerParseQueue.async {
-                let (streams, video) = parsePlayerResponse(data, videoId: videoId)
-                DispatchQueue.main.async { completion(streams, video) }
+                let (streams, video, desc) = parsePlayerResponse(data, videoId: videoId)
+                DispatchQueue.main.async { completion(streams, video, desc) }
             }
         }
     }
@@ -446,14 +447,16 @@ class YoutubeAPI {
 
     // MARK: - Player response parsing
 
-    private static func parsePlayerResponse(_ data: Data, videoId: String) -> ([VideoStream], Video?) {
+    private static func parsePlayerResponse(_ data: Data, videoId: String) -> ([VideoStream], Video?, String) {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            return ([], nil)
+            return ([], nil, "")
         }
 
         // Video details
         var video: Video? = nil
+        var description = ""
         if let details = dict(root["videoDetails"]) {
+            description = str(details["shortDescription"]) ?? ""
             let title = str(details["title"]) ?? ""
             let channel = str(details["author"]) ?? ""
             let channelId = str(details["channelId"]) ?? ""
@@ -499,6 +502,6 @@ class YoutubeAPI {
             return ai < bi
         }
 
-        return (streams, video)
+        return (streams, video, description)
     }
 }

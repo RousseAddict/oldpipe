@@ -17,10 +17,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
     private var pendingPlaylists: [Playlist] = []
 
-    // Related videos (appended below the action buttons once fetched).
+    // Everything below the meta line is laid out by relayout() from contentBelowMetaY:
+    // description (below meta) → download button → share row → related videos. The
+    // description and related arrive asynchronously (in either order) and the description
+    // can expand/collapse, so relayout() repositions the action buttons each time.
+    private var contentBelowMetaY: CGFloat = 0
+    private var descriptionText = ""
+    private var descExpanded = false
+    private var descRowViews: [UIView] = []
     private var relatedVideos: [Video] = []
     private var didRequestRelated = false
-    private var relatedAnchorY: CGFloat = 0
     private var relatedRowViews: [UIView] = []
 
     private var sp: VideoPlayer { return VideoPlayer.shared }
@@ -87,6 +93,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // returning from a pushed VC), reattach onto the live playback. Otherwise load.
         if sp.isActive(video.id) {
             showActivePlayback()
+            // Reopened onto live playback (e.g. from the mini bar) — still fetch the
+            // description in the background without disturbing the playing UI.
+            if !didRequestStreams { loadStreams(updateStatus: false) }
         } else if !didRequestStreams {
             loadStreams()
         }
@@ -291,25 +300,24 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             y += 26
         }
 
-        // Download-for-offline button
+        // Everything from here down is positioned by relayout() (description sits directly
+        // below the meta line and pushes the buttons + related down when it loads).
+        contentBelowMetaY = y
+
+        // Download-for-offline button (frame set in relayout).
         let dl = UIButton(type: .custom)
-        dl.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 44)
         dl.layer.cornerRadius = 6
         dl.setTitleColor(.white, for: .normal)
         dl.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
         dl.addTarget(self, action: #selector(downloadTapped), for: .touchUpInside)
         sv.addSubview(dl)
         downloadBtn = dl
-        y += 44 + 12
         updateDownloadButton()
 
-        // Share + Add-to-playlist row (two equal buttons)
-        let gap: CGFloat = 10
-        let halfW = (w - padding * 2 - gap) / 2
+        // Share + Add-to-playlist row (two equal buttons; frames set in relayout).
         let secondaryBg = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
 
         let share = UIButton(type: .custom)
-        share.frame = CGRect(x: padding, y: y, width: halfW, height: 44)
         share.layer.cornerRadius = 6
         share.backgroundColor = secondaryBg
         share.setTitle("Share", for: .normal)
@@ -320,7 +328,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         shareBtn = share
 
         let addPl = UIButton(type: .custom)
-        addPl.frame = CGRect(x: padding + halfW + gap, y: y, width: halfW, height: 44)
         addPl.layer.cornerRadius = 6
         addPl.backgroundColor = secondaryBg
         addPl.setTitle("+ Playlist", for: .normal)
@@ -329,11 +336,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         addPl.addTarget(self, action: #selector(addToPlaylistTapped), for: .touchUpInside)
         sv.addSubview(addPl)
         addPlaylistBtn = addPl
-        y += 44 + 12
 
-        // Related videos get appended below this point once fetched (loadRelated).
-        relatedAnchorY = y
-        sv.contentSize = CGSize(width: w, height: y + 20)
+        relayout()
     }
 
     @objc private func channelTapped() {
@@ -361,27 +365,118 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         YoutubeAPI.getRelated(videoId: video.id) { [weak self] vids in
             guard let self = self else { return }
             self.relatedVideos = Array(vids.prefix(12))
-            self.buildRelatedSection()
+            self.relayout()
         }
     }
 
-    // Rebuild the related list below the action buttons and resize the scroll content.
-    private func buildRelatedSection() {
+    @objc private func descToggleTapped() {
+        descExpanded = !descExpanded
+        relayout()
+    }
+
+    // Lay out everything below the meta line: description → download button → share row →
+    // related videos. Called from setupUI and whenever async content (description, related)
+    // arrives or the description is expanded/collapsed. Repositions the (already-created)
+    // action buttons and re-lays the async sections, then sizes the scroll content once.
+    private func relayout() {
         guard let sv = scrollView else { return }
+        for v in descRowViews { v.removeFromSuperview() }
+        descRowViews.removeAll()
         for v in relatedRowViews { v.removeFromSuperview() }
         relatedRowViews.removeAll()
 
         let w = sv.bounds.width
-        var y = relatedAnchorY
-
-        guard !relatedVideos.isEmpty else {
-            sv.contentSize = CGSize(width: w, height: y + 20)
-            return
-        }
-
         let padding: CGFloat = 12
+        var y = contentBelowMetaY
 
-        // Section separator + header
+        // Description (directly under the meta line).
+        y = buildDescriptionSection(startY: y, width: w)
+
+        // Download button.
+        downloadBtn?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 44)
+        y += 44 + 12
+
+        // Share + add-to-playlist row.
+        let gap: CGFloat = 10
+        let halfW = (w - padding * 2 - gap) / 2
+        shareBtn?.frame = CGRect(x: padding, y: y, width: halfW, height: 44)
+        addPlaylistBtn?.frame = CGRect(x: padding + halfW + gap, y: y, width: halfW, height: 44)
+        y += 44 + 12
+
+        // Related videos.
+        y = buildRelatedRows(startY: y, width: w)
+
+        sv.contentSize = CGSize(width: w, height: y + 80)   // +80 clears the mini player bar
+    }
+
+    // Collapsible description block. Collapsed to 4 lines; a "Show more"/"Show less"
+    // toggle appears only when the text is actually longer than the collapsed cap.
+    private func buildDescriptionSection(startY: CGFloat, width w: CGFloat) -> CGFloat {
+        guard !descriptionText.isEmpty, let sv = scrollView else { return startY }
+        let padding: CGFloat = 12
+        let bodyW = w - padding * 2
+        var y = startY
+
+        let sep = UIView(frame: CGRect(x: 0, y: y, width: w, height: 0.5))
+        sep.backgroundColor = UIColor(white: 0.2, alpha: 1)
+        sv.addSubview(sep); descRowViews.append(sep)
+        y += 12
+
+        let header = UILabel()
+        header.backgroundColor = .clear
+        header.textColor = UIColor(white: 0.95, alpha: 1)
+        header.font = UIFont.boldSystemFont(ofSize: 16)
+        header.text = "Description"
+        header.frame = CGRect(x: padding, y: y, width: bodyW, height: 22)
+        sv.addSubview(header); descRowViews.append(header)
+        y += 30
+
+        let bodyFont = UIFont.systemFont(ofSize: 13)
+        // Measure collapsed (4-line) vs full height to decide whether a toggle is needed.
+        let collapsedH = heightForText(descriptionText, font: bodyFont, width: bodyW, maxLines: 4)
+        let fullH = heightForText(descriptionText, font: bodyFont, width: bodyW, maxLines: 0)
+        let truncated = fullH > collapsedH + 1
+
+        let body = UILabel()
+        body.backgroundColor = .clear
+        body.textColor = UIColor(white: 0.8, alpha: 1)
+        body.font = bodyFont
+        body.numberOfLines = descExpanded ? 0 : 4
+        body.text = descriptionText
+        let bodyH = descExpanded ? fullH : collapsedH
+        body.frame = CGRect(x: padding, y: y, width: bodyW, height: bodyH)
+        sv.addSubview(body); descRowViews.append(body)
+        y += bodyH + 4
+
+        if truncated {
+            let toggle = UIButton(type: .custom)
+            toggle.setTitle(descExpanded ? "Show less" : "Show more", for: .normal)
+            toggle.setTitleColor(UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1), for: .normal)
+            toggle.titleLabel?.font = UIFont.boldSystemFont(ofSize: 13)
+            toggle.contentHorizontalAlignment = .left
+            toggle.frame = CGRect(x: padding, y: y, width: bodyW, height: 24)
+            toggle.addTarget(self, action: #selector(descToggleTapped), for: .touchUpInside)
+            sv.addSubview(toggle); descRowViews.append(toggle)
+            y += 28
+        }
+        y += 6
+        return y
+    }
+
+    private func heightForText(_ text: String, font: UIFont, width: CGFloat, maxLines: Int) -> CGFloat {
+        let l = UILabel()
+        l.font = font
+        l.numberOfLines = maxLines
+        l.text = text
+        return ceil(l.sizeThatFits(CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)).height)
+    }
+
+    // Related-videos list. Returns the y after the last row (or startY if empty).
+    private func buildRelatedRows(startY: CGFloat, width w: CGFloat) -> CGFloat {
+        guard !relatedVideos.isEmpty, let sv = scrollView else { return startY }
+        let padding: CGFloat = 12
+        var y = startY
+
         let sep = UIView(frame: CGRect(x: 0, y: y, width: w, height: 0.5))
         sep.backgroundColor = UIColor(white: 0.2, alpha: 1)
         sv.addSubview(sep)
@@ -405,8 +500,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             relatedRowViews.append(row)
             y += 80
         }
-
-        sv.contentSize = CGSize(width: w, height: y + 80)   // +80 clears the mini player bar
+        return y
     }
 
     private func makeRelatedRow(_ v: Video, index: Int, width w: CGFloat) -> UIView {
@@ -717,22 +811,34 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // MARK: - Stream loading
 
-    private func loadStreams() {
+    // updateStatus == false when called purely to fetch the description while playback
+    // is already live (reopened from the mini bar) — leaves the status label untouched.
+    private func loadStreams(updateStatus: Bool = true) {
         didRequestStreams = true
         // Already downloaded — no network needed, play offline.
         if DownloadManager.isDownloaded(video.id) {
-            statusLabel?.text = "Downloaded \u{2022} tap > to play"
-            statusLabel?.isHidden = false
+            if updateStatus {
+                statusLabel?.text = "Downloaded \u{2022} tap > to play"
+                statusLabel?.isHidden = false
+            }
             return
         }
 
-        statusLabel?.text = "Loading..."
-        statusLabel?.isHidden = false
+        if updateStatus {
+            statusLabel?.text = "Loading..."
+            statusLabel?.isHidden = false
+        }
 
-        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _ in
+        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc in
             guard let self = self else { return }
             self.streams = streams
-            self.statusLabel?.text = streams.isEmpty ? "No streams available" : "Tap > to play"
+            if updateStatus {
+                self.statusLabel?.text = streams.isEmpty ? "No streams available" : "Tap > to play"
+            }
+            if !desc.isEmpty {
+                self.descriptionText = desc
+                self.relayout()
+            }
         }
     }
 
