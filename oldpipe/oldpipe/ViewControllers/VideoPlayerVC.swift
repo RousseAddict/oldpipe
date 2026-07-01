@@ -13,6 +13,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var streams: [VideoStream] = []
     private var didRequestStreams = false
 
+
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
     private var pendingPlaylists: [Playlist] = []
 
@@ -228,8 +229,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         // Status label (loading/error messages)
         let sl = UILabel()
-        sl.backgroundColor = .clear
-        sl.textColor = UIColor(white: 0.7, alpha: 1)
+        // Translucent black plate so the text stays readable over any thumbnail behind it.
+        sl.backgroundColor = UIColor(white: 0, alpha: 0.55)
+        sl.textColor = .white
         sl.textAlignment = .center
         sl.font = UIFont.systemFont(ofSize: 13)
         sl.numberOfLines = 2

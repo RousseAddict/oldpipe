@@ -1,6 +1,7 @@
 #include "curl_bridge.h"
 #include <curl/curl.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 /* Wrapper struct — holds easy handle + header slist so both are freed together */
 typedef struct {
@@ -8,8 +9,34 @@ typedef struct {
     struct curl_slist *headers;
 } CurlBridgeHandle;
 
+/* Shared DNS cache across all easy handles.
+   This libcurl ships with the SYNCHRONOUS name resolver (getaddrinfo), which under concurrent
+   transfers (feed + player at once) stalls hard — a name resolve can block for tens of seconds.
+   A CURLSH with CURL_LOCK_DATA_DNS lets every handle reuse addresses another handle already
+   resolved, so after the feed resolves youtube.com the player does NO getaddrinfo and connects
+   immediately. The lock callbacks (a single mutex) make the shared cache thread-safe — REQUIRED
+   when sharing across threads. */
+static CURLSH *g_share = NULL;
+static pthread_mutex_t g_share_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void curl_bridge_share_lock(CURL *handle, curl_lock_data data,
+                                   curl_lock_access access, void *userptr) {
+    (void)handle; (void)data; (void)access; (void)userptr;
+    pthread_mutex_lock(&g_share_lock);
+}
+static void curl_bridge_share_unlock(CURL *handle, curl_lock_data data, void *userptr) {
+    (void)handle; (void)data; (void)userptr;
+    pthread_mutex_unlock(&g_share_lock);
+}
+
 void curl_bridge_global_init(void) {
     curl_global_init(CURL_GLOBAL_ALL);
+    g_share = curl_share_init();
+    if (g_share) {
+        curl_share_setopt(g_share, CURLSHOPT_LOCKFUNC, curl_bridge_share_lock);
+        curl_share_setopt(g_share, CURLSHOPT_UNLOCKFUNC, curl_bridge_share_unlock);
+        curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+    }
 }
 
 CurlHandle curl_bridge_init(void) {
@@ -17,6 +44,21 @@ CurlHandle curl_bridge_init(void) {
     if (!h) return NULL;
     h->easy = curl_easy_init();
     h->headers = NULL;
+    /* CRITICAL for multi-threaded use: with the synchronous name resolver libcurl times out
+       DNS/connect via SIGALRM/alarm(). We call curl_easy_perform() from several background
+       threads at once (feed + player), so those signal timers race and get lost — a request
+       that must wait on DNS/connect then hangs up to the full CURLOPT_TIMEOUT (~30s). NOSIGNAL
+       disables the signal path so timeouts are handled safely per-handle. Required by libcurl
+       docs whenever perform() runs off the main thread. */
+    if (h->easy) {
+        curl_easy_setopt(h->easy, CURLOPT_NOSIGNAL, 1L);
+        /* With NOSIGNAL the connect phase still needs a bound (CURLOPT_TIMEOUT covers the whole
+           transfer); cap connect at 15s so a stuck connect fails fast instead of dragging out. */
+        curl_easy_setopt(h->easy, CURLOPT_CONNECTTIMEOUT, 15L);
+        /* Use the shared DNS cache (see g_share comment above): once the feed has resolved
+           youtube.com, this handle reuses that address and skips its own getaddrinfo. */
+        if (g_share) curl_easy_setopt(h->easy, CURLOPT_SHARE, g_share);
+    }
     return h;
 }
 

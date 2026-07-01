@@ -16,6 +16,10 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private var statusLabel: UILabel!
     private var refreshControl: UIRefreshControl?
 
+    // Thin indeterminate top loading bar (3px overlay at the top of the content area).
+    private var loadingBar: UIView?
+    private var loadingBarSeg: CALayer?
+
     // Side menu
     private var menuOverlay: UIView!
     private var menuPanel: UIView!
@@ -25,35 +29,37 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
     private let accent = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
 
-    // MARK: - Feed cache (persisted) — avoids re-fetching every subscribed channel on each launch
-    private static let feedCacheKey = "home_feed_cache"
-    private static let feedCacheSubsKey = "home_feed_cache_subs"
-    private static let feedCacheTimeKey = "home_feed_cache_time"
+    // Coalesces the progressive "show results as they arrive" reloads into a couple of
+    // smooth refreshes instead of one flicker per channel that returns.
+    private var reloadTimer: Timer?
+
+    // MARK: - Per-channel feed cache (persisted)
+    // Each subscribed channel's newest few videos are cached under its own id (+ a
+    // timestamp). Adding a channel therefore only fetches THAT channel — every other
+    // channel renders instantly from cache. Stale (>TTL) or missing channels are refetched.
+    private static let channelCacheKey = "home_channel_cache"        // [channelId: [videoDict]]
+    private static let channelCacheTimeKey = "home_channel_cache_time" // [channelId: epochSeconds]
     private static let feedCacheTTL: TimeInterval = 1800  // 30 min — older cache refetches
 
     // Wipe the cached feed (Settings → Reset Cache). Subscriptions/playlists are untouched.
+    // Also clears the legacy whole-feed keys so upgrading installs don't leave them behind.
     static func clearFeedCache() {
-        UserDefaults.standard.removeObject(forKey: feedCacheKey)
-        UserDefaults.standard.removeObject(forKey: feedCacheSubsKey)
-        UserDefaults.standard.removeObject(forKey: feedCacheTimeKey)
+        for k in [channelCacheKey, channelCacheTimeKey,
+                  "home_feed_cache", "home_feed_cache_subs", "home_feed_cache_time"] {
+            UserDefaults.standard.removeObject(forKey: k)
+        }
         UserDefaults.standard.synchronize()
     }
 
-    // Return cached videos only if they were built from exactly this sub set and aren't stale.
-    private static func loadFeedCache(for ids: Set<String>) -> [Video]? {
-        let cachedSubs = Set((UserDefaults.standard.array(forKey: feedCacheSubsKey) as? [String]) ?? [])
-        guard cachedSubs == ids else { return nil }
-        let age = Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: feedCacheTimeKey)
-        guard age >= 0, age < feedCacheTTL else { return nil }
-        guard let dicts = UserDefaults.standard.array(forKey: feedCacheKey) as? [[String: Any]] else { return nil }
-        let vids = dicts.compactMap { Video.from(dict: $0) }
-        return vids.isEmpty ? nil : vids
-    }
-
-    private static func saveFeedCache(_ videos: [Video], subs ids: Set<String>) {
-        UserDefaults.standard.set(videos.map { $0.toDict() }, forKey: feedCacheKey)
-        UserDefaults.standard.set(Array(ids), forKey: feedCacheSubsKey)
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: feedCacheTimeKey)
+    // Persist one channel's videos (+ now as its freshness timestamp). An empty list is
+    // still stored (with a timestamp) so a channel with no videos isn't refetched every appear.
+    private static func saveChannelVideos(_ videos: [Video], for id: String) {
+        var map = UserDefaults.standard.dictionary(forKey: channelCacheKey) ?? [:]
+        map[id] = videos.map { $0.toDict() }
+        UserDefaults.standard.set(map, forKey: channelCacheKey)
+        var times = UserDefaults.standard.dictionary(forKey: channelCacheTimeKey) ?? [:]
+        times[id] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(times, forKey: channelCacheTimeKey)
         UserDefaults.standard.synchronize()
     }
 
@@ -104,6 +110,45 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         statusLabel.font = UIFont.systemFont(ofSize: 15)
         statusLabel.numberOfLines = 0
         tableView.addSubview(statusLabel)
+
+        // Indeterminate top loading bar: a 3px strip overlaid at the top of the content area
+        // (added to `view`, NOT the table, so it stays fixed and doesn't scroll). It only
+        // covers the table's top 3px — above the first row's 8px thumbnail margin.
+        let barH: CGFloat = 3
+        let bar = UIView(frame: CGRect(x: 0, y: 0, width: w, height: barH))
+        bar.backgroundColor = UIColor(white: 0.12, alpha: 1)   // faint track behind the segment
+        bar.clipsToBounds = true                               // clip the segment when off-edge
+        bar.isHidden = true
+        view.addSubview(bar)
+        loadingBar = bar
+
+        let seg = CALayer()
+        seg.backgroundColor = accent.cgColor
+        seg.frame = CGRect(x: 0, y: 0, width: floor(w * 0.35), height: barH)
+        bar.layer.addSublayer(seg)
+        loadingBarSeg = seg
+    }
+
+    // MARK: - Loading bar
+
+    private func startLoadingBar() {
+        guard let bar = loadingBar, let seg = loadingBarSeg else { return }
+        bar.isHidden = false
+        seg.removeAnimation(forKey: "indeterminate")
+        // Shuttle the accent segment left→right repeatedly. A CAAnimation (vs a UIView block
+        // animation) keeps running while the user is dragging the list.
+        let move = CABasicAnimation(keyPath: "position.x")
+        move.fromValue = -seg.bounds.width / 2
+        move.toValue = bar.bounds.width + seg.bounds.width / 2
+        move.duration = 1.1
+        move.repeatCount = .infinity
+        move.timingFunction = CAMediaTimingFunction(name: CAMediaTimingFunctionName.linear)
+        seg.add(move, forKey: "indeterminate")
+    }
+
+    private func stopLoadingBar() {
+        loadingBarSeg?.removeAnimation(forKey: "indeterminate")
+        loadingBar?.isHidden = true
     }
 
     // MARK: - Side menu
@@ -245,48 +290,55 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             return
         }
 
-        // Dirty flag: skip refetch if the subscription set is unchanged.
-        guard ids != builtChannelIds, !isLoading else { return }
-        builtChannelIds = ids
-
-        // Persisted cache: serve the saved feed instantly (no network) if it was built from
-        // this exact sub set and is still fresh. Pull-to-refresh bypasses this.
-        if let cached = HomeVC.loadFeedCache(for: ids) {
-            videos = cached
-            statusLabel?.isHidden = !cached.isEmpty
-            tableView?.reloadData()
-            return
+        // Render instantly from the per-channel cache (any age) when the view is empty or
+        // the sub set changed — e.g. a channel was just added: every other channel shows at
+        // once and only the new one is blank until it loads below.
+        if videos.isEmpty || ids != builtChannelIds {
+            builtChannelIds = ids
+            rebuildFromCache()
         }
-        loadFeed(channels: subs)
+
+        guard !isLoading else { return }
+
+        // Fetch only channels whose cache is missing or stale (>TTL).
+        let times = UserDefaults.standard.dictionary(forKey: HomeVC.channelCacheTimeKey) ?? [:]
+        let now = Date().timeIntervalSince1970
+        let toFetch = subs.filter { ch in
+            guard let ts = (times[ch.id] as? NSNumber)?.doubleValue else { return true }
+            let age = now - ts
+            return !(age >= 0 && age < HomeVC.feedCacheTTL)
+        }
+        guard !toFetch.isEmpty else { return }
+        loadFeed(channels: toFetch)
     }
 
-    // Pull-to-refresh: force a refetch even when the subscription set is unchanged.
+    // Pull-to-refresh: force a refetch of every channel, ignoring cache freshness.
     @objc private func handleRefresh() {
         let subs = SubscriptionManager.all()
         if subs.isEmpty || isLoading {
             refreshControl?.endRefreshing()
-            refreshFeedIfNeeded()
             return
         }
         builtChannelIds = Set(subs.map { $0.id })
         loadFeed(channels: subs, isRefresh: true)
     }
 
-    private func loadFeed(channels: [Channel], isRefresh: Bool = false) {
+    // Fetch the given channels in parallel (CurlFetcher caps concurrency at 4). Each result
+    // is cached per-channel and triggers a coalesced re-render, so videos appear as they
+    // arrive rather than all at once when the slowest channel finishes.
+    private func loadFeed(channels toFetch: [Channel], isRefresh: Bool = false) {
+        guard !toFetch.isEmpty else { return }
         isLoading = true
-        // On a pull-to-refresh keep the current rows visible (spinner shows progress);
-        // on a fresh load clear and show the loading label.
-        if !isRefresh {
-            videos = []
-            tableView?.reloadData()
+        startLoadingBar()
+        // Fresh load with nothing on screen yet → show the loading label. A pull-to-refresh
+        // (or an add-channel render) keeps the current rows visible while new ones stream in.
+        if !isRefresh && videos.isEmpty {
             statusLabel?.text = "Loading subscriptions..."
             statusLabel?.isHidden = false
         }
 
-        var collected: [[Video]] = Array(repeating: [], count: channels.count)
-        var remaining = channels.count
-
-        for (idx, channel) in channels.enumerated() {
+        var remaining = toFetch.count
+        for channel in toFetch {
             YoutubeAPI.getChannelVideos(channelId: channel.id) { [weak self] vids, fresh, _ in
                 guard let self = self else { return }
                 // Heal the stored avatar/name from the fresh channel result (fixes blank
@@ -296,22 +348,49 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                                                         thumbnailURL: c.thumbnailURL, name: c.name)
                 }
                 // Keep newest few per channel (channel browse returns newest-first).
-                collected[idx] = Array(vids.prefix(6))
+                HomeVC.saveChannelVideos(Array(vids.prefix(6)), for: channel.id)
+                self.scheduleProgressiveReload()
                 remaining -= 1
-                if remaining == 0 {
-                    self.finishFeed(collected)
-                }
+                if remaining == 0 { self.finishFeed() }
             }
         }
     }
 
-    // Merge all channels and sort newest-first by published date.
-    private func finishFeed(_ perChannel: [[Video]]) {
+    // One-shot coalesced reload: the first arriving channel arms a 0.3s timer; any further
+    // channels that return before it fires are folded into the same rebuild.
+    private func scheduleProgressiveReload() {
+        guard reloadTimer == nil else { return }
+        let t = Timer(timeInterval: 0.3, target: self,
+                      selector: #selector(progressiveReloadFired), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+        reloadTimer = t
+    }
+
+    @objc private func progressiveReloadFired() {
+        reloadTimer = nil
+        rebuildFromCache()
+    }
+
+    private func finishFeed() {
+        isLoading = false
+        stopLoadingBar()
+        refreshControl?.endRefreshing()
+        reloadTimer?.invalidate()
+        reloadTimer = nil
+        rebuildFromCache()
+    }
+
+    // Merge every subscribed channel's cached videos, de-dupe, and sort newest-first.
+    // Reads the cache dict once (not per channel) to stay cheap on the iPhone 4S.
+    private func rebuildFromCache() {
+        let subs = SubscriptionManager.all()
+        let map = UserDefaults.standard.dictionary(forKey: HomeVC.channelCacheKey) ?? [:]
         var merged: [Video] = []
         var seen = Set<String>()
-        for list in perChannel {
-            for v in list {
-                if seen.contains(v.id) { continue }
+        for ch in subs {
+            guard let dicts = map[ch.id] as? [[String: Any]] else { continue }
+            for d in dicts {
+                guard let v = Video.from(dict: d), !seen.contains(v.id) else { continue }
                 seen.insert(v.id)
                 merged.append(v)
             }
@@ -319,11 +398,12 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // Sort latest-first using the relative "published" text (e.g. "3 days ago").
         merged.sort { HomeVC.approxAge($0.publishedText) < HomeVC.approxAge($1.publishedText) }
         videos = merged
-        HomeVC.saveFeedCache(merged, subs: builtChannelIds)
-        isLoading = false
-        refreshControl?.endRefreshing()
-        statusLabel?.isHidden = !merged.isEmpty
-        if merged.isEmpty { statusLabel?.text = "No recent videos from your subscriptions." }
+        if merged.isEmpty {
+            statusLabel?.text = isLoading ? "Loading subscriptions..." : "No recent videos from your subscriptions."
+            statusLabel?.isHidden = false
+        } else {
+            statusLabel?.isHidden = true
+        }
         tableView?.reloadData()
     }
 

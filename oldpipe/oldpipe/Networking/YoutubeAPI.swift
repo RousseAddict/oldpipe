@@ -48,6 +48,11 @@ class YoutubeAPI {
 
     // Static parse queue (one reused thread) — never create DispatchQueue per call.
     private static let parseQueue = DispatchQueue(label: "com.oldpipe.ytparse")
+    // Dedicated parse lane for the player path. The feed parses many large channel-browse
+    // responses on parseQueue (serial); routing the player's parse through its own queue
+    // means stream resolution never waits behind a backed-up feed-parse queue — the real
+    // cause of "tap a video while the feed loads → stuck on loading for 30-40s".
+    private static let playerParseQueue = DispatchQueue(label: "com.oldpipe.ytparse.player")
 
     private static func body(client: [String: Any], extra: [String: Any]) -> [String: Any] {
         var b: [String: Any] = ["context": ["client": client]]
@@ -89,9 +94,9 @@ class YoutubeAPI {
         guard let jsonStr = toJSON(payload) else { completion([], nil); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: vrUserAgent, timeout: 30) { data in
+                             userAgent: vrUserAgent, timeout: 30, priority: true) { data in
             guard let data = data else { completion([], nil); return }
-            parseQueue.async {
+            playerParseQueue.async {
                 let (streams, video) = parsePlayerResponse(data, videoId: videoId)
                 DispatchQueue.main.async { completion(streams, video) }
             }
@@ -172,7 +177,7 @@ class YoutubeAPI {
         guard let jsonStr = toJSON(payload) else { done(); return }
         let url = "\(baseURL)/search?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: webUserAgent, timeout: 20) { data in
+                             userAgent: webUserAgent, timeout: 20, priority: true) { data in
             if let data = data,
                let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
                 captureVisitorData(root)

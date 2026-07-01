@@ -37,23 +37,53 @@ private class CurlDownloadBox {
 class CurlFetcher {
     private static var active: [CurlFetcher] = []
 
-    // Concurrent worker queue — lets independent transfers (e.g. the Home feed's
-    // per-channel fetches + thumbnails) run in parallel instead of one-at-a-time.
+    // Normal-lane concurrent worker queue (feed channel-browses + thumbnails) — lets independent
+    // transfers run in parallel instead of one-at-a-time.
+    // (No QoS — DispatchQoS is iOS 8+; this app targets iOS 6/7.)
     private static let curlQueue = DispatchQueue(label: "com.oldpipe.curl", attributes: .concurrent)
     // Serial gate: holds back dispatch to curlQueue until a slot frees, so we never spawn
     // a worker thread per queued request (iPhone 4S has a hard thread/stack-memory budget).
     private static let gateQueue = DispatchQueue(label: "com.oldpipe.curl.gate")
-    // Caps concurrent in-flight transfers. 4 = a real speedup for the feed without exhausting
-    // sockets/threads; a long download holds one slot, leaving the rest for browsing.
-    private static let curlLimit = DispatchSemaphore(value: 4)
+    // Caps concurrent in-flight transfers on the feed lane. 2 (was 4): on the dual-core A5
+    // (iPhone 4S), 4 simultaneous OpenSSL/TLS transfers saturate both cores with crypto and
+    // starve an interactive player request (tapped during feed load) of CPU — making its TLS
+    // handshake crawl. 2 still parallelises the feed meaningfully while leaving a core free so
+    // the high-priority player request on highQueue completes promptly.
+    private static let curlLimit = DispatchSemaphore(value: 2)
+    // High-priority lane = a DEDICATED SERIAL queue. A serial queue owns its own private worker
+    // thread, so an interactive request (tapping a video → player/stream fetch) gets a thread
+    // immediately and is NOT subject to the concurrent pool's width-throttling — which is what
+    // starved it before, when all 4 normal-lane threads were blocked in a synchronous
+    // curl_bridge_perform on slow/timing-out feed sockets. Player requests are sequential
+    // (bootstrap visitorData → player), so serializing the high lane is fine.
+    private static let highQueue = DispatchQueue(label: "com.oldpipe.curl.high")
+    // Feed turnstile (preemption). Closed by a high-priority request for its whole duration so the
+    // feed lane starts NO new transfers while a player request is in flight. This is the real fix:
+    // the shipped OpenSSL 3.4.x serializes concurrent TLS handshakes on internal global locks, so a
+    // simultaneous feed handshake stalls the player's handshake no matter how threads/cores are
+    // split. Pausing new feed work lets the player run against near-zero concurrent TLS. Value 1 =
+    // open; a high request waits it to 0 (closed) and signals back to 1 when done. The highQueue is
+    // serial, so begin/close and end/open are always balanced (only one high request runs at once).
+    private static let feedTurnstile = DispatchSemaphore(value: 1)
     // dispatch_once via static let — runs exactly once even under concurrent first access
     // (Swift lazy-static init is thread-safe), so curl_global_init is never called concurrently.
     private static let curlGlobalInit: Bool = { curl_bridge_global_init(); return true }()
 
-    // Submit background work bounded by curlLimit: the serial gate waits for a free slot,
-    // then dispatches the work onto the concurrent queue and releases the slot when it returns.
-    private static func submit(_ work: @escaping () -> Void) {
+    // Submit background work. highPriority runs on the dedicated serial highQueue (its own thread)
+    // and CLOSES the feed turnstile for its duration so no new feed transfer competes for TLS.
+    // Normal work passes the turnstile (blocks while a player request holds it), then waits for a
+    // free slot and dispatches onto the concurrent queue, releasing the slot when it returns.
+    private static func submit(highPriority: Bool = false, _ work: @escaping () -> Void) {
+        if highPriority {
+            highQueue.async {
+                feedTurnstile.wait()        // close feed lane: no new transfers start
+                work()
+                feedTurnstile.signal()      // reopen feed lane
+            }
+            return
+        }
         gateQueue.async {
+            feedTurnstile.wait(); feedTurnstile.signal()  // pass only when the feed lane is open
             curlLimit.wait()
             curlQueue.async {
                 work()
@@ -78,10 +108,11 @@ class CurlFetcher {
                          headers: [String],
                          userAgent: String = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
                          timeout: Int = 30,
+                         priority: Bool = false,
                          completion: @escaping (Data?) -> Void) {
         let fetcher = CurlFetcher()
         retain(fetcher)
-        submit {
+        submit(highPriority: priority) {
             let data = fetcher.syncPostJSON(url: url, body: body, headers: headers,
                                             userAgent: userAgent, timeout: timeout)
             DispatchQueue.main.async { release(fetcher); completion(data) }
