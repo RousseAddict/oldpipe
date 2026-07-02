@@ -189,6 +189,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             ("Subscriptions", #selector(menuSubscriptions)),
             ("Playlists", #selector(menuPlaylists)),
             ("Downloads", #selector(menuDownloads)),
+            ("History", #selector(menuHistory)),
             ("Settings", #selector(menuSettings))
         ]
         var y: CGFloat = 110
@@ -264,6 +265,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     @objc private func menuDownloads() {
         closeMenu()
         navigationController?.pushViewController(DownloadsVC(), animated: true)
+    }
+
+    @objc private func menuHistory() {
+        closeMenu()
+        navigationController?.pushViewController(HistoryVC(), animated: true)
     }
 
     @objc private func menuSettings() {

@@ -31,12 +31,14 @@
 		BB000001000000000000BC0C /* Channel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0C /* Channel.swift */; };
 		BB000001000000000000BC14 /* Playlist.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB14 /* Playlist.swift */; };
 		BB000001000000000000BC0D /* SubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0D /* SubscriptionManager.swift */; };
+		BB000001000000000000BC1A /* HistoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1A /* HistoryManager.swift */; };
 		BB000001000000000000BC15 /* PlaylistManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB15 /* PlaylistManager.swift */; };
 		BB000001000000000000BC12 /* VideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB12 /* VideoPlayer.swift */; };
 		BB000001000000000000BC0E /* ChannelVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0E /* ChannelVC.swift */; };
 		BB000001000000000000BC0F /* HomeVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0F /* HomeVC.swift */; };
 		BB000001000000000000BC10 /* ManageSubscriptionsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */; };
 		BB000001000000000000BC16 /* PlaylistsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB16 /* PlaylistsVC.swift */; };
+		BB000001000000000000BC1B /* HistoryVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1B /* HistoryVC.swift */; };
 		BB000001000000000000BC11 /* VideoRowCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB11 /* VideoRowCell.swift */; };
 		BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB13 /* MiniPlayerBar.swift */; };
 /* End PBXBuildFile section */
@@ -86,12 +88,14 @@
 		BB000001000000000000BB0C /* Channel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Channel.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB14 /* Playlist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Playlist.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0D /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB1A /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB15 /* PlaylistManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB12 /* VideoPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayer.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0E /* ChannelVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0F /* HomeVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManageSubscriptionsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB16 /* PlaylistsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistsVC.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB1B /* HistoryVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB11 /* VideoRowCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRowCell.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB13 /* MiniPlayerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerBar.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -195,6 +199,7 @@
 				BB000001000000000000BB0C /* Channel.swift */,
 				BB000001000000000000BB14 /* Playlist.swift */,
 				BB000001000000000000BB0D /* SubscriptionManager.swift */,
+				BB000001000000000000BB1A /* HistoryManager.swift */,
 				BB000001000000000000BB15 /* PlaylistManager.swift */,
 				BB000001000000000000BB12 /* VideoPlayer.swift */,
 			);
@@ -225,6 +230,7 @@
 				BB000001000000000000BB0F /* HomeVC.swift */,
 				BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */,
 				BB000001000000000000BB16 /* PlaylistsVC.swift */,
+				BB000001000000000000BB1B /* HistoryVC.swift */,
 			);
 			name = ViewControllers;
 			path = ViewControllers;
@@ -377,12 +383,14 @@
 				BB000001000000000000BC0C /* Channel.swift in Sources */,
 				BB000001000000000000BC14 /* Playlist.swift in Sources */,
 				BB000001000000000000BC0D /* SubscriptionManager.swift in Sources */,
+				BB000001000000000000BC1A /* HistoryManager.swift in Sources */,
 				BB000001000000000000BC15 /* PlaylistManager.swift in Sources */,
 				BB000001000000000000BC12 /* VideoPlayer.swift in Sources */,
 				BB000001000000000000BC0E /* ChannelVC.swift in Sources */,
 				BB000001000000000000BC0F /* HomeVC.swift in Sources */,
 				BB000001000000000000BC10 /* ManageSubscriptionsVC.swift in Sources */,
 				BB000001000000000000BC16 /* PlaylistsVC.swift in Sources */,
+				BB000001000000000000BC1B /* HistoryVC.swift in Sources */,
 				BB000001000000000000BC11 /* VideoRowCell.swift in Sources */,
 				BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */,
 				A34362D62FD764210064ADE1 /* ViewController.swift in Sources */,

@@ -76,6 +76,7 @@ class VideoPlayer {
             if pendingResume > 5, !(dur.isFinite && dur > 0 && pendingResume >= dur - 5) {
                 p.seek(to: CMTimeMakeWithSeconds(pendingResume, preferredTimescale: 600))
             }
+            if let v = currentVideo { HistoryManager.record(v) }
         }
         p.play()
         updateNowPlayingInfo()
