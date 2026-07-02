@@ -69,6 +69,10 @@ class CurlFetcher {
     // (Swift lazy-static init is thread-safe), so curl_global_init is never called concurrently.
     private static let curlGlobalInit: Bool = { curl_bridge_global_init(); return true }()
 
+    // Public trigger for the same once-init — used by StreamProxy, which drives libcurl
+    // directly (off CurlFetcher's lanes) and must guarantee curl_global_init has run first.
+    static func ensureGlobalInit() { _ = curlGlobalInit }
+
     // Submit background work. highPriority runs on the dedicated serial highQueue (its own thread)
     // and CLOSES the feed turnstile for its duration so no new feed transfer competes for TLS.
     // Normal work passes the turnstile (blocks while a player request holds it), then waits for a

@@ -18,6 +18,7 @@ void        curl_bridge_set_ssl_noverify(CurlHandle h);
 void        curl_bridge_set_follow_redirects(CurlHandle h);
 void        curl_bridge_set_timeout(CurlHandle h, long secs);
 void        curl_bridge_set_write_fn(CurlHandle h, CurlBridgeWriteFn fn, void *userdata);
+void        curl_bridge_set_header_fn(CurlHandle h, CurlBridgeWriteFn fn, void *userdata);
 void        curl_bridge_set_progress_fn(CurlHandle h, CurlBridgeProgressFn fn, void *clientp);
 void        curl_bridge_add_header(CurlHandle h, const char *header);
 void        curl_bridge_set_post_body(CurlHandle h, const char *body, long len);

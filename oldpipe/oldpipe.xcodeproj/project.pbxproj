@@ -16,6 +16,7 @@
 		A34362FF2FD764260064ADE1 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A34362FE2FD764260064ADE1 /* AppDelegate.swift */; };
 		BB000001000000000000BC01 /* YoutubeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB01 /* YoutubeAPI.swift */; };
 		BB000001000000000000BC02 /* CurlFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB02 /* CurlFetcher.swift */; };
+		BB000001000000000000BC19 /* StreamProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB19 /* StreamProxy.swift */; };
 		BB000001000000000000BC03 /* curl_bridge.c in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB03 /* curl_bridge.c */; };
 		BB000001000000000000BC04 /* atomic_stubs.c in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB04 /* atomic_stubs.c */; settings = {COMPILER_FLAGS = "-fno-builtin"; }; };
 		BB000001000000000000BC05 /* atomic_stubs.S in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB05 /* atomic_stubs.S */; };
@@ -70,6 +71,7 @@
 		A34362ED2FD764250064ADE1 /* oldpipeUITestsLaunchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = oldpipeUITestsLaunchTests.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB01 /* YoutubeAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YoutubeAPI.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB02 /* CurlFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurlFetcher.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB19 /* StreamProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamProxy.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB03 /* curl_bridge.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = curl_bridge.c; sourceTree = "<group>"; };
 		BB000001000000000000BB04 /* atomic_stubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = atomic_stubs.c; sourceTree = "<group>"; };
 		BB000001000000000000BB05 /* atomic_stubs.S */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = atomic_stubs.S; sourceTree = "<group>"; };
@@ -176,6 +178,7 @@
 			children = (
 				BB000001000000000000BB01 /* YoutubeAPI.swift */,
 				BB000001000000000000BB02 /* CurlFetcher.swift */,
+				BB000001000000000000BB19 /* StreamProxy.swift */,
 				BB000001000000000000BB03 /* curl_bridge.c */,
 				BB000001000000000000BB04 /* atomic_stubs.c */,
 				BB000001000000000000BB05 /* atomic_stubs.S */,
@@ -359,6 +362,7 @@
 			files = (
 				BB000001000000000000BC01 /* YoutubeAPI.swift in Sources */,
 				BB000001000000000000BC02 /* CurlFetcher.swift in Sources */,
+				BB000001000000000000BC19 /* StreamProxy.swift in Sources */,
 				BB000001000000000000BC03 /* curl_bridge.c in Sources */,
 				BB000001000000000000BC04 /* atomic_stubs.c in Sources */,
 				BB000001000000000000BC05 /* atomic_stubs.S in Sources */,

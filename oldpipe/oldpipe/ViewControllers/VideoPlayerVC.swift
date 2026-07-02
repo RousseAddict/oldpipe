@@ -36,6 +36,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var thumbView: AsyncImageView?
     private var playBtn: UIButton?
     private var statusLabel: UILabel?
+    private var spinner: UIActivityIndicatorView?
     private var titleLabel: UILabel?
     private var channelLabel: UILabel?
     private var metaLabel: UILabel?
@@ -251,6 +252,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sl.frame = CGRect(x: 0, y: videoH - 28, width: w, height: 28)
         container.addSubview(sl)
         statusLabel = sl
+
+        // Spinner shown while a stream is being prepared — sits where the play button was,
+        // so the wait reads as "working" rather than "stuck". whiteLarge = iOS 2+ safe.
+        let spin = UIActivityIndicatorView(style: .whiteLarge)
+        spin.hidesWhenStopped = true
+        spin.center = CGPoint(x: w / 2, y: videoH / 2)
+        container.addSubview(spin)
+        spinner = spin
 
         buildControls(width: w, videoHeight: videoH, in: container)
 
@@ -760,6 +769,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         return img
     }
 
+    private func showSpinner() { spinner?.startAnimating() }
+    private func hideSpinner() { spinner?.stopAnimating() }
+
     private func showControls() {
         controlsView?.isHidden = false
         playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
@@ -873,14 +885,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         playBtn?.isHidden = true
         statusLabel?.isHidden = false
+        showSpinner()
 
-        // iOS 6 Secure Transport cannot negotiate GCM ciphers with googlevideo.com, so
-        // AVPlayer cannot stream directly — download-then-play via CurlFetcher (OpenSSL).
-        // iOS 7+ supports GCM, so try direct streaming with a quick download fallback.
+        // iOS 6 Secure Transport cannot negotiate GCM/CHACHA20 ciphers with googlevideo.com,
+        // so AVPlayer cannot connect to it directly. Route AVPlayer through the local
+        // HTTP->HTTPS proxy (StreamProxy): AVPlayer talks plain HTTP to 127.0.0.1, the proxy
+        // forwards to googlevideo over libcurl+OpenSSL (which speaks the required ciphers).
+        // iOS 7+ supports the ciphers natively, so it streams the googlevideo URL directly.
+        // Either way, a quick download-then-play fallback covers a stream that won't start.
+        // maxTicks are in 0.25s poll units: 16 = 4s (direct), 80 = 20s (proxy).
         let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
+        statusLabel?.text = "Loading stream..."
         if iosVersion >= 7.0 {
-            statusLabel?.text = "Loading stream..."
-            tryStream(urlStr: preferred.url, fallbackDownload: preferred.url)
+            tryStream(urlStr: preferred.url, fallbackDownload: preferred.url, maxTicks: 16)
+        } else if let local = StreamProxy.shared.localURL(for: preferred.url) {
+            // Give the proxy path more time — the first read primes a TLS handshake to
+            // googlevideo through libcurl before AVPlayer sees any bytes.
+            tryStream(urlStr: local.absoluteString, fallbackDownload: preferred.url, maxTicks: 80)
         } else {
             statusLabel?.text = "Downloading..."
             download(url: preferred.url, autoPlay: true)
@@ -906,20 +927,22 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         attachLayer()
         pollUntilReady(maxTicks: 40, interval: 0.25, onReady: { [weak self] in
             guard let self = self else { return }
+            self.hideSpinner()
             self.thumbView?.isHidden = true
             self.statusLabel?.isHidden = true
             self.sp.applyResumeAndPlay()
             self.showControls()
         }, onFail: { [weak self] in
             guard let self = self else { return }
+            self.hideSpinner()
             self.statusLabel?.text = "Playback failed"
             self.statusLabel?.isHidden = false
             self.playBtn?.isHidden = false
         })
     }
 
-    // iOS 7+ direct streaming with a quick download-then-play fallback.
-    private func tryStream(urlStr: String, fallbackDownload: String) {
+    // Direct/proxied streaming with a quick download-then-play fallback.
+    private func tryStream(urlStr: String, fallbackDownload: String, maxTicks: Int = 16) {
         guard let nsurl = URL(string: urlStr) else {
             statusLabel?.text = "Invalid stream URL"
             statusLabel?.isHidden = false
@@ -928,14 +951,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         sp.load(video: video, url: nsurl, isLocal: false, resume: 0, artwork: thumbView?.image)
         attachLayer()
-        pollUntilReady(maxTicks: 8, interval: 0.5, onReady: { [weak self] in
+        pollUntilReady(maxTicks: maxTicks, interval: 0.25, onReady: { [weak self] in
             guard let self = self else { return }
+            self.hideSpinner()
             self.thumbView?.isHidden = true
             self.statusLabel?.isHidden = true
             self.sp.applyResumeAndPlay()
             self.showControls()
         }, onFail: { [weak self] in
             guard let self = self else { return }
+            // Keep the spinner running — we're falling through to a download attempt.
             self.detachLayer()
             self.statusLabel?.text = "Downloading..."
             self.statusLabel?.isHidden = false
@@ -993,10 +1018,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                     self.thumbView?.isHidden = true
                     self.startPlayback(url: URL(fileURLWithPath: DownloadManager.filePath(for: self.video.id)), isLocal: true)
                 } else if !autoPlay {
+                    self.hideSpinner()
                     self.statusLabel?.text = "Saved for offline"
                     self.statusLabel?.isHidden = false
                 }
             } else {
+                self.hideSpinner()
                 self.statusLabel?.text = "Download failed"
                 self.statusLabel?.isHidden = false
                 self.playBtn?.isHidden = false

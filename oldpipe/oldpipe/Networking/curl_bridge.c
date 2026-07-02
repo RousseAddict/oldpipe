@@ -96,6 +96,12 @@ void curl_bridge_set_write_fn(CurlHandle handle, CurlBridgeWriteFn fn, void *use
     curl_easy_setopt(e, CURLOPT_WRITEDATA, userdata);
 }
 
+void curl_bridge_set_header_fn(CurlHandle handle, CurlBridgeWriteFn fn, void *userdata) {
+    CURL *e = ((CurlBridgeHandle *)handle)->easy;
+    curl_easy_setopt(e, CURLOPT_HEADERFUNCTION, fn);
+    curl_easy_setopt(e, CURLOPT_HEADERDATA, userdata);
+}
+
 void curl_bridge_set_progress_fn(CurlHandle handle, CurlBridgeProgressFn fn, void *clientp) {
     CURL *e = ((CurlBridgeHandle *)handle)->easy;
     curl_easy_setopt(e, CURLOPT_NOPROGRESS, 0L);
