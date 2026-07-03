@@ -51,6 +51,12 @@ class SubscriptionManager {
         UserDefaults.standard.synchronize()
     }
 
+    // Remove all subscriptions (Settings → Reset All).
+    static func clearAll() {
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        UserDefaults.standard.synchronize()
+    }
+
     private static func rawList() -> [[String: Any]] {
         return (UserDefaults.standard.array(forKey: defaultsKey) as? [[String: Any]]) ?? []
     }

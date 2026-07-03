@@ -106,6 +106,22 @@ class AsyncImageView: UIImageView {
         Int(image.size.width * image.scale * image.size.height * image.scale) * 4
     }
 
+    // MARK: - Cache size (Settings display)
+    // Total bytes of every thumbnail currently on disk. diskCacheDir is private, so this
+    // helper lives inside the class to expose the size without leaking the path.
+    static func diskCacheSize() -> Int {
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: diskCacheDir) else { return 0 }
+        var total = 0
+        for f in files {
+            let p = (diskCacheDir as NSString).appendingPathComponent(f)
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: p),
+               let bytes = (attrs[.size] as? NSNumber)?.intValue {
+                total += bytes
+            }
+        }
+        return total
+    }
+
     // MARK: - Cache purge (Settings → Reset Cache)
     // Clears decoded images from memory and every cached thumbnail on disk.
     static func purgeCache() {

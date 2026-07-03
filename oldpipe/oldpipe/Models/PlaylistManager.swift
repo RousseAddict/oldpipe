@@ -42,6 +42,12 @@ class PlaylistManager {
         save(list)
     }
 
+    // Remove all playlists (Settings → Reset All).
+    static func clearAll() {
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        UserDefaults.standard.synchronize()
+    }
+
     static func contains(videoId: String, in playlistId: String) -> Bool {
         guard let pl = playlist(id: playlistId) else { return false }
         return pl.videos.contains { $0.id == videoId }

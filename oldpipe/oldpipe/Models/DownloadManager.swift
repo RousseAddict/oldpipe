@@ -150,6 +150,21 @@ class DownloadManager {
         UserDefaults.standard.set(ids, forKey: watchedKey)
     }
 
+    // Delete every downloaded file and clear all download-related state, including
+    // playback positions and watched flags for streamed-only videos (Settings → Reset All).
+    static func clearAll() {
+        for entry in rawList() {
+            if let id = entry["id"] as? String {
+                try? FileManager.default.removeItem(atPath: filePath(for: id))
+            }
+        }
+        inFlight.removeAll()
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        UserDefaults.standard.removeObject(forKey: positionsKey)
+        UserDefaults.standard.removeObject(forKey: watchedKey)
+        UserDefaults.standard.synchronize()
+    }
+
     // All videos whose files still exist on disk — complete OR partial.
     static func all() -> [Video] {
         return rawList().compactMap { Video.from(dict: $0) }.filter { fileExists($0.id) }

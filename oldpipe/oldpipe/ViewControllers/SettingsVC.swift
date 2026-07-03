@@ -13,6 +13,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var exportView: UITextView!
     private var importView: UITextView!
     private var statusLabel: UILabel!
+    private var cacheSizeLabel: UILabel!
     private var copyBtn: UIButton?
     private var didSetupUI = false
 
@@ -104,9 +105,27 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         y = addSubtitle("Clears the cached home feed and downloaded thumbnails. Your subscriptions and playlists are kept.",
                         at: y, width: contentW, pad: pad)
 
+        cacheSizeLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 20))
+        cacheSizeLabel.backgroundColor = .clear
+        cacheSizeLabel.textColor = UIColor(white: 0.7, alpha: 1)
+        cacheSizeLabel.font = UIFont.boldSystemFont(ofSize: 13)
+        scrollView.addSubview(cacheSizeLabel)
+        refreshCacheSize()
+        y += 20 + 8
+
         let resetBtn = makeButton("Reset Cache", at: y, width: contentW, pad: pad, accent: true)
         resetBtn.addTarget(self, action: #selector(resetTapped), for: .touchUpInside)
         scrollView.addSubview(resetBtn)
+        y += 44 + 28
+
+        // ── Reset All ────────────────────────────────────────────────────────────────
+        y = addHeader("Reset All", at: y, width: contentW, pad: pad)
+        y = addSubtitle("Erases everything: subscriptions, playlists, watch history, downloads and all caches. This cannot be undone.",
+                        at: y, width: contentW, pad: pad)
+
+        let resetAllBtn = makeButton("Reset All", at: y, width: contentW, pad: pad, accent: true)
+        resetAllBtn.addTarget(self, action: #selector(resetAllTapped), for: .touchUpInside)
+        scrollView.addSubview(resetAllBtn)
         y += 44 + 12
 
         statusLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 40))
@@ -118,6 +137,19 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         y += 40
 
         scrollView.contentSize = CGSize(width: w, height: y + 80)   // +80 covers mini player bar
+    }
+
+    // MARK: - Cache size
+
+    private func refreshCacheSize() {
+        cacheSizeLabel.text = "Current cache size: \(formatBytes(AsyncImageView.diskCacheSize()))"
+    }
+
+    private func formatBytes(_ bytes: Int) -> String {
+        if bytes <= 0 { return "0 KB" }
+        let mb = Double(bytes) / (1024.0 * 1024.0)
+        if mb >= 1.0 { return String(format: "%.1f MB", mb) }
+        return String(format: "%.0f KB", Double(bytes) / 1024.0)
     }
 
     // MARK: - Layout helpers
@@ -246,6 +278,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     @objc private func resetTapped() {
         let alert = UIAlertView()
         alert.delegate = self
+        alert.tag = 1
         alert.title = "Reset Cache?"
         alert.message = "This clears the cached home feed and downloaded thumbnails. Your subscriptions and playlists are kept."
         alert.addButton(withTitle: "Cancel")
@@ -254,11 +287,36 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         alert.show()
     }
 
+    @objc private func resetAllTapped() {
+        let alert = UIAlertView()
+        alert.delegate = self
+        alert.tag = 2
+        alert.title = "Reset Everything?"
+        alert.message = "This erases ALL subscriptions, playlists, watch history, downloads and caches. This cannot be undone."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Reset All")
+        alert.cancelButtonIndex = 0
+        alert.show()
+    }
+
+    // Cancel = index 0 for both alerts; the confirm button is index 1. Distinguished by tag.
     func alertView(_ alertView: UIAlertView, clickedButtonAt buttonIndex: Int) {
         guard buttonIndex == 1 else { return }
-        HomeVC.clearFeedCache()
-        AsyncImageView.purgeCache()
-        setStatus("Cache cleared. Subscriptions and playlists kept.", ok: true)
+        if alertView.tag == 2 {
+            SubscriptionManager.clearAll()
+            PlaylistManager.clearAll()
+            HistoryManager.clear()
+            DownloadManager.clearAll()
+            HomeVC.clearFeedCache()
+            AsyncImageView.purgeCache()
+            refreshCacheSize()
+            setStatus("Everything reset. Subscriptions, playlists, history, downloads and caches cleared.", ok: true)
+        } else {
+            HomeVC.clearFeedCache()
+            AsyncImageView.purgeCache()
+            refreshCacheSize()
+            setStatus("Cache cleared. Subscriptions and playlists kept.", ok: true)
+        }
     }
 }
 
