@@ -73,6 +73,15 @@ class CurlFetcher {
     // directly (off CurlFetcher's lanes) and must guarantee curl_global_init has run first.
     static func ensureGlobalInit() { _ = curlGlobalInit }
 
+    // StreamProxy drives libcurl directly (off these lanes) but must still PREEMPT the feed while
+    // it primes a googlevideo stream handshake — otherwise concurrent feed TLS (serialized on
+    // OpenSSL's global locks) stalls the stream's handshake, AVPlayer never gets bytes in time,
+    // and playback falls back to download. These bracket the proxy's handshake window using the
+    // SAME feedTurnstile as the high-priority API lane (binary semaphore = mutual exclusion), so
+    // no new feed transfer starts until the stream is flowing. Calls MUST be balanced 1:1.
+    static func pauseFeed() { feedTurnstile.wait() }
+    static func resumeFeed() { feedTurnstile.signal() }
+
     // Submit background work. highPriority runs on the dedicated serial highQueue (its own thread)
     // and CLOSES the feed turnstile for its duration so no new feed transfer competes for TLS.
     // Normal work passes the turnstile (blocks while a player request holds it), then waits for a

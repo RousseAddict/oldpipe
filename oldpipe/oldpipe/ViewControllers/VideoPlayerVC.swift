@@ -922,7 +922,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Load a URL into the singleton, attach the shared layer, and play once ready.
     private func startPlayback(url: URL, isLocal: Bool) {
-        let resume = DownloadManager.isDownloaded(video.id) ? DownloadManager.position(for: video.id) : 0
+        let resume = DownloadManager.position(for: video.id)
         sp.load(video: video, url: url, isLocal: isLocal, resume: resume, artwork: thumbView?.image)
         attachLayer()
         pollUntilReady(maxTicks: 40, interval: 0.25, onReady: { [weak self] in
@@ -949,7 +949,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             playBtn?.isHidden = false
             return
         }
-        sp.load(video: video, url: nsurl, isLocal: false, resume: 0, artwork: thumbView?.image)
+        sp.load(video: video, url: nsurl, isLocal: false, resume: DownloadManager.position(for: video.id), artwork: thumbView?.image)
         attachLayer()
         pollUntilReady(maxTicks: maxTicks, interval: 0.25, onReady: { [weak self] in
             guard let self = self else { return }

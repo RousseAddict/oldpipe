@@ -15,6 +15,12 @@ class VideoRowCell: UITableViewCell {
     private let subtitleLabel = UILabel()
     private var currentURL = ""
 
+    // Watched-progress bar (red fill over a dark track) pinned to the thumbnail's bottom
+    // edge — hidden by default (fraction 0), so only screens that set it (History) show it.
+    private let progressTrack = UIView()
+    private let progressFill = UIView()
+    var playedFraction: CGFloat = 0 { didSet { setNeedsLayout() } }
+
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
@@ -47,6 +53,12 @@ class VideoRowCell: UITableViewCell {
         subtitleLabel.numberOfLines = 2
         contentView.addSubview(subtitleLabel)
 
+        progressTrack.backgroundColor = UIColor(white: 0, alpha: 0.5)
+        progressTrack.isHidden = true
+        progressFill.backgroundColor = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
+        progressTrack.addSubview(progressFill)
+        thumb.addSubview(progressTrack)
+
         let sel = UIView()
         sel.backgroundColor = UIColor(white: 0.15, alpha: 1)
         selectedBackgroundView = sel
@@ -55,6 +67,7 @@ class VideoRowCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
     func configure(with video: Video) {
+        playedFraction = 0   // reset for reuse; callers that want the bar set it after configure
         titleLabel.text = video.title
         subtitleLabel.text = [video.channelName, video.publishedText, video.viewCountText]
             .filter { !$0.isEmpty }.joined(separator: " • ")
@@ -92,5 +105,15 @@ class VideoRowCell: UITableViewCell {
         let textW = max(0, w - textX - pad)
         titleLabel.frame = CGRect(x: textX, y: pad, width: textW, height: 36)
         subtitleLabel.frame = CGRect(x: textX, y: pad + 38, width: textW, height: 32)
+
+        if playedFraction > 0.01 {
+            let barH: CGFloat = 3
+            progressTrack.isHidden = false
+            progressTrack.frame = CGRect(x: 0, y: tH - barH, width: tW, height: barH)
+            progressFill.frame = CGRect(x: 0, y: 0, width: tW * min(1, playedFraction), height: barH)
+            thumb.bringSubviewToFront(progressTrack)
+        } else {
+            progressTrack.isHidden = true
+        }
     }
 }

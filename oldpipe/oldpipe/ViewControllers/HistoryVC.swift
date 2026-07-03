@@ -10,6 +10,7 @@ import UIKit
 class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate {
 
     private var videos: [Video] = []
+    private var playedFrac: [String: CGFloat] = [:]   // resume-position / duration, for the progress bar
     private var didSetupUI = false
 
     private var tableView: UITableView!
@@ -61,8 +62,29 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
 
     private func reload() {
         videos = HistoryManager.all()
+        playedFrac.removeAll()
+        for v in videos {
+            if DownloadManager.isWatched(v.id) {
+                playedFrac[v.id] = 1   // fully played → full bar (resume position is cleared)
+            } else {
+                let dur = HistoryVC.durationSeconds(v.durationText)
+                if dur > 0 {
+                    let f = CGFloat(DownloadManager.position(for: v.id) / dur)
+                    playedFrac[v.id] = max(0, min(1, f))
+                }
+            }
+        }
         statusLabel?.isHidden = !videos.isEmpty
         tableView?.reloadData()
+    }
+
+    // Parse "8:00" / "1:02:03" → seconds. Returns 0 if unparseable.
+    private static func durationSeconds(_ text: String) -> Double {
+        let parts = text.split(separator: ":")
+        guard !parts.isEmpty else { return 0 }
+        var total = 0
+        for p in parts { total = total * 60 + (Int(p) ?? 0) }
+        return Double(total)
     }
 
     override func setEditing(_ editing: Bool, animated: Bool) {
@@ -98,7 +120,9 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
-        cell.configure(with: videos[indexPath.row])
+        let video = videos[indexPath.row]
+        cell.configure(with: video)
+        cell.playedFraction = playedFrac[video.id] ?? 0
         return cell
     }
 

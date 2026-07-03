@@ -27,6 +27,9 @@ private final class ProxyConn {
     var responseHead = ""
     var headersSent = false
     var aborted = false
+    // Set once the feed lane (paused during this stream's handshake) has been reopened, so we
+    // never signal the turnstile more than once per connection (which would break its balance).
+    var feedResumed = false
     init(_ fd: Int32) { clientFd = fd }
 }
 
@@ -62,6 +65,8 @@ private let proxyBodyCallback: @convention(c) (UnsafeRawPointer?, Int, Int, Unsa
     let conn = Unmanaged<ProxyConn>.fromOpaque(userdata).takeUnretainedValue()
     if conn.aborted { return 0 }
     if !conn.headersSent {
+        // First body byte = handshake done and bytes flowing → reopen the feed lane we paused.
+        if !conn.feedResumed { conn.feedResumed = true; CurlFetcher.resumeFeed() }
         let head = (conn.responseHead.isEmpty ? "HTTP/1.1 200 OK\r\n" : conn.responseHead) + "Connection: close\r\n\r\n"
         if !StreamProxy.sendAll(conn.clientFd, Array(head.utf8)) { conn.aborted = true; return 0 }
         conn.headersSent = true
@@ -226,6 +231,13 @@ final class StreamProxy: NSObject {
         if let r = rangeHeader { r.withCString { curl_bridge_add_header(h, $0) } }
         curl_bridge_set_header_fn(h, proxyHeaderCallback, connPtr)
         curl_bridge_set_write_fn(h, proxyBodyCallback, connPtr)
+
+        // Pause the feed lane while this stream's TLS handshake to googlevideo runs, then reopen
+        // it as soon as bytes flow (in the body callback). Guarantees the handshake isn't stalled
+        // by concurrent feed TLS on OpenSSL's global locks — the cause of the download fallback
+        // when tapping play during feed load. Balanced by the defer below for zero-body/error paths.
+        CurlFetcher.pauseFeed()
+        defer { if !conn.feedResumed { conn.feedResumed = true; CurlFetcher.resumeFeed() } }
 
         _ = curl_bridge_perform(h)
 

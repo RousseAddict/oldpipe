@@ -5,7 +5,7 @@ import MediaPlayer
 // MARK: - VideoPlayer
 // App-wide singleton that owns the AVPlayer so playback (especially audio) survives
 // navigating away from VideoPlayerVC. It also drives the lock-screen Now Playing info,
-// handles remote-control transport, and persists resume positions for downloaded videos.
+// handles remote-control transport, and persists resume positions for all videos.
 // MiniPlayerBar and VideoPlayerVC are thin views onto this shared state.
 
 class VideoPlayer {
@@ -153,10 +153,10 @@ class VideoPlayer {
         saveResumeThrottled()
     }
 
-    // MARK: - Resume persistence (downloaded videos only)
+    // MARK: - Resume persistence (all videos — streamed and downloaded)
 
     private func saveResumeThrottled() {
-        guard let v = currentVideo, DownloadManager.isDownloaded(v.id) else { return }
+        guard let v = currentVideo else { return }
         let cur = currentSeconds, dur = durationSeconds
         if dur > 0, cur >= dur - 2 {
             DownloadManager.markWatched(v.id); lastSavedPos = 0
@@ -166,7 +166,7 @@ class VideoPlayer {
     }
 
     private func saveResume() {
-        guard let v = currentVideo, DownloadManager.isDownloaded(v.id) else { return }
+        guard let v = currentVideo else { return }
         let cur = currentSeconds, dur = durationSeconds
         guard cur > 5 else { return }
         if dur > 0, cur >= dur - 5 { DownloadManager.markWatched(v.id) }

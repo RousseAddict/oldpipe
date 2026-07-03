@@ -174,14 +174,14 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         menuOverlay.addSubview(menuPanel)
 
         // Accent header band with the app name + tagline.
-        let band = UIView(frame: CGRect(x: 0, y: 0, width: menuWidth, height: 110))
+        let band = UIView(frame: CGRect(x: 0, y: 0, width: menuWidth, height: 78))
         band.backgroundColor = accent
         menuPanel.addSubview(band)
 
-        let header = UILabel(frame: CGRect(x: 18, y: 62, width: menuWidth - 36, height: 30))
+        let header = UILabel(frame: CGRect(x: 18, y: 40, width: menuWidth - 36, height: 30))
         header.backgroundColor = .clear
         header.textColor = .white
-        header.font = UIFont.boldSystemFont(ofSize: 24)
+        header.font = UIFont.boldSystemFont(ofSize: 22)
         header.text = "oldpipe"
         band.addSubview(header)
 
@@ -192,7 +192,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             ("History", #selector(menuHistory)),
             ("Settings", #selector(menuSettings))
         ]
-        var y: CGFloat = 110
+        var y: CGFloat = 78
         let rowH: CGFloat = 54
         for (titleText, sel) in items {
             let btn = UIButton(type: .custom)
