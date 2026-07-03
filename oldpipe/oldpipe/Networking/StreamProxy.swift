@@ -21,6 +21,10 @@ import Darwin
 
 private final class ProxyConn {
     let clientFd: Int32
+    // The route generation this connection was created for. When StreamProxy.currentGen moves
+    // past this (a newer video was requested), the progress callback aborts this transfer so a
+    // superseded/stuck stream can't hold the feed turnstile past AVPlayer's readiness window.
+    let gen: UInt64
     // googlevideo response head, accumulated line-by-line from libcurl's header callback.
     // Reset whenever a new "HTTP/" status line arrives so only the FINAL response (after any
     // redirects curl followed) is forwarded.
@@ -30,7 +34,7 @@ private final class ProxyConn {
     // Set once the feed lane (paused during this stream's handshake) has been reopened, so we
     // never signal the turnstile more than once per connection (which would break its balance).
     var feedResumed = false
-    init(_ fd: Int32) { clientFd = fd }
+    init(_ fd: Int32, gen: UInt64) { clientFd = fd; self.gen = gen }
 }
 
 // MARK: - C-compatible libcurl callbacks (file scope)
@@ -76,6 +80,19 @@ private let proxyBodyCallback: @convention(c) (UnsafeRawPointer?, Int, Int, Unsa
     return bytes
 }
 
+// Progress callback: libcurl invokes this periodically (at least ~once/second) throughout the
+// transfer — crucially INCLUDING the connect/TLS-handshake phase. Returning non-zero aborts the
+// transfer. We abort as soon as this connection's generation is stale (a newer video has been
+// requested), so a stuck handshake on the OLD stream can't keep the feed turnstile closed and
+// starve the NEW stream past AVPlayer's readiness window (the download-fallback trigger).
+private let proxyProgressCallback: @convention(c) (UnsafeMutableRawPointer?, Int64, Int64, Int64, Int64) -> Int32 = { clientp, _, _, _, _ in
+    guard let clientp = clientp else { return 0 }
+    let conn = Unmanaged<ProxyConn>.fromOpaque(clientp).takeUnretainedValue()
+    if conn.aborted { return 1 }
+    if StreamProxy.shared.isSuperseded(conn.gen) { conn.aborted = true; return 1 }
+    return 0
+}
+
 // MARK: - StreamProxy
 
 final class StreamProxy: NSObject {
@@ -86,11 +103,14 @@ final class StreamProxy: NSObject {
     private var port: UInt16 = 0
     private var started = false
 
-    // Maps the opaque local path token -> real googlevideo URL. Avoids encoding the URL into
-    // the path (addingPercentEncoding / base64 options are iOS 7+). NSLock-guarded because
-    // localURL(for:) is called on the main thread while connection threads read it.
-    private var routes: [String: String] = [:]
+    // Maps the opaque local path token -> (real googlevideo URL, generation). Avoids encoding
+    // the URL into the path (addingPercentEncoding / base64 options are iOS 7+). NSLock-guarded
+    // because localURL(for:) is called on the main thread while connection threads read it.
+    private var routes: [String: (url: String, gen: UInt64)] = [:]
     private var routeSeq: UInt64 = 0
+    // Monotonic generation, bumped each time a new stream is requested. In-flight connections
+    // from an older generation are aborted by proxyProgressCallback (see isSuperseded).
+    private var currentGen: UInt64 = 0
     private let lock = NSLock()
 
     // Return a local http:// URL that proxies to `remote`. Starts the listener on first use.
@@ -99,10 +119,32 @@ final class StreamProxy: NSObject {
         guard start() else { return nil }
         lock.lock()
         routeSeq += 1
+        currentGen += 1
         let token = "\(routeSeq).mp4"
-        routes[token] = remote
+        routes[token] = (remote, currentGen)
         lock.unlock()
         return URL(string: "http://127.0.0.1:\(port)/\(token)")
+    }
+
+    // True once a newer stream has been requested than the given generation. Read from the
+    // libcurl progress callback (off the main thread) to abort a superseded transfer.
+    func isSuperseded(_ gen: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return gen < currentGen
+    }
+
+    // Abort any in-flight proxy transfer — called when the current video ENDS or the player is
+    // torn down, so a finished/idle stream can't keep a worker thread (or the feed turnstile)
+    // parked in a blocking send()/handshake. Bumping currentGen supersedes every live ProxyConn
+    // (the progress callback then aborts them), while re-blessing the existing routes to the new
+    // generation keeps a legitimate reconnect valid — e.g. scrubbing back after the video ended
+    // re-opens the SAME token and must NOT be treated as superseded.
+    func closeCurrentStream() {
+        lock.lock()
+        currentGen += 1
+        let bumped = currentGen
+        for k in routes.keys { routes[k]?.gen = bumped }
+        lock.unlock()
     }
 
     // MARK: - Listener
@@ -187,8 +229,8 @@ final class StreamProxy: NSObject {
         if token.hasPrefix("/") { token.removeFirst() }
         if let q = token.firstIndex(of: "?") { token = String(token[..<q]) }
 
-        lock.lock(); let remote = routes[token]; lock.unlock()
-        guard let remoteURL = remote else {
+        lock.lock(); let route = routes[token]; lock.unlock()
+        guard let route = route else {
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
             return
         }
@@ -199,7 +241,7 @@ final class StreamProxy: NSObject {
             rangeHeader = line
         }
 
-        proxy(remoteURL: remoteURL, rangeHeader: rangeHeader, clientFd: clientFd)
+        proxy(remoteURL: route.url, gen: route.gen, rangeHeader: rangeHeader, clientFd: clientFd)
     }
 
     // Read the request head (up to the blank line). Requests from AVPlayer are small.
@@ -215,8 +257,8 @@ final class StreamProxy: NSObject {
         return String(data: data, encoding: .isoLatin1)
     }
 
-    private func proxy(remoteURL: String, rangeHeader: String?, clientFd: Int32) {
-        let conn = ProxyConn(clientFd)
+    private func proxy(remoteURL: String, gen: UInt64, rangeHeader: String?, clientFd: Int32) {
+        let conn = ProxyConn(clientFd, gen: gen)
         let connPtr = Unmanaged.passUnretained(conn).toOpaque()
 
         let h = curl_bridge_init()
@@ -231,6 +273,8 @@ final class StreamProxy: NSObject {
         if let r = rangeHeader { r.withCString { curl_bridge_add_header(h, $0) } }
         curl_bridge_set_header_fn(h, proxyHeaderCallback, connPtr)
         curl_bridge_set_write_fn(h, proxyBodyCallback, connPtr)
+        // Abort this transfer promptly if a newer video is requested (see proxyProgressCallback).
+        curl_bridge_set_progress_fn(h, proxyProgressCallback, connPtr)
 
         // Pause the feed lane while this stream's TLS handshake to googlevideo runs, then reopen
         // it as soon as bytes flow (in the body callback). Guarantees the handshake isn't stalled

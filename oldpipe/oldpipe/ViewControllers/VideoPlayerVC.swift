@@ -374,7 +374,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     private func loadRelated() {
         didRequestRelated = true
-        YoutubeAPI.getRelated(videoId: video.id) { [weak self] vids in
+        YoutubeAPI.getRelated(videoId: video.id, priority: true) { [weak self] vids in
             guard let self = self else { return }
             self.relatedVideos = Array(vids.prefix(12))
             self.relayout()

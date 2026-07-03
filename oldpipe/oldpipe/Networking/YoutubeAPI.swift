@@ -53,6 +53,12 @@ class YoutubeAPI {
     // means stream resolution never waits behind a backed-up feed-parse queue — the real
     // cause of "tap a video while the feed loads → stuck on loading for 30-40s".
     private static let playerParseQueue = DispatchQueue(label: "com.oldpipe.ytparse.player")
+    // Dedicated parse lane for USER-INITIATED browse/search/related requests (priority:true).
+    // Same reasoning as playerParseQueue: getting the bytes fast via the high-priority network
+    // lane isn't enough — the parse must also skip the serial parseQueue that the background
+    // feed jams with many large channel-browse parses. Without this, tapping a channel (or
+    // searching) mid-feed-load returns bytes quickly but the PARSE waits 30-40s behind the feed.
+    private static let interactiveParseQueue = DispatchQueue(label: "com.oldpipe.ytparse.interactive")
 
     private static func body(client: [String: Any], extra: [String: Any]) -> [String: Any] {
         var b: [String: Any] = ["context": ["client": client]]
@@ -66,11 +72,13 @@ class YoutubeAPI {
         let payload = body(client: webClient, extra: ["query": query])
         guard let jsonStr = toJSON(payload) else { completion([]); return }
         let url = "\(baseURL)/search?prettyPrint=false"
+        // Search is always user-initiated — use the high-priority lane so it preempts
+        // any in-flight background feed load (see CurlFetcher feedTurnstile).
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: webUserAgent, timeout: 30) { data in
+                             userAgent: webUserAgent, timeout: 30, priority: true) { data in
             guard let data = data else { completion([]); return }
-            // Parse off main thread
-            parseQueue.async {
+            // Parse off main thread, on the interactive lane (search is always user-initiated).
+            interactiveParseQueue.async {
                 let results = parseSearchResults(data)
                 DispatchQueue.main.async { completion(results) }
             }
@@ -107,15 +115,17 @@ class YoutubeAPI {
     // MARK: - Channel (videos + metadata)
 
     // completion: (videos, channel metadata, continuation token for next page or nil)
-    static func getChannelVideos(channelId: String, completion: @escaping ([Video], Channel?, String?) -> Void) {
+    // priority: true routes through the high-priority lane (preempts the background feed).
+    // The HomeVC feed loop leaves it false; user-initiated channel navigation passes true.
+    static func getChannelVideos(channelId: String, priority: Bool = false, completion: @escaping ([Video], Channel?, String?) -> Void) {
         // params "EgZ2aWRlb3PyBgQKAjoA" = the channel's "Videos" tab.
         let payload = body(client: webClient, extra: ["browseId": channelId, "params": "EgZ2aWRlb3PyBgQKAjoA"])
         guard let jsonStr = toJSON(payload) else { completion([], nil, nil); return }
         let url = "\(baseURL)/browse?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: webUserAgent, timeout: 30) { data in
+                             userAgent: webUserAgent, timeout: 30, priority: priority) { data in
             guard let data = data else { completion([], nil, nil); return }
-            parseQueue.async {
+            (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseChannelResponse(data, channelId: channelId)
                 DispatchQueue.main.async { completion(result.0, result.1, result.2) }
             }
@@ -123,15 +133,15 @@ class YoutubeAPI {
     }
 
     // completion: (shorts videos, continuation token for next page or nil)
-    static func getChannelShorts(channelId: String, completion: @escaping ([Video], String?) -> Void) {
+    static func getChannelShorts(channelId: String, priority: Bool = false, completion: @escaping ([Video], String?) -> Void) {
         // params "EgZzaG9ydHPyBgUKA5oBAA%3D%3D" = the channel's "Shorts" tab.
         let payload = body(client: webClient, extra: ["browseId": channelId, "params": "EgZzaG9ydHPyBgUKA5oBAA%3D%3D"])
         guard let jsonStr = toJSON(payload) else { completion([], nil); return }
         let url = "\(baseURL)/browse?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: webUserAgent, timeout: 30) { data in
+                             userAgent: webUserAgent, timeout: 30, priority: priority) { data in
             guard let data = data else { completion([], nil); return }
-            parseQueue.async {
+            (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseChannelResponse(data, channelId: channelId)
                 DispatchQueue.main.async { completion(result.0, result.2) }
             }
@@ -140,14 +150,14 @@ class YoutubeAPI {
 
     // Fetch the next page of a channel's videos using a continuation token.
     // completion: (more videos, next continuation token or nil)
-    static func getChannelContinuation(token: String, channelName: String, completion: @escaping ([Video], String?) -> Void) {
+    static func getChannelContinuation(token: String, channelName: String, priority: Bool = false, completion: @escaping ([Video], String?) -> Void) {
         let payload = body(client: webClient, extra: ["continuation": token])
         guard let jsonStr = toJSON(payload) else { completion([], nil); return }
         let url = "\(baseURL)/browse?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: webUserAgent, timeout: 30) { data in
+                             userAgent: webUserAgent, timeout: 30, priority: priority) { data in
             guard let data = data else { completion([], nil); return }
-            parseQueue.async {
+            (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseContinuation(data, channelName: channelName)
                 DispatchQueue.main.async { completion(result.0, result.1) }
             }
@@ -158,14 +168,14 @@ class YoutubeAPI {
 
     // Related ("Up next") videos for a watch page. WEB client returns the related panel
     // under twoColumnWatchNextResults.secondaryResults as lockupViewModel items.
-    static func getRelated(videoId: String, completion: @escaping ([Video]) -> Void) {
+    static func getRelated(videoId: String, priority: Bool = false, completion: @escaping ([Video]) -> Void) {
         let payload = body(client: webClient, extra: ["videoId": videoId])
         guard let jsonStr = toJSON(payload) else { completion([]); return }
         let url = "\(baseURL)/next?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: webUserAgent, timeout: 30) { data in
+                             userAgent: webUserAgent, timeout: 30, priority: priority) { data in
             guard let data = data else { completion([]); return }
-            parseQueue.async {
+            (priority ? interactiveParseQueue : parseQueue).async {
                 let results = parseRelated(data, excludeId: videoId)
                 DispatchQueue.main.async { completion(results) }
             }

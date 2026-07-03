@@ -248,7 +248,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private func loadVideos() {
         guard !didLoadVideos else { return }
         didLoadVideos = true
-        YoutubeAPI.getChannelVideos(channelId: channelId) { [weak self] vids, channel, token in
+        YoutubeAPI.getChannelVideos(channelId: channelId, priority: true) { [weak self] vids, channel, token in
             guard let self = self else { return }
             self.videos = vids
             self.videosSeen = Set(vids.map { $0.id })
@@ -283,7 +283,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private func loadShorts() {
         guard !didLoadShorts else { return }
         didLoadShorts = true
-        YoutubeAPI.getChannelShorts(channelId: channelId) { [weak self] vids, token in
+        YoutubeAPI.getChannelShorts(channelId: channelId, priority: true) { [weak self] vids, token in
             guard let self = self else { return }
             self.shorts = vids
             self.shortsSeen = Set(vids.map { $0.id })
@@ -352,7 +352,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             guard let token = videosToken, !videosLoadingMore else { return }
             videosLoadingMore = true
             updateLoadMoreFooter(tab: 0)
-            YoutubeAPI.getChannelContinuation(token: token, channelName: channelName) { [weak self] vids, next in
+            YoutubeAPI.getChannelContinuation(token: token, channelName: channelName, priority: true) { [weak self] vids, next in
                 guard let self = self else { return }
                 self.videosLoadingMore = false
                 self.videosToken = next
@@ -367,7 +367,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             guard let token = shortsToken, !shortsLoadingMore else { return }
             shortsLoadingMore = true
             updateLoadMoreFooter(tab: 1)
-            YoutubeAPI.getChannelContinuation(token: token, channelName: channelName) { [weak self] vids, next in
+            YoutubeAPI.getChannelContinuation(token: token, channelName: channelName, priority: true) { [weak self] vids, next in
                 guard let self = self else { return }
                 self.shortsLoadingMore = false
                 self.shortsToken = next

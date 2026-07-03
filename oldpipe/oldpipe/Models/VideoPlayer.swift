@@ -27,6 +27,7 @@ class VideoPlayer {
     private var lastSavedPos: Double = 0
     private var artwork: UIImage?
     private var ticker: Timer?
+    private var endObserver: NSObjectProtocol?   // AVPlayerItemDidPlayToEndTime for the current item
 
     // MARK: - Load / state
 
@@ -43,6 +44,12 @@ class VideoPlayer {
         let newItem = AVPlayerItem(url: url)
         item = newItem
         player?.replaceCurrentItem(with: newItem)
+        // Close the proxy stream when this item plays to the end (see handlePlaybackEnded).
+        if let obs = endObserver { NotificationCenter.default.removeObserver(obs) }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: newItem, queue: OperationQueue.main) { [weak self] _ in
+            self?.handlePlaybackEnded()
+        }
         currentVideo = video
         self.isLocal = isLocal
         self.artwork = artwork
@@ -109,14 +116,24 @@ class VideoPlayer {
     func stop() {
         saveResume()
         ticker?.invalidate(); ticker = nil
+        if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         layer.removeFromSuperlayer()
+        StreamProxy.shared.closeCurrentStream()   // abort the libcurl transfer promptly
         item = nil
         currentVideo = nil
         artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false)
+    }
+
+    // The current item reached its end. Tear down the underlying proxy stream so a finished
+    // stream's libcurl transfer doesn't linger blocked in a socket send() holding a worker
+    // thread. Routes stay valid (see closeCurrentStream), so a scrub-back reconnect still works.
+    private func handlePlaybackEnded() {
+        if !isLocal { StreamProxy.shared.closeCurrentStream() }
+        updateNowPlayingInfo()
     }
 
     func setArtwork(_ img: UIImage?) {
