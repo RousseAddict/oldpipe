@@ -75,18 +75,14 @@ class MiniPlayerBar: UIView {
         // play / pause
         playPauseBtn.frame = CGRect(x: bounds.width - 88, y: 0, width: 44, height: MiniPlayerBar.barHeight)
         playPauseBtn.backgroundColor = .clear
-        playPauseBtn.setTitleColor(.white, for: .normal)
-        playPauseBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 18)
-        playPauseBtn.setTitle(">", for: .normal)
+        playPauseBtn.setImage(UIImage(named: "play"), for: .normal)
         playPauseBtn.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
         addSubview(playPauseBtn)
 
         // close
         closeBtn.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: MiniPlayerBar.barHeight)
         closeBtn.backgroundColor = .clear
-        closeBtn.setTitleColor(UIColor(white: 0.8, alpha: 1), for: .normal)
-        closeBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 18)
-        closeBtn.setTitle("X", for: .normal)
+        closeBtn.setImage(UIImage(named: "close"), for: .normal)
         closeBtn.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         addSubview(closeBtn)
 
@@ -125,7 +121,7 @@ class MiniPlayerBar: UIView {
             if !video.thumbnailURL.isEmpty { thumbView.load(url: video.thumbnailURL) }
         }
 
-        playPauseBtn.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
+        playPauseBtn.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
 
         let dur = sp.durationSeconds
         let frac = dur > 0 ? CGFloat(sp.currentSeconds / dur) : 0

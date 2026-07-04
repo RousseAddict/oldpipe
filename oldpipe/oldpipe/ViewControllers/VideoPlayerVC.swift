@@ -17,6 +17,27 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
     private var pendingPlaylists: [Playlist] = []
 
+    // Chromecast spike: LAN discovery + one live session. castDevices maps the picker
+    // action-sheet indices to discovered devices.
+    private var castDiscovery: CastDiscovery?
+    private var castSession: CastSession?
+    private var castDevices: [CastDevice] = []
+    // Cast control panel overlaid on the video area while a session is live.
+    private var castPanel: UIView?
+    private var castTitleLabel: UILabel?
+    private var castPlayPauseBtn: UIButton?
+    private var castScrubber: UISlider?
+    private var castCurLabel: UILabel?
+    private var castDurLabel: UILabel?
+    private var castDuration: Double = 0
+    private var castIsScrubbing = false
+    private var castIsPlaying = false
+    // Cast button lives in the bottom control bar, just before the fullscreen button (so it
+    // rides along into fullscreen with the bar); a spinner sits centered in it while device
+    // discovery is running.
+    private var castBtn: UIButton?
+    private var castBtnSpinner: UIActivityIndicatorView?
+
     // Everything below the meta line is laid out by relayout() from contentBelowMetaY:
     // description (below meta) → download button → share row → related videos. The
     // description and related arrive asynchronously (in either order) and the description
@@ -41,6 +62,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var channelLabel: UILabel?
     private var metaLabel: UILabel?
     private var videoContainer: UIView?
+    private var tapCatcher: UIButton?
     private var downloadBtn: UIButton?
     private var shareBtn: UIButton?
     private var addPlaylistBtn: UIButton?
@@ -75,6 +97,19 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         super.viewDidLoad()
         title = "Video"
         view.backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1)
+    }
+
+    // Show the cast glyph (idle, or active where a tap stops the session); stops the spinner.
+    private func showCastGlyph() {
+        castBtnSpinner?.stopAnimating()
+        castBtn?.setImage(UIImage(named: "cast"), for: .normal)
+        castBtn?.isHidden = false
+    }
+
+    // Swap the cast button's glyph for a spinning indicator while discovery is running.
+    private func showCastSpinner() {
+        castBtn?.setImage(nil, for: .normal)
+        castBtnSpinner?.startAnimating()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -120,6 +155,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &controlsHideKey) as? Timer { t.invalidate() }
         if fsOverlay != nil { exitFullscreen() }
         // Detach the shared layer — do NOT stop. Playback (audio) continues; the mini bar
         // takes over the UI. The layer is reattached on the next appear.
@@ -228,14 +264,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         container.addSubview(thumb)
         thumbView = thumb
 
+        // Transparent tap-catcher over the video: toggles the control bar. A plain UIButton
+        // (NOT a UITapGestureRecognizer, which conflicts with button taps on iOS 6). Added
+        // here so it sits BELOW the play button / controls / cast button — those keep their
+        // own taps; taps anywhere else on the video hit this.
+        let tap = UIButton(type: .custom)
+        tap.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
+        tap.backgroundColor = .clear
+        tap.addTarget(self, action: #selector(videoAreaTapped), for: .touchUpInside)
+        container.addSubview(tap)
+        tapCatcher = tap
+
         // Play button overlay
         let btn = UIButton(type: .custom)
         btn.frame = CGRect(x: (w - 64) / 2, y: (videoH - 64) / 2, width: 64, height: 64)
         btn.backgroundColor = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 0.9)
         btn.layer.cornerRadius = 32
-        btn.setTitle(">", for: .normal)
-        btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 28)
+        btn.setImage(UIImage(named: "play"), for: .normal)
         btn.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
         container.addSubview(btn)
         playBtn = btn
@@ -662,6 +707,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             } else if actionSheet.buttonTitle(at: buttonIndex) == "New Playlist\u{2026}" {
                 promptNewPlaylist()
             }
+        } else if actionSheet.tag == 3 {
+            if buttonIndex < castDevices.count {
+                startCasting(to: castDevices[buttonIndex])
+            }
         }
     }
 
@@ -675,6 +724,214 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let pl = PlaylistManager.create(name: name)
         PlaylistManager.add(video: video, to: pl.id)
         flash(addPlaylistBtn, "Added \u{2713}", revertTo: "+ Playlist")
+    }
+
+    // MARK: - Chromecast (discovery + handshake spike)
+
+    @objc private func castTapped() {
+        // If a session is live, this button stops it.
+        if castSession != nil {
+            stopCast()
+            return
+        }
+
+        showCastSpinner()
+
+        let disco = CastDiscovery()
+        castDiscovery = disco
+        disco.onUpdate = { [weak self] devices in self?.castDevices = devices }
+        disco.start()
+
+        // Give mDNS a couple of seconds to resolve, then present whatever we found.
+        let t = Timer(timeInterval: 2.5, target: BlockTarget { [weak self] in
+            self?.showCastPicker()
+        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    private func showCastPicker() {
+        castDiscovery?.stop()
+        showCastGlyph()   // stop the spinner regardless of outcome
+        guard !castDevices.isEmpty else {
+            let alert = UIAlertView()
+            alert.title = "No Chromecast found"
+            alert.message = "Make sure a Chromecast is on the same Wi-Fi network."
+            alert.addButton(withTitle: "OK")
+            alert.cancelButtonIndex = 0
+            alert.show()
+            return
+        }
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Cast to\u{2026}"
+        for dev in castDevices { sheet.addButton(withTitle: dev.name) }
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 3
+        sheet.show(in: view)
+    }
+
+    private func startCasting(to device: CastDevice) {
+        guard let preferred = preferredStream() else {
+            statusLabel?.text = "No stream to cast yet"
+            statusLabel?.isHidden = false
+            return
+        }
+        // Playback moves to the TV — stop the local player so audio doesn't double up.
+        sp.pause()
+
+        // Hand the Chromecast the direct googlevideo MP4 (itag 18/22 = H.264+AAC, which the
+        // Default Media Receiver plays natively).
+        let session = CastSession(device: device)
+        castSession = session
+        session.onState = { [weak self] state in
+            self?.castTitleLabel?.text = "Casting to \(device.name) — \(state)"
+        }
+        session.onProgress = { [weak self] cur, dur, playing in
+            self?.updateCastProgress(current: cur, duration: dur, playing: playing)
+        }
+        session.start(mediaURL: preferred.url, contentType: "video/mp4")
+        // The glyph stays; while a session is live a tap on it stops casting.
+        showCastGlyph()
+        showCastPanel(deviceName: device.name)
+    }
+
+    @objc private func stopCastTapped() { stopCast() }
+
+    private func stopCast() {
+        castSession?.stop()
+        castSession = nil
+        castDiscovery?.stop()
+        castPanel?.isHidden = true
+        showCastGlyph()
+        // Restore the pre-cast state so the video can be replayed on-device immediately:
+        // the big play button over the thumbnail, local controls hidden.
+        controlsView?.isHidden = true
+        thumbView?.isHidden = false
+        playBtn?.isHidden = false
+        statusLabel?.isHidden = true
+    }
+
+    // MARK: Cast control panel (overlaid on the video area while casting)
+
+    private func showCastPanel(deviceName: String) {
+        guard let container = videoContainer else { return }
+        // Hide the local playback affordances behind the cast overlay.
+        controlsView?.isHidden = true
+        playBtn?.isHidden = true
+        spinner?.stopAnimating()
+        statusLabel?.isHidden = true
+
+        if castPanel == nil { buildCastPanel(in: container) }
+        castTitleLabel?.text = "Casting to \(deviceName)\u{2026}"
+        castIsPlaying = true
+        castPlayPauseBtn?.setImage(UIImage(named: "pause"), for: .normal)
+        castScrubber?.value = 0
+        castCurLabel?.text = "0:00"
+        castDurLabel?.text = "0:00"
+        castPanel?.isHidden = false
+        container.bringSubviewToFront(castPanel!)
+    }
+
+    private func buildCastPanel(in container: UIView) {
+        let w = container.bounds.width
+        let hgt = container.bounds.height
+        let panel = UIView(frame: container.bounds)
+        panel.backgroundColor = UIColor(white: 0, alpha: 0.85)
+        container.addSubview(panel)
+        castPanel = panel
+
+        // "Cast" glyph — the bundled cast PNG, scaled up to fill the 44pt badge.
+        let icon = UIImageView(image: UIImage(named: "cast"))
+        icon.contentMode = .scaleAspectFit
+        icon.frame = CGRect(x: (w - 44) / 2, y: hgt / 2 - 46, width: 44, height: 44)
+        panel.addSubview(icon)
+
+        let title = UILabel()
+        title.backgroundColor = .clear
+        title.textColor = .white
+        title.textAlignment = .center
+        title.font = UIFont.systemFont(ofSize: 13)
+        title.numberOfLines = 2
+        title.frame = CGRect(x: 8, y: hgt / 2, width: w - 16, height: 34)
+        panel.addSubview(title)
+        castTitleLabel = title
+
+        // Stop-casting button, top-right of the panel — replaces the old floating cast glyph
+        // (now that the cast icon lives in the auto-hiding control bar, the panel needs its
+        // own always-visible stop affordance).
+        let stop = UIButton(type: .custom)
+        stop.frame = CGRect(x: w - 40, y: 4, width: 36, height: 36)
+        stop.setImage(UIImage(named: "close"), for: .normal)
+        stop.addTarget(self, action: #selector(stopCastTapped), for: .touchUpInside)
+        panel.addSubview(stop)
+
+        // Bottom control bar: [play/pause 44][cur 44] ==slider== [dur 44]
+        let barH: CGFloat = 40
+        let bar = UIView(frame: CGRect(x: 0, y: hgt - barH, width: w, height: barH))
+        bar.backgroundColor = UIColor(white: 0, alpha: 0.4)
+        panel.addSubview(bar)
+
+        let pp = UIButton(type: .custom)
+        pp.frame = CGRect(x: 0, y: 0, width: 44, height: barH)
+        pp.setImage(UIImage(named: "pause"), for: .normal)
+        pp.addTarget(self, action: #selector(castTogglePlayPause), for: .touchUpInside)
+        bar.addSubview(pp)
+        castPlayPauseBtn = pp
+
+        let cur = UILabel()
+        cur.backgroundColor = .clear
+        cur.textColor = .white
+        cur.font = UIFont.systemFont(ofSize: 11)
+        cur.textAlignment = .center
+        cur.text = "0:00"
+        cur.frame = CGRect(x: 44, y: 0, width: 44, height: barH)
+        bar.addSubview(cur)
+        castCurLabel = cur
+
+        let dur = UILabel()
+        dur.backgroundColor = .clear
+        dur.textColor = .white
+        dur.font = UIFont.systemFont(ofSize: 11)
+        dur.textAlignment = .center
+        dur.text = "0:00"
+        dur.frame = CGRect(x: w - 44, y: 0, width: 44, height: barH)
+        bar.addSubview(dur)
+        castDurLabel = dur
+
+        let sl = UISlider(frame: CGRect(x: 88, y: 0, width: w - 88 - 44, height: barH))
+        sl.minimumValue = 0
+        sl.maximumValue = 1
+        sl.value = 0
+        sl.minimumTrackTintColor = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
+        sl.addTarget(self, action: #selector(castScrubTouchDown), for: .touchDown)
+        sl.addTarget(self, action: #selector(castScrubTouchUp), for: [.touchUpInside, .touchUpOutside])
+        bar.addSubview(sl)
+        castScrubber = sl
+    }
+
+    private func updateCastProgress(current: Double, duration: Double, playing: Bool) {
+        if duration > 0 { castDuration = duration; castDurLabel?.text = timeString(duration) }
+        castCurLabel?.text = timeString(current)
+        if castDuration > 0 && !castIsScrubbing {
+            castScrubber?.value = Float(current / castDuration)
+        }
+        castIsPlaying = playing
+        castPlayPauseBtn?.setImage(UIImage(named: playing ? "pause" : "play"), for: .normal)
+    }
+
+    @objc private func castTogglePlayPause() {
+        if castIsPlaying { castSession?.pause() } else { castSession?.play() }
+        castIsPlaying = !castIsPlaying
+        castPlayPauseBtn?.setImage(UIImage(named: castIsPlaying ? "pause" : "play"), for: .normal)
+    }
+
+    @objc private func castScrubTouchDown() { castIsScrubbing = true }
+
+    @objc private func castScrubTouchUp() {
+        castIsScrubbing = false
+        guard castDuration > 0, let v = castScrubber?.value else { return }
+        castSession?.seek(to: Double(v) * castDuration)
     }
 
     // MARK: - Playback controls UI
@@ -691,27 +948,27 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         let pp = UIButton(type: .custom)
         pp.frame = CGRect(x: 0, y: 0, width: 40, height: barH)
-        pp.setTitle("||", for: .normal)
-        pp.setTitleColor(.white, for: .normal)
-        pp.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        pp.setImage(UIImage(named: "pause"), for: .normal)
         pp.addTarget(self, action: #selector(togglePlayPause), for: .touchUpInside)
         bar.addSubview(pp)
         playPauseBtn = pp
 
+        // Elapsed time — left-aligned so it hugs the play button (no dead gap between them).
         let cur = UILabel()
         cur.backgroundColor = .clear
         cur.textColor = .white
         cur.font = UIFont.systemFont(ofSize: 11)
-        cur.textAlignment = .center
+        cur.textAlignment = .left
         cur.text = "0:00"
         bar.addSubview(cur)
         currentTimeLabel = cur
 
+        // Total time — right-aligned so it hugs the cast/fullscreen buttons (mirrors the left).
         let dur = UILabel()
         dur.backgroundColor = .clear
         dur.textColor = .white
         dur.font = UIFont.systemFont(ofSize: 11)
-        dur.textAlignment = .center
+        dur.textAlignment = .right
         dur.text = "0:00"
         bar.addSubview(dur)
         durationLabel = dur
@@ -727,8 +984,22 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(sl)
         scrubber = sl
 
+        // Cast button — lives in the bar just before the fullscreen button.
+        let cast = UIButton(type: .custom)
+        cast.setImage(UIImage(named: "cast"), for: .normal)
+        cast.addTarget(self, action: #selector(castTapped), for: .touchUpInside)
+        bar.addSubview(cast)
+        castBtn = cast
+
+        // Spinner shown in place of the cast glyph while discovery runs (subview of the button).
+        let castSpin = UIActivityIndicatorView(style: .white)
+        castSpin.hidesWhenStopped = true
+        castSpin.center = CGPoint(x: 18, y: barH / 2)
+        cast.addSubview(castSpin)
+        castBtnSpinner = castSpin
+
         let fs = UIButton(type: .custom)
-        fs.setImage(fullscreenIcon(), for: .normal)
+        fs.setImage(UIImage(named: "fullscreen"), for: .normal)
         fs.addTarget(self, action: #selector(fullscreenTapped), for: .touchUpInside)
         bar.addSubview(fs)
         fsButton = fs
@@ -737,36 +1008,27 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Position the control bar's children for a given bar width (bar frame set by caller).
-    // Layout: [play 40][cur 44] ===slider=== [dur 40][fullscreen 36]
+    // Layout: [play 36][cur 46] ===slider=== [dur 46][cast 36][fullscreen 36]
+    // Times are left/right-aligned so they hug the adjacent buttons — spacing is uniform
+    // on both ends and the slider is centered between them.
     private func layoutControls(width w: CGFloat) {
         let barH: CGFloat = 40
-        playPauseBtn?.frame = CGRect(x: 0, y: 0, width: 40, height: barH)
-        currentTimeLabel?.frame = CGRect(x: 40, y: 0, width: 44, height: barH)
-        fsButton?.frame = CGRect(x: w - 36, y: 0, width: 36, height: barH)
-        durationLabel?.frame = CGRect(x: w - 36 - 40, y: 0, width: 40, height: barH)
-        scrubber?.frame = CGRect(x: 88, y: 0, width: w - 88 - 36 - 40, height: barH)
-    }
-
-    // A simple two-corner-bracket "expand" glyph drawn in code (reliable on iOS 6 fonts).
-    private func fullscreenIcon() -> UIImage? {
-        let s = CGSize(width: 20, height: 20)
-        UIGraphicsBeginImageContextWithOptions(s, false, UIScreen.main.scale)
-        guard let ctx = UIGraphicsGetCurrentContext() else { UIGraphicsEndImageContext(); return nil }
-        ctx.setStrokeColor(UIColor.white.cgColor)
-        ctx.setLineWidth(2)
-        let len: CGFloat = 6
-        // top-left
-        ctx.move(to: CGPoint(x: 2, y: 7)); ctx.addLine(to: CGPoint(x: 2, y: 2)); ctx.addLine(to: CGPoint(x: 7, y: 2))
-        // top-right
-        ctx.move(to: CGPoint(x: 18 - len, y: 2)); ctx.addLine(to: CGPoint(x: 18, y: 2)); ctx.addLine(to: CGPoint(x: 18, y: 7))
-        // bottom-left
-        ctx.move(to: CGPoint(x: 2, y: 18 - len)); ctx.addLine(to: CGPoint(x: 2, y: 18)); ctx.addLine(to: CGPoint(x: 7, y: 18))
-        // bottom-right
-        ctx.move(to: CGPoint(x: 18, y: 18 - len)); ctx.addLine(to: CGPoint(x: 18, y: 18)); ctx.addLine(to: CGPoint(x: 18 - len, y: 18))
-        ctx.strokePath()
-        let img = UIGraphicsGetImageFromCurrentImageContext()
-        UIGraphicsEndImageContext()
-        return img
+        let btnW: CGFloat = 36
+        let timeW: CGFloat = 46
+        playPauseBtn?.frame = CGRect(x: 0, y: 0, width: btnW, height: barH)
+        currentTimeLabel?.frame = CGRect(x: btnW, y: 0, width: timeW, height: barH)
+        fsButton?.frame = CGRect(x: w - btnW, y: 0, width: btnW, height: barH)
+        castBtn?.frame = CGRect(x: w - btnW * 2, y: 0, width: btnW, height: barH)
+        durationLabel?.frame = CGRect(x: w - btnW * 2 - timeW, y: 0, width: timeW, height: barH)
+        let leftEdge = btnW + timeW
+        let rightEdge = btnW * 2 + timeW
+        // A UISlider reserves ~half its thumb width of empty space at each end of its frame
+        // before the visible track begins, so the track looks like it has more padding than
+        // the tight play/time gaps. Bleed the slider frame outward by that inset so the
+        // visible track lines up with the time-label edges (matching the rest of the bar).
+        let thumbInset: CGFloat = 12
+        scrubber?.frame = CGRect(x: leftEdge - thumbInset, y: 0,
+                                 width: (w - leftEdge - rightEdge) + thumbInset * 2, height: barH)
     }
 
     private func showSpinner() { spinner?.startAnimating() }
@@ -774,8 +1036,45 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     private func showControls() {
         controlsView?.isHidden = false
-        playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
+        playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
+        updateProgress()
         startProgressTimer()
+        armControlsHideTimer()
+    }
+
+    // Hide the control bar (and stop the 0.5s progress ticker while hidden — a net perf win,
+    // no need to update a bar nobody can see). Called by the auto-hide timer / tap toggle.
+    private func hideControls() {
+        controlsView?.isHidden = true
+        stopProgressTimer()
+    }
+
+    // Toggle the bar on a tap anywhere on the video (only while a video is loaded and not
+    // casting — the cast panel has its own controls).
+    @objc private func videoAreaTapped() {
+        guard sp.isActive(video.id), castSession == nil else { return }
+        if controlsView?.isHidden ?? true {
+            showControls()
+        } else {
+            hideControls()
+        }
+    }
+
+    // Arm a one-shot 5s timer to auto-hide the controls. Stays visible while PAUSED
+    // (re-arming does nothing when paused) so a paused user isn't left with a bare frame.
+    private func armControlsHideTimer() {
+        cancelControlsHideTimer()
+        guard sp.isPlaying else { return }
+        let t = Timer(timeInterval: 5.0, target: BlockTarget { [weak self] in
+            self?.hideControls()
+        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+        objc_setAssociatedObject(self, &controlsHideKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func cancelControlsHideTimer() {
+        if let t = objc_getAssociatedObject(self, &controlsHideKey) as? Timer { t.invalidate() }
+        objc_setAssociatedObject(self, &controlsHideKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     private func startProgressTimer() {
@@ -785,6 +1084,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
         objc_setAssociatedObject(self, &progressTimerKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func stopProgressTimer() {
+        if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
+        objc_setAssociatedObject(self, &progressTimerKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     private func updateProgress() {
@@ -798,7 +1102,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             currentTimeLabel?.text = timeString(cur)
         }
         // Keep button glyph in sync with actual rate.
-        playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
+        playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
     }
 
     private func timeString(_ seconds: Double) -> String {
@@ -808,10 +1112,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     @objc private func togglePlayPause() {
         sp.togglePlayPause()
-        playPauseBtn?.setTitle(sp.isPlaying ? "||" : ">", for: .normal)
+        playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
+        // Re-arm the auto-hide (arms only if now playing; stays visible if now paused).
+        armControlsHideTimer()
     }
 
-    @objc private func scrubTouchDown() { isScrubbing = true }
+    @objc private func scrubTouchDown() {
+        isScrubbing = true
+        cancelControlsHideTimer()   // don't hide the bar mid-scrub
+    }
 
     @objc private func scrubChanged() {
         let dur = sp.durationSeconds
@@ -822,6 +1131,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @objc private func scrubTouchUp() {
         if let v = scrubber?.value { sp.seek(toFraction: Double(v)) }
         isScrubbing = false
+        armControlsHideTimer()
     }
 
     // MARK: - Stream loading
@@ -1091,8 +1401,18 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         overlay.layer.addSublayer(pLayer)
         CATransaction.commit()
 
+        // Transparent tap-catcher fills the overlay so tapping in fullscreen toggles the
+        // bar too. Added FIRST so it sits behind the controls bar + cast button.
+        if let tap = tapCatcher {
+            tap.frame = overlay.bounds
+            overlay.addSubview(tap)
+        }
+
         // Move the controls bar into the (rotated) overlay so it's usable in fullscreen.
-        if let bar = controlsView, !bar.isHidden {
+        // Reparent UNCONDITIONALLY even when hidden — otherwise a tap in fullscreen would
+        // reveal the bar back in the (portrait) container behind the overlay. The cast +
+        // fullscreen buttons are children of the bar, so they ride along automatically.
+        if let bar = controlsView {
             let barH: CGFloat = 40
             bar.frame = CGRect(x: 0, y: overlay.bounds.height - barH, width: overlay.bounds.width, height: barH)
             overlay.addSubview(bar)
@@ -1122,6 +1442,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             }
             CATransaction.commit()
         }
+        // Restore the tap-catcher into the container (below the play button / controls / cast).
+        if let tap = tapCatcher, let container = videoContainer {
+            tap.frame = container.bounds
+            container.addSubview(tap)
+        }
         // Restore the controls bar back into the video container.
         if let bar = controlsView, let container = videoContainer {
             let w = container.bounds.width
@@ -1140,6 +1465,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 private var timerKey = "timerKey"
 private var progressTimerKey = "progressTimerKey"
 private var downloadPollKey = "downloadPollKey"
+private var controlsHideKey = "controlsHideKey"
 
 private class BlockTarget: NSObject {
     let block: () -> Void

@@ -27,4 +27,19 @@ int         curl_bridge_perform(CurlHandle h);
 long        curl_bridge_response_code(CurlHandle h);
 const char *curl_bridge_strerror(int code);
 
+/* --- Raw TLS socket (CONNECT_ONLY) — used by the Chromecast CASTV2 client ---
+   Chromecast speaks a length-prefixed protobuf protocol over a raw TLS socket on
+   port 8009. libcurl's CURLOPT_CONNECT_ONLY performs the TLS handshake (OpenSSL,
+   speaks the modern ciphers iOS 6 Secure Transport can't) then hands us the socket
+   for curl_easy_send / curl_easy_recv. All three must be driven from ONE thread —
+   OpenSSL SSL_read/SSL_write on the same SSL object are not thread-safe. */
+
+/* TLS-connect to host:port (no HTTP). Returns 0 on success, else a CURLcode. */
+int         curl_bridge_connect_only(CurlHandle h, const char *host, long port);
+/* Blocking send of the whole buffer. Returns bytes sent (== len) or -1 on error. */
+long        curl_bridge_send(CurlHandle h, const void *buf, long len);
+/* Recv up to len bytes, waiting at most timeout_ms for readability.
+   Returns >0 bytes read, 0 on timeout (no data), -1 on error/closed. */
+long        curl_bridge_recv(CurlHandle h, void *buf, long len, long timeout_ms);
+
 #endif
