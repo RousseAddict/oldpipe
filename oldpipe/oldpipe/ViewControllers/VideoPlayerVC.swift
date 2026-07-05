@@ -242,7 +242,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         chanBtn?.isHidden = newVideo.channelId.isEmpty
         y += 24
 
-        let meta = [newVideo.durationText, newVideo.publishedText, newVideo.viewCountText]
+        let meta = [newVideo.durationText, newVideo.displayPublished, newVideo.viewCountText]
             .filter { !$0.isEmpty }.joined(separator: " • ")
         metaLabel?.text = meta
         if !meta.isEmpty {
@@ -412,7 +412,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         y += 24
 
         // Meta (duration + published + views)
-        let meta = [video.durationText, video.publishedText, video.viewCountText].filter { !$0.isEmpty }.joined(separator: " • ")
+        let meta = [video.durationText, video.displayPublished, video.viewCountText].filter { !$0.isEmpty }.joined(separator: " • ")
         if !meta.isEmpty {
             let metaL = UILabel()
             metaL.backgroundColor = .clear
@@ -668,7 +668,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         titleL.frame = CGRect(x: textX, y: 6, width: textW, height: 34)
         row.addSubview(titleL)
 
-        let subParts = [v.channelName, v.viewCountText, v.publishedText].filter { !$0.isEmpty }
+        let subParts = [v.channelName, v.viewCountText, v.displayPublished].filter { !$0.isEmpty }
         let subL = UILabel()
         subL.backgroundColor = .clear
         subL.textColor = UIColor(white: 0.5, alpha: 1)

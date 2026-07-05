@@ -311,7 +311,8 @@ class YoutubeAPI {
 
         return Video(id: videoId, title: title, channelName: channel, channelId: channelId,
                      thumbnailURL: thumbURL, durationText: duration, viewCountText: views,
-                     publishedText: published)
+                     publishedText: published,
+                     publishedTimestamp: Video.timestamp(fromRelative: published))
     }
 
     // Build a Video from a lockupViewModel (the format channel/browse pages now use
@@ -357,7 +358,8 @@ class YoutubeAPI {
         let thumbURL = "https://i.ytimg.com/vi/\(videoId)/mqdefault.jpg"
         return Video(id: videoId, title: title, channelName: channelName, channelId: channelId,
                      thumbnailURL: thumbURL, durationText: duration, viewCountText: views,
-                     publishedText: published)
+                     publishedText: published,
+                     publishedTimestamp: Video.timestamp(fromRelative: published))
     }
 
     // Build a Video from a shortsLockupViewModel (the channel "Shorts" tab format).

@@ -69,7 +69,7 @@ class VideoRowCell: UITableViewCell {
     func configure(with video: Video) {
         playedFraction = 0   // reset for reuse; callers that want the bar set it after configure
         titleLabel.text = video.title
-        subtitleLabel.text = [video.channelName, video.publishedText, video.viewCountText]
+        subtitleLabel.text = [video.channelName, video.displayPublished, video.viewCountText]
             .filter { !$0.isEmpty }.joined(separator: " • ")
 
         if video.durationText.isEmpty {
