@@ -29,6 +29,28 @@ class VideoPlayer {
     private var ticker: Timer?
     private var endObserver: NSObjectProtocol?   // AVPlayerItemDidPlayToEndTime for the current item
 
+    // MARK: - Autoplay queue (playlists)
+    // Set by PlaylistDetailVC before pushing the player. When the current item plays to the
+    // end, the singleton auto-advances to the next queued video (stopping at the end — no
+    // loop). Because the queue lives here, autoplay continues even after VideoPlayerVC is
+    // popped and only the mini bar remains. onAdvance lets the frontmost VideoPlayerVC (if
+    // any) swap its content to the new video.
+    private(set) var queue: [Video] = []
+    private(set) var queueIndex = 0
+    var onAdvance: ((Video) -> Void)?
+    private var advanceWaitTimer: Timer?
+
+    func setQueue(_ videos: [Video], startIndex: Int) {
+        queue = videos
+        queueIndex = startIndex
+    }
+
+    func clearQueue() {
+        queue = []
+        queueIndex = 0
+        advanceWaitTimer?.invalidate(); advanceWaitTimer = nil
+    }
+
     // MARK: - Load / state
 
     // Load a new item. Does not seek/play until applyResumeAndPlay() is called (the VC
@@ -115,6 +137,7 @@ class VideoPlayer {
     // Full teardown — used by the mini bar's close button.
     func stop() {
         saveResume()
+        clearQueue()
         ticker?.invalidate(); ticker = nil
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
         player?.pause()
@@ -134,6 +157,52 @@ class VideoPlayer {
     private func handlePlaybackEnded() {
         if !isLocal { StreamProxy.shared.closeCurrentStream() }
         updateNowPlayingInfo()
+        advanceQueueIfPossible()
+    }
+
+    // MARK: - Autoplay advance
+
+    // Advance to the next queued video, if the video that just ended is still the current
+    // queue item (guards against having navigated to a non-queue video) and a next item
+    // exists (stop at the end — no loop).
+    private func advanceQueueIfPossible() {
+        guard !queue.isEmpty,
+              queueIndex >= 0, queueIndex < queue.count,
+              currentVideo?.id == queue[queueIndex].id,
+              queueIndex + 1 < queue.count else { return }
+        queueIndex += 1
+        let next = queue[queueIndex]
+        StreamResolver.resolve(next) { [weak self] resolved in
+            guard let self = self else { return }
+            // Bail if the queue changed or was cleared while resolving.
+            guard !self.queue.isEmpty, self.queueIndex < self.queue.count,
+                  self.queue[self.queueIndex].id == next.id else { return }
+            guard let r = resolved else { return }   // couldn't resolve — stop the chain
+            let resume = DownloadManager.position(for: next.id)
+            self.load(video: next, url: r.url, isLocal: r.isLocal, resume: resume, artwork: nil)
+            self.onAdvance?(next)   // let the frontmost VideoPlayerVC swap its content
+            self.waitForReadyThenPlay()
+        }
+    }
+
+    // Poll the new item's status and begin playback once ready. UI-independent counterpart
+    // of VideoPlayerVC.pollUntilReady — used when the queue auto-advances with no VC driving
+    // the load. maxTicks in 0.25s units (80 = 20s, matching the iOS 6 proxy path).
+    private func waitForReadyThenPlay(maxTicks: Int = 80) {
+        advanceWaitTimer?.invalidate()
+        var count = 0
+        let t = Timer(timeInterval: 0.25, target: TickProxy { [weak self] in
+            guard let self = self else { return }
+            count += 1
+            if self.isReady {
+                self.advanceWaitTimer?.invalidate(); self.advanceWaitTimer = nil
+                self.applyResumeAndPlay()
+            } else if self.isFailed || count > maxTicks {
+                self.advanceWaitTimer?.invalidate(); self.advanceWaitTimer = nil
+            }
+        }, selector: #selector(TickProxy.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        advanceWaitTimer = t
     }
 
     func setArtwork(_ img: UIImage?) {

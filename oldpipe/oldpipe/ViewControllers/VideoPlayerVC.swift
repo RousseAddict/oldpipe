@@ -9,7 +9,7 @@ import AVFoundation
 
 class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegate {
 
-    private let video: Video
+    private var video: Video
     private var streams: [VideoStream] = []
     private var didRequestStreams = false
 
@@ -60,6 +60,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var spinner: UIActivityIndicatorView?
     private var titleLabel: UILabel?
     private var channelLabel: UILabel?
+    private var chanBtn: UIButton?
     private var metaLabel: UILabel?
     private var videoContainer: UIView?
     private var tapCatcher: UIButton?
@@ -146,10 +147,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         // Fetch related videos immediately on open (once per VC instance).
         if !didRequestRelated { loadRelated() }
+
+        // Own the singleton's autoplay-advance callback while we're the frontmost player,
+        // so a playlist auto-advance swaps this VC's content in place.
+        sp.onAdvance = { [weak self] v in self?.handleAutoAdvance(v) }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        // Release the advance callback — the next frontmost VC (or none) takes over. When
+        // no VC is on screen, autoplay still advances; only the mini bar reflects it.
+        sp.onAdvance = nil
         NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
@@ -198,6 +206,64 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.setArtwork(thumbView?.image)
         showControls()
         updateProgress()
+    }
+
+    // MARK: - Autoplay advance
+
+    // The singleton auto-advanced the playlist queue to a new video (playback is already
+    // loading in the singleton). Swap this VC's content in place: reflow the title/channel/
+    // meta block (title height depends on the new text), reset the async description/related
+    // state, and re-fetch them for the new video without flashing "Loading..." over the
+    // live layer.
+    private func handleAutoAdvance(_ newVideo: Video) {
+        video = newVideo
+        streams = []
+        didRequestStreams = false
+        didRequestRelated = false
+        descriptionText = ""
+        descExpanded = false
+        relatedVideos = []
+
+        let w = UIScreen.main.bounds.width
+        let padding: CGFloat = 12
+
+        var y = (videoContainer?.frame.maxY ?? floor(w * 9.0 / 16.0)) + 12
+        titleLabel?.text = newVideo.title
+        let titleH = titleLabel?.sizeThatFits(CGSize(width: w - padding * 2, height: 200)).height ?? 20
+        titleLabel?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: titleH)
+        y += titleH + 8
+
+        channelLabel?.text = newVideo.channelName
+        channelLabel?.textColor = newVideo.channelId.isEmpty
+            ? UIColor(white: 0.6, alpha: 1)
+            : UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
+        channelLabel?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 20)
+        chanBtn?.frame = channelLabel?.frame ?? .zero
+        chanBtn?.isHidden = newVideo.channelId.isEmpty
+        y += 24
+
+        let meta = [newVideo.durationText, newVideo.publishedText, newVideo.viewCountText]
+            .filter { !$0.isEmpty }.joined(separator: " • ")
+        metaLabel?.text = meta
+        if !meta.isEmpty {
+            metaLabel?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 18)
+            metaLabel?.isHidden = false
+            y += 26
+        } else {
+            metaLabel?.isHidden = true
+        }
+        contentBelowMetaY = y
+
+        // Thumbnail (hidden behind the live layer, but used for lock-screen artwork).
+        if !newVideo.thumbnailURL.isEmpty { thumbView?.load(url: newVideo.thumbnailURL) }
+
+        updateDownloadButton()
+        showActivePlayback()   // re-attach layer + show controls + resync progress
+        relayout()
+
+        // Fetch the new video's description + related quietly (no status label changes).
+        loadStreams(updateStatus: false)
+        loadRelated()
     }
 
     // MARK: - Orientation → fullscreen
@@ -334,13 +400,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         channelL.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 20)
         sv.addSubview(channelL)
         channelLabel = channelL
-        if !video.channelId.isEmpty {
-            let chanBtn = UIButton(type: .custom)
-            chanBtn.frame = channelL.frame
-            chanBtn.backgroundColor = .clear
-            chanBtn.addTarget(self, action: #selector(channelTapped), for: .touchUpInside)
-            sv.addSubview(chanBtn)
-        }
+        // Always create the tap target (stored so auto-advance can retarget/toggle it);
+        // it's only enabled when we know the channel id.
+        let cb = UIButton(type: .custom)
+        cb.frame = channelL.frame
+        cb.backgroundColor = .clear
+        cb.addTarget(self, action: #selector(channelTapped), for: .touchUpInside)
+        cb.isHidden = video.channelId.isEmpty
+        sv.addSubview(cb)
+        chanBtn = cb
         y += 24
 
         // Meta (duration + published + views)
