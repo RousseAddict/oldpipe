@@ -63,7 +63,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var chanBtn: UIButton?
     private var metaLabel: UILabel?
     private var videoContainer: UIView?
-    private var tapCatcher: UIButton?
+    private var tapCatcher: SeekTapView?
+    private var seekIndicator: UIView?
     private var downloadBtn: UIButton?
     private var shareBtn: UIButton?
     private var addPlaylistBtn: UIButton?
@@ -330,14 +331,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         container.addSubview(thumb)
         thumbView = thumb
 
-        // Transparent tap-catcher over the video: toggles the control bar. A plain UIButton
-        // (NOT a UITapGestureRecognizer, which conflicts with button taps on iOS 6). Added
-        // here so it sits BELOW the play button / controls / cast button — those keep their
-        // own taps; taps anywhere else on the video hit this.
-        let tap = UIButton(type: .custom)
-        tap.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
+        // Transparent tap-catcher over the video: single tap toggles the control bar, a
+        // double tap on the left/right third seeks -15s / +15s. A custom UIView reading
+        // UITouch.tapCount (NOT a UITapGestureRecognizer, which conflicts with button taps
+        // on iOS 6). Added here so it sits BELOW the play button / controls / cast button —
+        // those keep their own taps; taps anywhere else on the video hit this.
+        let tap = SeekTapView(frame: CGRect(x: 0, y: 0, width: w, height: videoH))
         tap.backgroundColor = .clear
-        tap.addTarget(self, action: #selector(videoAreaTapped), for: .touchUpInside)
+        tap.onSingleTap = { [weak self] in self?.videoAreaTapped() }
+        tap.onSeekBackward = { [weak self] in self?.seekBackwardTapped() }
+        tap.onSeekForward = { [weak self] in self?.seekForwardTapped() }
         container.addSubview(tap)
         tapCatcher = tap
 
@@ -1128,6 +1131,63 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
+    // Double-tap left/right → skip 15s back/forward, with a fading on-screen indicator.
+    @objc private func seekBackwardTapped() {
+        guard sp.isActive(video.id), castSession == nil else { return }
+        sp.seek(bySeconds: -15)
+        showSeekIndicator(forward: false)
+        showControls()
+    }
+
+    @objc private func seekForwardTapped() {
+        guard sp.isActive(video.id), castSession == nil else { return }
+        sp.seek(bySeconds: 15)
+        showSeekIndicator(forward: true)
+        showControls()
+    }
+
+    // A ~96pt rounded plate on the left/right of the video showing the rewind/forward
+    // glyph + "15s", fading in then out. Hosted in the fullscreen overlay when active so
+    // it follows rotation, else in the video container.
+    private func showSeekIndicator(forward: Bool) {
+        guard let host = fsOverlay ?? videoContainer else { return }
+        seekIndicator?.removeFromSuperview()
+
+        let size: CGFloat = 96
+        let cont = UIView()
+        cont.backgroundColor = UIColor(white: 0, alpha: 0.6)
+        cont.layer.cornerRadius = size / 2
+        let cx = forward ? host.bounds.width * 0.75 : host.bounds.width * 0.25
+        let cy = host.bounds.height / 2
+        cont.frame = CGRect(x: cx - size / 2, y: cy - size / 2, width: size, height: size)
+
+        let iv = UIImageView(image: UIImage(named: forward ? "forward" : "rewind"))
+        iv.contentMode = .scaleAspectFit
+        iv.frame = CGRect(x: (size - 32) / 2, y: 20, width: 32, height: 32)
+        cont.addSubview(iv)
+
+        let lbl = UILabel(frame: CGRect(x: 0, y: 54, width: size, height: 20))
+        lbl.backgroundColor = .clear
+        lbl.textColor = .white
+        lbl.font = UIFont.boldSystemFont(ofSize: 13)
+        lbl.textAlignment = .center
+        lbl.text = "15s"
+        cont.addSubview(lbl)
+
+        host.addSubview(cont)
+        seekIndicator = cont
+
+        cont.alpha = 0
+        UIView.animate(withDuration: 0.15, animations: { cont.alpha = 1 }, completion: { _ in
+            UIView.animate(withDuration: 0.35, delay: 0.3, options: [], animations: {
+                cont.alpha = 0
+            }, completion: { [weak self] _ in
+                cont.removeFromSuperview()
+                if self?.seekIndicator === cont { self?.seekIndicator = nil }
+            })
+        })
+    }
+
     // Arm a one-shot 5s timer to auto-hide the controls. Stays visible while PAUSED
     // (re-arming does nothing when paused) so a paused user isn't left with a bare frame.
     private func armControlsHideTimer() {
@@ -1539,4 +1599,38 @@ private class BlockTarget: NSObject {
     let block: () -> Void
     init(_ block: @escaping () -> Void) { self.block = block }
     @objc func fire() { block() }
+}
+
+// MARK: - Double-tap seek view
+
+// Transparent overlay over the video that distinguishes single vs double taps WITHOUT a
+// UITapGestureRecognizer (which conflicts with button taps on iOS 6). A double tap on the
+// left third seeks back, on the right third seeks forward; single taps and center double
+// taps fall through to onSingleTap (toggle controls). A single tap is deferred ~0.28s so a
+// following second tap can cancel it (via UITouch.tapCount, iOS 2+).
+private class SeekTapView: UIView {
+    var onSingleTap: (() -> Void)?
+    var onSeekBackward: (() -> Void)?
+    var onSeekForward: (() -> Void)?
+    private var pendingSingle: Timer?
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        if touch.tapCount >= 2 {
+            pendingSingle?.invalidate(); pendingSingle = nil
+            let x = touch.location(in: self).x
+            let w = bounds.width
+            if x < w * 0.35 { onSeekBackward?() }
+            else if x > w * 0.65 { onSeekForward?() }
+            else { onSingleTap?() }
+        } else {
+            pendingSingle?.invalidate()
+            let t = Timer(timeInterval: 0.28, target: BlockTarget { [weak self] in
+                self?.pendingSingle = nil
+                self?.onSingleTap?()
+            }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+            RunLoop.main.add(t, forMode: .common)
+            pendingSingle = t
+        }
+    }
 }

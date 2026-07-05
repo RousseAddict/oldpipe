@@ -20,6 +20,10 @@
 		BB000001000000000000BE08 /* fullscreen@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD08 /* fullscreen@2x.png */; };
 		BB000001000000000000BE09 /* close.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD09 /* close.png */; };
 		BB000001000000000000BE0A /* close@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0A /* close@2x.png */; };
+		BB000001000000000000BE0B /* rewind.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0B /* rewind.png */; };
+		BB000001000000000000BE0C /* rewind@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0C /* rewind@2x.png */; };
+		BB000001000000000000BE0D /* forward.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0D /* forward.png */; };
+		BB000001000000000000BE0E /* forward@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0E /* forward@2x.png */; };
 		A34362E22FD764250064ADE1 /* oldpipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A34362E12FD764250064ADE1 /* oldpipeTests.swift */; };
 		A34362EC2FD764250064ADE1 /* oldpipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A34362EB2FD764250064ADE1 /* oldpipeUITests.swift */; };
 		A34362EE2FD764250064ADE1 /* oldpipeUITestsLaunchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A34362ED2FD764250064ADE1 /* oldpipeUITestsLaunchTests.swift */; };
@@ -89,6 +93,10 @@
 		BB000001000000000000BD08 /* fullscreen@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "fullscreen@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD09 /* close.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "close.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD0A /* close@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "close@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD0B /* rewind.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "rewind.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD0C /* rewind@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "rewind@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD0D /* forward.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "forward.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD0E /* forward@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "forward@2x.png"; sourceTree = "<group>"; };
 		A34362D72FD764250064ADE1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A34362DD2FD764250064ADE1 /* oldpipeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = oldpipeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A34362E12FD764250064ADE1 /* oldpipeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = oldpipeTests.swift; sourceTree = "<group>"; };
@@ -193,6 +201,10 @@
 				BB000001000000000000BD08 /* fullscreen@2x.png */,
 				BB000001000000000000BD09 /* close.png */,
 				BB000001000000000000BD0A /* close@2x.png */,
+				BB000001000000000000BD0B /* rewind.png */,
+				BB000001000000000000BD0C /* rewind@2x.png */,
+				BB000001000000000000BD0D /* forward.png */,
+				BB000001000000000000BD0E /* forward@2x.png */,
 				A34362D72FD764250064ADE1 /* Assets.xcassets */,
 			);
 			path = oldpipe;
@@ -394,6 +406,10 @@
 				BB000001000000000000BE08 /* fullscreen@2x.png in Resources */,
 				BB000001000000000000BE09 /* close.png in Resources */,
 				BB000001000000000000BE0A /* close@2x.png in Resources */,
+				BB000001000000000000BE0B /* rewind.png in Resources */,
+				BB000001000000000000BE0C /* rewind@2x.png in Resources */,
+				BB000001000000000000BE0D /* forward.png in Resources */,
+				BB000001000000000000BE0E /* forward@2x.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

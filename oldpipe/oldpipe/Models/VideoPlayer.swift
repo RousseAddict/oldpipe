@@ -123,6 +123,18 @@ class VideoPlayer {
         updateNowPlayingInfo()
     }
 
+    // Relative skip (double-tap seek). Clamps to [0, duration]; seeking a streamed video
+    // just issues a new Range request through the proxy — same cost as the scrubber.
+    func seek(bySeconds delta: Double) {
+        guard isReady else { return }
+        let dur = durationSeconds
+        var target = currentSeconds + delta
+        if target < 0 { target = 0 }
+        if dur > 0, target > dur { target = dur }
+        player?.seek(to: CMTimeMakeWithSeconds(target, preferredTimescale: 600))
+        updateNowPlayingInfo()
+    }
+
     var currentSeconds: Double {
         guard let it = item else { return 0 }
         let c = CMTimeGetSeconds(it.currentTime())
