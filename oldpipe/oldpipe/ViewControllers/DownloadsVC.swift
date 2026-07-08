@@ -79,8 +79,12 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         let h = UIScreen.main.bounds.height
         let navH: CGFloat = 64
         tableView.frame = CGRect(x: 0, y: 0, width: w, height: h - navH)
+        // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
+        // portrait-locked in the pbxproj so autoresizing never triggers there.
+        tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
         emptyLabel.frame = CGRect(x: 20, y: 80, width: w - 40, height: 60)
+        emptyLabel.autoresizingMask = iPadFlexWidth
         view.addSubview(emptyLabel)
     }
 

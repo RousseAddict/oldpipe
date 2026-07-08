@@ -44,6 +44,10 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
         scrollView = UIScrollView(frame: CGRect(x: 0, y: 0, width: w, height: h - navH))
         scrollView.backgroundColor = bg
+        // iPad rotates natively; the flexible masks (here + on every child below, via the
+        // layout helpers) stretch the form to the landscape width. iPhone is portrait-locked
+        // in the pbxproj so autoresizing never triggers there.
+        scrollView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(scrollView)
 
         // Tap anywhere outside the import field to dismiss the keyboard. cancelsTouchesInView
@@ -67,6 +71,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         exportView.font = UIFont(name: "Courier", size: 12) ?? UIFont.systemFont(ofSize: 12)
         exportView.isEditable = false   // NOTE: do NOT set isSelectable — it's iOS 7+ and crashes on iOS 6
         exportView.layer.cornerRadius = 6
+        exportView.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(exportView)
         y += 150 + 10
 
@@ -87,6 +92,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         importView.font = UIFont(name: "Courier", size: 12) ?? UIFont.systemFont(ofSize: 12)
         importView.isEditable = true
         importView.layer.cornerRadius = 6
+        importView.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(importView)
         y += 150 + 10
 
@@ -109,6 +115,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         cacheSizeLabel.backgroundColor = .clear
         cacheSizeLabel.textColor = UIColor(white: 0.7, alpha: 1)
         cacheSizeLabel.font = UIFont.boldSystemFont(ofSize: 13)
+        cacheSizeLabel.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(cacheSizeLabel)
         refreshCacheSize()
         y += 20 + 8
@@ -133,6 +140,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         statusLabel.textColor = UIColor(white: 0.55, alpha: 1)
         statusLabel.font = UIFont.systemFont(ofSize: 13)
         statusLabel.numberOfLines = 2
+        statusLabel.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(statusLabel)
         y += 40
 
@@ -160,6 +168,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         l.textColor = .white
         l.font = UIFont.boldSystemFont(ofSize: 20)
         l.text = text
+        l.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(l)
         return y + 26 + 4
     }
@@ -171,6 +180,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         l.font = UIFont.systemFont(ofSize: 13)
         l.numberOfLines = 0
         l.text = text
+        l.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(l)
         return y + 44 + 8
     }
@@ -183,6 +193,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         b.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
         b.backgroundColor = isAccent ? accent : UIColor(white: 0.20, alpha: 1)
         b.layer.cornerRadius = 8
+        b.autoresizingMask = iPadFlexWidth
         return b
     }
 

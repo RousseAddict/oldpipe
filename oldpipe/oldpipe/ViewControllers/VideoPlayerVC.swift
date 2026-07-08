@@ -272,6 +272,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // The app window stays portrait (iOS 6-safe); rotating the device drives the
     // fullscreen overlay's rotation so the video fills the screen in landscape.
     @objc private func orientationChanged() {
+        #if IOS8_TARGET
+        // iPad rotates its window natively: rotating to landscape already gives a landscape
+        // view, so the in-page layout just reflows (see viewWillTransition). Driving the
+        // manual rotated fullscreen overlay on top of an already-rotated window would
+        // double-transform it, so the rotate-to-fullscreen behavior is suppressed on iPad.
+        if UIDevice.current.userInterfaceIdiom == .pad { return }
+        #endif
         guard sp.isActive(video.id) else { return }   // only while a video is loaded
         // Short (portrait) videos stay portrait — device rotation doesn't drive a
         // landscape fullscreen for them (fullscreen is entered only via the button).
@@ -302,6 +309,93 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
+    #if IOS8_TARGET
+    // iPad rotates its window natively; reflow the whole page to the new width. This whole
+    // path is compiled ONLY into the iOS 8 build (-D IOS8_TARGET) — the iOS 6/7 build never
+    // sees it, so iOS 6 behavior is provably untouched.
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        guard UIDevice.current.userInterfaceIdiom == .pad, scrollView != nil else { return }
+        // Reflow using the target `size` from the coordinator, NOT UIScreen.main.bounds —
+        // the latter can still report the OLD (portrait) dimensions when read from inside
+        // the transition/completion, leaving the page stuck at portrait width. Do it in
+        // alongsideTransition so it tracks the rotation animation, and again on completion
+        // as a snap-to-final safety net.
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            self?.relayoutForRotation(size: size)
+        }, completion: { [weak self] _ in
+            self?.relayoutForRotation(size: size)
+        })
+    }
+
+    // Recompute every width-dependent frame from the new screen size and re-run relayout()
+    // (which already reflows the description → buttons → related block from scrollView width).
+    private func relayoutForRotation(size: CGSize) {
+        guard let sv = scrollView, let container = videoContainer else { return }
+        // Derive frames from the POST-rotation bounds, not the coordinator `size`: with
+        // edgesForExtendedLayout = [] the VC view is inset below the bars, so `size` (the
+        // container size) would over-count by the bar height. UIKit sets the final bounds
+        // before running the transition-coordinator blocks, so view.bounds is the true
+        // below-bar content area, and window.bounds is the full screen (for the fullscreen
+        // overlay, which must cover the bars too).
+        let w = view.bounds.width
+        let h = view.bounds.height
+        let padding: CGFloat = 12
+
+        // If the button-driven fullscreen overlay is up, resize IT to the new (already-
+        // rotated) FULL screen and re-anchor the layer / bar / tap-catcher inside it; the
+        // page underneath is hidden behind the overlay, but reflow it too so it's correct
+        // on exit.
+        if let overlay = fsOverlay {
+            let full = view.window?.bounds ?? CGRect(x: 0, y: 0, width: w, height: h)
+            overlay.frame = CGRect(x: 0, y: 0, width: full.width, height: full.height)
+            overlay.transform = .identity
+            sp.layer.frame = overlay.bounds
+            tapCatcher?.frame = overlay.bounds
+            let barH: CGFloat = 40
+            controlsView?.frame = CGRect(x: 0, y: overlay.bounds.height - barH, width: overlay.bounds.width, height: barH)
+            layoutControls(width: overlay.bounds.width)
+        }
+
+        // The VC view is already below the bars (edges = []), so the scroll view fills it.
+        sv.frame = CGRect(x: 0, y: 0, width: w, height: h)
+
+        let videoH = floor(w * 9.0 / 16.0)
+        container.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
+        thumbView?.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
+        playBtn?.frame = CGRect(x: (w - 64) / 2, y: (videoH - 64) / 2, width: 64, height: 64)
+        statusLabel?.frame = CGRect(x: 0, y: videoH - 28, width: w, height: 28)
+        spinner?.center = CGPoint(x: w / 2, y: videoH / 2)
+
+        if fsOverlay == nil {
+            tapCatcher?.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
+            sp.layer.frame = container.bounds
+            controlsView?.frame = CGRect(x: 0, y: videoH - 40, width: w, height: 40)
+            layoutControls(width: w)
+        }
+
+        // Title / channel / meta block (title height depends on width).
+        var y = videoH + 12
+        if let titleL = titleLabel {
+            let titleH = titleL.sizeThatFits(CGSize(width: w - padding * 2, height: 200)).height
+            titleL.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: titleH)
+            y += titleH + 8
+        }
+        if let chL = channelLabel {
+            chL.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 20)
+            chanBtn?.frame = chL.frame
+            y += 24
+        }
+        if let mL = metaLabel, !(mL.isHidden) {
+            mL.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 18)
+            y += 26
+        }
+        contentBelowMetaY = y
+
+        relayout()
+    }
+    #endif
+
     // MARK: - UI Setup
 
     private func setupUI() {
@@ -310,6 +404,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         let sv = UIScrollView(frame: CGRect(x: 0, y: 0, width: w, height: h - 64))
         sv.backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1)
+        // iPad rotates natively; resize with the view during the rotation animation. The
+        // internal content (video, labels, controls) is snapped into place by
+        // relayoutForRotation() on completion. iOS 6/7 build: [] (portrait-locked, no-op).
+        sv.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(sv)
         scrollView = sv
 
@@ -1481,6 +1579,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
         if fsOverlay == nil {
+            #if IOS8_TARGET
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                // iPad's window rotates natively — UIScreen.main.bounds already reflects the
+                // current orientation, so the overlay just fills it at angle 0 (no manual
+                // rotate transform). Works for both landscape and portrait device states.
+                setFullscreen(true, angle: 0)
+                return
+            }
+            #endif
             if sp.isPortraitVideo {
                 // Short video → portrait fullscreen, no rotation.
                 setFullscreen(true, angle: 0)
@@ -1505,6 +1612,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let screen = UIScreen.main.bounds
         let overlay = UIView()
         overlay.backgroundColor = .black
+        #if IOS8_TARGET
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // iPad: window already rotated by the OS → overlay fills the (already correctly
+            // oriented) screen bounds upright, no rotation transform. viewWillTransition /
+            // relayoutForRotation resizes this overlay on subsequent rotations.
+            overlay.frame = CGRect(x: 0, y: 0, width: screen.width, height: screen.height)
+            overlay.transform = CGAffineTransform.identity
+        } else if sp.isPortraitVideo {
+            overlay.bounds = CGRect(x: 0, y: 0, width: screen.width, height: screen.height)
+            overlay.center = CGPoint(x: screen.midX, y: screen.midY)
+            overlay.transform = CGAffineTransform.identity
+        } else {
+            overlay.bounds = CGRect(x: 0, y: 0, width: screen.height, height: screen.width)
+            overlay.center = CGPoint(x: screen.midX, y: screen.midY)
+            overlay.transform = CGAffineTransform(rotationAngle: fsAngle)
+        }
+        #else
         if sp.isPortraitVideo {
             // Short video: a full portrait overlay, no rotation — fills the upright screen.
             overlay.bounds = CGRect(x: 0, y: 0, width: screen.width, height: screen.height)
@@ -1515,6 +1639,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             overlay.center = CGPoint(x: screen.midX, y: screen.midY)
             overlay.transform = CGAffineTransform(rotationAngle: fsAngle)
         }
+        #endif
         window.addSubview(overlay)
         fsOverlay = overlay
 

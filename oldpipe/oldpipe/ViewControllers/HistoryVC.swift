@@ -48,9 +48,13 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
         tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tableView.tableFooterView = UIView()   // hide separators on empty rows (iOS 6)
+        // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
+        // portrait-locked in the pbxproj so autoresizing never triggers there.
+        tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
         statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 60))
+        statusLabel.autoresizingMask = iPadFlexWidth
         statusLabel.backgroundColor = .clear
         statusLabel.textColor = UIColor(white: 0.5, alpha: 1)
         statusLabel.textAlignment = .center

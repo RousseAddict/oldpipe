@@ -42,9 +42,13 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         tableView.delegate = self
         tableView.register(ChannelCell.self, forCellReuseIdentifier: ChannelCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
+        // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
+        // portrait-locked in the pbxproj so autoresizing never triggers there.
+        tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
         statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 60))
+        statusLabel.autoresizingMask = iPadFlexWidth
         statusLabel.backgroundColor = .clear
         statusLabel.textColor = UIColor(white: 0.5, alpha: 1)
         statusLabel.textAlignment = .center

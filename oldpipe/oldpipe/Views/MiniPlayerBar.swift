@@ -43,7 +43,7 @@ class MiniPlayerBar: UIView {
         // top hairline + red progress line
         let hairline = UIView(frame: CGRect(x: 0, y: 0, width: bounds.width, height: 0.5))
         hairline.backgroundColor = UIColor(white: 1, alpha: 0.15)
-        hairline.autoresizingMask = [.flexibleWidth]
+        hairline.autoresizingMask = iPadFlexWidth
         addSubview(hairline)
 
         progressLine.frame = CGRect(x: 0, y: 0, width: 0, height: 2)
@@ -95,6 +95,24 @@ class MiniPlayerBar: UIView {
         bringSubviewToFront(playPauseBtn)
         bringSubviewToFront(closeBtn)
     }
+
+    #if IOS8_TARGET
+    // iPad: the bar's flexibleWidth mask stretches its width on rotation, but the fixed-frame
+    // children (right-anchored buttons + the text block that fills to them) have to be
+    // repositioned for the new width. Compiled only into the iOS 8 build — the iOS 6/7 build
+    // never resizes the bar (portrait-locked window) so it keeps its original fixed layout.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let w = bounds.width
+        let textX: CGFloat = 106 + 10
+        let textW = max(0, w - textX - 88)
+        titleLabel.frame = CGRect(x: textX, y: 10, width: textW, height: 20)
+        channelLabel.frame = CGRect(x: textX, y: 32, width: textW, height: 16)
+        playPauseBtn.frame = CGRect(x: w - 88, y: 0, width: 44, height: MiniPlayerBar.barHeight)
+        closeBtn.frame = CGRect(x: w - 44, y: 0, width: 44, height: MiniPlayerBar.barHeight)
+        openBtn.frame = CGRect(x: 0, y: 0, width: w - 88, height: MiniPlayerBar.barHeight)
+    }
+    #endif
 
     // MARK: - Polling
 

@@ -95,6 +95,10 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tableView.tableFooterView = UIView()   // no empty separator rows while loading/empty
+        // iPad rotates natively; the flexible masks (here + on the status label, loading bar
+        // and side menu) reflow the layout in landscape. iPhone is portrait-locked in the
+        // pbxproj so autoresizing never triggers there.
+        tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
         // Pull-to-refresh (UIRefreshControl is iOS 6+; add as a subview of the plain table).
@@ -109,6 +113,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         statusLabel.textAlignment = .center
         statusLabel.font = UIFont.systemFont(ofSize: 15)
         statusLabel.numberOfLines = 0
+        statusLabel.autoresizingMask = iPadFlexWidth
         tableView.addSubview(statusLabel)
 
         // Indeterminate top loading bar: a 3px strip overlaid at the top of the content area
@@ -119,6 +124,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         bar.backgroundColor = UIColor(white: 0.12, alpha: 1)   // faint track behind the segment
         bar.clipsToBounds = true                               // clip the segment when off-edge
         bar.isHidden = true
+        bar.autoresizingMask = iPadFlexWidth   // startLoadingBar re-reads bar.bounds.width
         view.addSubview(bar)
         loadingBar = bar
 
@@ -161,16 +167,20 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         menuOverlay = UIView(frame: CGRect(x: 0, y: 0, width: w, height: h))
         menuOverlay.backgroundColor = .clear
         menuOverlay.isHidden = true
+        menuOverlay.autoresizingMask = iPadFlexWidthHeight
 
         // Dimming button — tap outside the panel closes the menu.
         let dim = UIButton(type: .custom)
         dim.frame = menuOverlay.bounds
         dim.backgroundColor = UIColor(white: 0, alpha: 0.5)
+        dim.autoresizingMask = iPadFlexWidthHeight
         dim.addTarget(self, action: #selector(closeMenu), for: .touchUpInside)
         menuOverlay.addSubview(dim)
 
+        // Fixed-width panel anchored to the left edge; only the height flexes on rotation.
         menuPanel = UIView(frame: CGRect(x: -menuWidth, y: 0, width: menuWidth, height: h))
         menuPanel.backgroundColor = UIColor(red: 0.11, green: 0.11, blue: 0.12, alpha: 1)
+        menuPanel.autoresizingMask = iPadFlexHeight
         menuOverlay.addSubview(menuPanel)
 
         // Accent header band with the app name + tagline.
@@ -224,6 +234,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         footer.textColor = UIColor(white: 0.4, alpha: 1)
         footer.font = UIFont.systemFont(ofSize: 11)
         footer.text = "v1.0"
+        footer.autoresizingMask = iPadFlexTop   // stay pinned to the panel's bottom
         menuPanel.addSubview(footer)
 
         view.addSubview(menuOverlay)

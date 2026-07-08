@@ -79,12 +79,35 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         loadVideos()
     }
 
+    #if IOS8_TARGET
+    // iPad rotates its window natively; reflow the width-dependent bits that autoresizing
+    // masks can't handle (the three equal-width tabs, the indicator, and the About text).
+    // Guarded to iPad — iPhone is portrait-locked so this never fires there. This whole
+    // override is compiled ONLY into the iOS 8 build (-D IOS8_TARGET); the iOS 6/7 build
+    // never sees it, so iOS 6 behavior is provably untouched.
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        guard UIDevice.current.userInterfaceIdiom == .pad, didSetupUI else { return }
+        coordinator.animate(alongsideTransition: nil, completion: { [weak self] _ in
+            guard let self = self else { return }
+            let w = size.width
+            let bw = w / CGFloat(max(self.tabButtons.count, 1))
+            for (i, b) in self.tabButtons.enumerated() {
+                b.frame = CGRect(x: bw * CGFloat(i), y: 0, width: bw, height: self.tabBarH)
+            }
+            self.updateTabIndicator()
+            self.updateAboutContent()
+        })
+    }
+    #endif
+
     private func setupUI() {
         let w = UIScreen.main.bounds.width
         let h = UIScreen.main.bounds.height
 
         headerView = UIView(frame: CGRect(x: 0, y: 0, width: w, height: headerH))
         headerView.backgroundColor = UIColor(red: 0.10, green: 0.10, blue: 0.10, alpha: 1)
+        headerView.autoresizingMask = iPadFlexWidth
         view.addSubview(headerView)
 
         avatarView = AsyncImageView(frame: CGRect(x: 12, y: 16, width: 64, height: 64))
@@ -101,6 +124,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         nameLabel.textColor = UIColor(white: 0.95, alpha: 1)
         nameLabel.font = UIFont.boldSystemFont(ofSize: 17)
         nameLabel.text = channelName
+        nameLabel.autoresizingMask = iPadFlexWidth
         headerView.addSubview(nameLabel)
 
         subscribeBtn = UIButton(type: .custom)
@@ -114,6 +138,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // Tab bar
         tabBar = UIView(frame: CGRect(x: 0, y: headerH, width: w, height: tabBarH))
         tabBar.backgroundColor = UIColor(red: 0.10, green: 0.10, blue: 0.10, alpha: 1)
+        tabBar.autoresizingMask = iPadFlexWidth
         view.addSubview(tabBar)
 
         let titles = ["Videos", "Shorts", "About"]
@@ -132,6 +157,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // 0.5px hairline under the tab bar
         let hair = UIView(frame: CGRect(x: 0, y: tabBarH - 0.5, width: w, height: 0.5))
         hair.backgroundColor = UIColor(white: 0.2, alpha: 1)
+        hair.autoresizingMask = iPadFlexWidth
         tabBar.addSubview(hair)
 
         tabIndicator = UIView(frame: CGRect(x: 0, y: tabBarH - 2, width: bw, height: 2))
@@ -161,6 +187,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         aboutScroll = UIScrollView(frame: contentFrame)
         aboutScroll.backgroundColor = bg
         aboutScroll.isHidden = true
+        aboutScroll.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(aboutScroll)
         aboutLabel = UILabel(frame: CGRect(x: 16, y: 16, width: w - 32, height: 0))
         aboutLabel.backgroundColor = .clear
@@ -181,6 +208,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         tv.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
         tv.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tv.tableFooterView = UIView()   // no empty separator rows while loading/empty
+        tv.autoresizingMask = iPadFlexWidthHeight
         return tv
     }
 
@@ -190,6 +218,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         l.textColor = UIColor(white: 0.5, alpha: 1)
         l.textAlignment = .center
         l.font = UIFont.systemFont(ofSize: 15)
+        l.autoresizingMask = iPadFlexWidth
         return l
     }
 

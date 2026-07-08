@@ -59,13 +59,18 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
         let navH: CGFloat = 64 // nav bar + status bar
 
         searchBar.frame = CGRect(x: 0, y: 0, width: w, height: 44)
+        searchBar.autoresizingMask = iPadFlexWidth
         view.addSubview(searchBar)
 
         tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
         tableView.frame = CGRect(x: 0, y: 44, width: w, height: h - navH - 44)
+        // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
+        // portrait-locked in the pbxproj so autoresizing never triggers there.
+        tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
         statusLabel.frame = CGRect(x: 20, y: 44 + 60, width: w - 40, height: 60)
+        statusLabel.autoresizingMask = iPadFlexWidth
         view.addSubview(statusLabel)
     }
 
