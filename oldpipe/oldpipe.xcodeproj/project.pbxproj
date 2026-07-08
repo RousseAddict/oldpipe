@@ -11,7 +11,13 @@
 		A34362D82FD764250064ADE1 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A34362D72FD764250064ADE1 /* Assets.xcassets */; };
 		A34363012FD764270064ADE1 /* Default-568h@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = A34363002FD764270064ADE1 /* Default-568h@2x.png */; };
 		BB000001000000000000BE01 /* play.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD01 /* play.png */; };
+		BB000001000000000000BE17 /* playlist.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD17 /* playlist.png */; };
+		BB000001000000000000BE15 /* share.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD15 /* share.png */; };
+		BB000001000000000000BE13 /* download.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD13 /* download.png */; };
 		BB000001000000000000BE02 /* play@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD02 /* play@2x.png */; };
+		BB000001000000000000BE18 /* playlist@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD18 /* playlist@2x.png */; };
+		BB000001000000000000BE16 /* share@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD16 /* share@2x.png */; };
+		BB000001000000000000BE14 /* download@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD14 /* download@2x.png */; };
 		BB000001000000000000BE03 /* pause.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD03 /* pause.png */; };
 		BB000001000000000000BE04 /* pause@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD04 /* pause@2x.png */; };
 		BB000001000000000000BE05 /* cast.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD05 /* cast.png */; };
@@ -23,6 +29,10 @@
 		BB000001000000000000BE0B /* rewind.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0B /* rewind.png */; };
 		BB000001000000000000BE0C /* rewind@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0C /* rewind@2x.png */; };
 		BB000001000000000000BE0D /* forward.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0D /* forward.png */; };
+		BB000001000000000000BE0F /* gear.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0F /* gear.png */; };
+		BB000001000000000000BE10 /* gear@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD10 /* gear@2x.png */; };
+		BB000001000000000000BE11 /* hd.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD11 /* hd.png */; };
+		BB000001000000000000BE12 /* hd@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD12 /* hd@2x.png */; };
 		BB000001000000000000BE0E /* forward@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD0E /* forward@2x.png */; };
 		A34362E22FD764250064ADE1 /* oldpipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A34362E12FD764250064ADE1 /* oldpipeTests.swift */; };
 		A34362EC2FD764250064ADE1 /* oldpipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A34362EB2FD764250064ADE1 /* oldpipeUITests.swift */; };
@@ -32,6 +42,7 @@
 		BB000001000000000000BC02 /* CurlFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB02 /* CurlFetcher.swift */; };
 		BB000001000000000000BC1E /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1E /* CastSession.swift */; };
 		BB000001000000000000BC1F /* StreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1F /* StreamResolver.swift */; };
+		BB000001000000000000BC20 /* StreamMuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB20 /* StreamMuxer.swift */; };
 		BB000001000000000000BC1D /* CastDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1D /* CastDiscovery.swift */; };
 		BB000001000000000000BC1C /* CastMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1C /* CastMessage.swift */; };
 		BB000001000000000000BC19 /* StreamProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB19 /* StreamProxy.swift */; };
@@ -84,7 +95,13 @@
 		A34362FE2FD764260064ADE1 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		A34363002FD764270064ADE1 /* Default-568h@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Default-568h@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD01 /* play.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "play.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD17 /* playlist.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD15 /* share.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "share.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD13 /* download.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "download.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD02 /* play@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "play@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD18 /* playlist@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD16 /* share@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "share@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD14 /* download@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "download@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD03 /* pause.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "pause.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD04 /* pause@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "pause@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD05 /* cast.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "cast.png"; sourceTree = "<group>"; };
@@ -96,6 +113,10 @@
 		BB000001000000000000BD0B /* rewind.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "rewind.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD0C /* rewind@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "rewind@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD0D /* forward.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "forward.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD0F /* gear.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "gear.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD10 /* gear@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "gear@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD11 /* hd.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "hd.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD12 /* hd@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "hd@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD0E /* forward@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "forward@2x.png"; sourceTree = "<group>"; };
 		A34362D72FD764250064ADE1 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A34362DD2FD764250064ADE1 /* oldpipeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = oldpipeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -107,6 +128,7 @@
 		BB000001000000000000BB02 /* CurlFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurlFetcher.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1E /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1F /* StreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamResolver.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB20 /* StreamMuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamMuxer.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1D /* CastDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastDiscovery.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1C /* CastMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastMessage.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB19 /* StreamProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamProxy.swift; sourceTree = "<group>"; };
@@ -192,7 +214,13 @@
 				A34362FE2FD764260064ADE1 /* AppDelegate.swift */,
 				A34363002FD764270064ADE1 /* Default-568h@2x.png */,
 				BB000001000000000000BD01 /* play.png */,
+				BB000001000000000000BD17 /* playlist.png */,
+				BB000001000000000000BD15 /* share.png */,
+				BB000001000000000000BD13 /* download.png */,
 				BB000001000000000000BD02 /* play@2x.png */,
+				BB000001000000000000BD18 /* playlist@2x.png */,
+				BB000001000000000000BD16 /* share@2x.png */,
+				BB000001000000000000BD14 /* download@2x.png */,
 				BB000001000000000000BD03 /* pause.png */,
 				BB000001000000000000BD04 /* pause@2x.png */,
 				BB000001000000000000BD05 /* cast.png */,
@@ -204,6 +232,10 @@
 				BB000001000000000000BD0B /* rewind.png */,
 				BB000001000000000000BD0C /* rewind@2x.png */,
 				BB000001000000000000BD0D /* forward.png */,
+				BB000001000000000000BD0F /* gear.png */,
+				BB000001000000000000BD10 /* gear@2x.png */,
+				BB000001000000000000BD11 /* hd.png */,
+				BB000001000000000000BD12 /* hd@2x.png */,
 				BB000001000000000000BD0E /* forward@2x.png */,
 				A34362D72FD764250064ADE1 /* Assets.xcassets */,
 			);
@@ -234,6 +266,7 @@
 				BB000001000000000000BB02 /* CurlFetcher.swift */,
 				BB000001000000000000BB1E /* CastSession.swift */,
 				BB000001000000000000BB1F /* StreamResolver.swift */,
+				BB000001000000000000BB20 /* StreamMuxer.swift */,
 				BB000001000000000000BB1D /* CastDiscovery.swift */,
 				BB000001000000000000BB1C /* CastMessage.swift */,
 				BB000001000000000000BB19 /* StreamProxy.swift */,
@@ -397,7 +430,13 @@
 				A34362D82FD764250064ADE1 /* Assets.xcassets in Resources */,
 				A34363012FD764270064ADE1 /* Default-568h@2x.png in Resources */,
 				BB000001000000000000BE01 /* play.png in Resources */,
+				BB000001000000000000BE17 /* playlist.png in Resources */,
+				BB000001000000000000BE15 /* share.png in Resources */,
+				BB000001000000000000BE13 /* download.png in Resources */,
 				BB000001000000000000BE02 /* play@2x.png in Resources */,
+				BB000001000000000000BE18 /* playlist@2x.png in Resources */,
+				BB000001000000000000BE16 /* share@2x.png in Resources */,
+				BB000001000000000000BE14 /* download@2x.png in Resources */,
 				BB000001000000000000BE03 /* pause.png in Resources */,
 				BB000001000000000000BE04 /* pause@2x.png in Resources */,
 				BB000001000000000000BE05 /* cast.png in Resources */,
@@ -409,6 +448,10 @@
 				BB000001000000000000BE0B /* rewind.png in Resources */,
 				BB000001000000000000BE0C /* rewind@2x.png in Resources */,
 				BB000001000000000000BE0D /* forward.png in Resources */,
+				BB000001000000000000BE0F /* gear.png in Resources */,
+				BB000001000000000000BE10 /* gear@2x.png in Resources */,
+				BB000001000000000000BE11 /* hd.png in Resources */,
+				BB000001000000000000BE12 /* hd@2x.png in Resources */,
 				BB000001000000000000BE0E /* forward@2x.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -438,6 +481,7 @@
 				BB000001000000000000BC02 /* CurlFetcher.swift in Sources */,
 				BB000001000000000000BC1E /* CastSession.swift in Sources */,
 				BB000001000000000000BC1F /* StreamResolver.swift in Sources */,
+				BB000001000000000000BC20 /* StreamMuxer.swift in Sources */,
 				BB000001000000000000BC1D /* CastDiscovery.swift in Sources */,
 				BB000001000000000000BC1C /* CastMessage.swift in Sources */,
 				BB000001000000000000BC19 /* StreamProxy.swift in Sources */,

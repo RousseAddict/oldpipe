@@ -140,7 +140,9 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         let isPartial = incomplete.contains(video.id)
         let sz = sizeText[video.id] ?? ""
         let status: String
-        if isDownloading {
+        if DownloadManager.isMuxing(video.id) {
+            status = "Processing..."   // both HD tracks fetched, muxing into the final mp4
+        } else if isDownloading {
             status = "Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%"
         } else if isPartial {
             status = "Incomplete" + (sz.isEmpty ? "" : " (\(sz))")
