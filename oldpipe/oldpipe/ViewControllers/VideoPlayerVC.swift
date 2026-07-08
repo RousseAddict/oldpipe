@@ -17,6 +17,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
     private var pendingPlaylists: [Playlist] = []
 
+    // Download-quality chooser state. A DownloadOption maps a sheet row to a quality: 360p is
+    // the muxed single-file path (itag 18, videoItag == 0); 720p/1080p download the H.264
+    // video-only track + AAC audio track separately and mux them on-device.
+    private struct DownloadOption {
+        let label: String       // "360p" / "720p" / "1080p"
+        let videoItag: Int      // 0 = muxed single file (itag 18); else the video-only itag
+        let estBytes: Int64     // combined size estimate (0 if unknown)
+    }
+    private var pendingDownloadOptions: [DownloadOption] = []
+
     // Chromecast spike: LAN discovery + one live session. castDevices maps the picker
     // action-sheet indices to discovered devices.
     private var castDiscovery: CastDiscovery?
@@ -108,7 +118,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         castBtn?.isHidden = false
     }
 
-    // Swap the cast button's glyph for a spinning indicator while discovery is running.
+    // Swap the cast glyph for a spinning indicator while cast discovery runs.
     private func showCastSpinner() {
         castBtn?.setImage(nil, for: .normal)
         castBtnSpinner?.startAnimating()
@@ -535,6 +545,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         dl.layer.cornerRadius = 6
         dl.setTitleColor(.white, for: .normal)
         dl.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        dl.setImage(UIImage(named: "download"), for: .normal)
+        dl.titleEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
         dl.addTarget(self, action: #selector(downloadTapped), for: .touchUpInside)
         sv.addSubview(dl)
         downloadBtn = dl
@@ -549,6 +561,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         share.setTitle("Share", for: .normal)
         share.setTitleColor(.white, for: .normal)
         share.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        share.setImage(UIImage(named: "share"), for: .normal)
+        share.titleEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
         share.addTarget(self, action: #selector(shareTapped), for: .touchUpInside)
         sv.addSubview(share)
         shareBtn = share
@@ -556,9 +570,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let addPl = UIButton(type: .custom)
         addPl.layer.cornerRadius = 6
         addPl.backgroundColor = secondaryBg
-        addPl.setTitle("+ Playlist", for: .normal)
+        addPl.setTitle("Playlist", for: .normal)
         addPl.setTitleColor(.white, for: .normal)
         addPl.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        addPl.setImage(UIImage(named: "playlist"), for: .normal)
+        addPl.titleEdgeInsets = UIEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
         addPl.addTarget(self, action: #selector(addToPlaylistTapped), for: .touchUpInside)
         sv.addSubview(addPl)
         addPlaylistBtn = addPl
@@ -872,13 +888,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             if buttonIndex < pendingPlaylists.count {
                 let pl = pendingPlaylists[buttonIndex]
                 PlaylistManager.add(video: video, to: pl.id)
-                flash(addPlaylistBtn, "Added \u{2713}", revertTo: "+ Playlist")
+                flash(addPlaylistBtn, "Added \u{2713}", revertTo: "Playlist")
             } else if actionSheet.buttonTitle(at: buttonIndex) == "New Playlist\u{2026}" {
                 promptNewPlaylist()
             }
         } else if actionSheet.tag == 3 {
             if buttonIndex < castDevices.count {
                 startCasting(to: castDevices[buttonIndex])
+            }
+        } else if actionSheet.tag == 5 {
+            if buttonIndex < pendingDownloadOptions.count {
+                startSelectedDownload(pendingDownloadOptions[buttonIndex])
             }
         }
     }
@@ -892,18 +912,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         guard !name.isEmpty else { return }
         let pl = PlaylistManager.create(name: name)
         PlaylistManager.add(video: video, to: pl.id)
-        flash(addPlaylistBtn, "Added \u{2713}", revertTo: "+ Playlist")
+        flash(addPlaylistBtn, "Added \u{2713}", revertTo: "Playlist")
     }
 
     // MARK: - Chromecast (discovery + handshake spike)
 
     @objc private func castTapped() {
-        // If a session is live, this button stops it.
-        if castSession != nil {
-            stopCast()
-            return
-        }
-
+        if castSession != nil { stopCast(); return }
         showCastSpinner()
 
         let disco = CastDiscovery()
@@ -1396,6 +1411,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // MARK: - Stream selection
 
     private func preferredStream() -> VideoStream? {
+        // Prefer muxed 360p MP4 (itag 18) — plays on AVPlayer, small, castable.
         return streams.first { $0.itag == 18 }
             ?? streams.first { $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
             ?? streams.first { $0.mimeType.contains("video") }
@@ -1446,14 +1462,75 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     @objc private func downloadTapped() {
         guard !DownloadManager.isDownloaded(video.id) else { return }
-        guard let preferred = preferredStream() else {
+        guard !streams.isEmpty else {
             statusLabel?.text = "Still loading streams..."
             statusLabel?.isHidden = false
             return
         }
+        let options = buildDownloadOptions()
+        // No HD pair found (only muxed 360p, or nothing) → download directly, no sheet.
+        if options.count <= 1 {
+            startSelectedDownload(options.first ?? DownloadOption(label: "360p", videoItag: 0, estBytes: 0))
+            return
+        }
+        // Design B: tap → quality sheet (360p / 720p / 1080p) with size estimates.
+        pendingDownloadOptions = options
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Download quality"
+        for o in options {
+            let size = o.estBytes > 0 ? "  (~\(DownloadManager.sizeText(o.estBytes)))" : ""
+            sheet.addButton(withTitle: "\(o.label)\(size)")
+        }
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 5
+        sheet.show(in: view)
+    }
+
+    // Build the quality options for this video. 360p (muxed itag 18) is offered whenever
+    // present; 720p/1080p only when BOTH a matching H.264 video-only track AND an AAC audio
+    // track exist (downloaded separately, then muxed). 1080p is capped out on iOS 6 (RAM /
+    // thermal on the iPhone 4S) and offered only on iOS 7+.
+    private func buildDownloadOptions() -> [DownloadOption] {
+        var out: [DownloadOption] = []
+        if let muxed = streams.first(where: { $0.itag == 18 }) {
+            out.append(DownloadOption(label: "360p", videoItag: 0, estBytes: muxed.contentLength))
+        }
+        guard let audio = StreamResolver.audioStream(streams) else { return out }
+        let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
+        // (video-only itag, label, offered on iOS 6?)
+        let hd: [(Int, String, Bool)] = [(136, "720p", true), (137, "1080p", false)]
+        for (itag, label, onIOS6) in hd {
+            if iosVersion < 7.0 && !onIOS6 { continue }
+            if let v = StreamResolver.videoOnlyStream(streams, itag: itag) {
+                out.append(DownloadOption(label: label, videoItag: itag,
+                                          estBytes: v.contentLength + audio.contentLength))
+            }
+        }
+        return out
+    }
+
+    private func startSelectedDownload(_ opt: DownloadOption) {
         downloadBtn?.isEnabled = false
         downloadBtn?.setTitle("Downloading...", for: .normal)
-        download(url: preferred.url, autoPlay: false)
+        if opt.videoItag == 0 {
+            guard let preferred = preferredStream() else {
+                statusLabel?.text = "Still loading streams..."
+                statusLabel?.isHidden = false
+                updateDownloadButton()
+                return
+            }
+            download(url: preferred.url, autoPlay: false)   // existing single-file path
+        } else {
+            guard let v = StreamResolver.videoOnlyStream(streams, itag: opt.videoItag),
+                  let a = StreamResolver.audioStream(streams) else {
+                updateDownloadButton()
+                return
+            }
+            DownloadManager.startDownloadHD(video, videoStream: v, audioStream: a, quality: opt.label)
+            observeDownload(autoPlay: false)
+        }
     }
 
     // Load a URL into the singleton, attach the shared layer, and play once ready.
@@ -1539,6 +1616,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let t = Timer(timeInterval: 0.5, target: BlockTarget { [weak self] in
             guard let self = self else { return }
             if DownloadManager.isDownloading(self.video.id) {
+                // HD downloads finish with an on-device mux phase (no network progress).
+                if DownloadManager.isMuxing(self.video.id) {
+                    self.statusLabel?.text = "Processing..."
+                    self.statusLabel?.isHidden = false
+                    if !autoPlay { self.downloadBtn?.setTitle("Processing...", for: .normal) }
+                    return
+                }
                 let pct = Int(DownloadManager.progress(for: self.video.id) * 100)
                 self.statusLabel?.text = "Downloading \(pct)%..."
                 self.statusLabel?.isHidden = false
@@ -1560,7 +1644,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 }
             } else {
                 self.hideSpinner()
-                self.statusLabel?.text = "Download failed"
+                self.statusLabel?.text = "Download failed" + (DownloadManager.lastMuxError.map { " — \($0)" } ?? "")
                 self.statusLabel?.isHidden = false
                 self.playBtn?.isHidden = false
                 self.updateDownloadButton()

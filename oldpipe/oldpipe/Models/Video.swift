@@ -104,4 +104,8 @@ struct VideoStream {
     let itag: Int
     let mimeType: String
     let quality: String
+    // Byte size of the stream (from the player response `contentLength`), 0 if unknown.
+    // Used to show "~48 MB" estimates in the download quality sheet. `var` with a default
+    // keeps the synthesized memberwise init working for call sites that omit it.
+    var contentLength: Int64 = 0
 }

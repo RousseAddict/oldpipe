@@ -551,7 +551,12 @@ class YoutubeAPI {
                         ?? Int(str(fmt["itag"]) ?? "") else { continue }
                     let mime = str(fmt["mimeType"]) ?? ""
                     let quality = str(fmt["qualityLabel"]) ?? str(fmt["quality"]) ?? ""
-                    streams.append(VideoStream(url: url, itag: itag, mimeType: mime, quality: quality))
+                    // contentLength is a decimal STRING in the JSON (or occasionally an
+                    // NSNumber); 0 when absent (some formats omit it). Used for size estimates.
+                    let clen = Int64(str(fmt["contentLength"]) ?? "")
+                        ?? (fmt["contentLength"] as? NSNumber)?.int64Value ?? 0
+                    streams.append(VideoStream(url: url, itag: itag, mimeType: mime,
+                                               quality: quality, contentLength: clen))
                 }
             }
         }
