@@ -125,7 +125,8 @@ class MiniPlayerBar: UIView {
 
     private func poll() {
         let sp = VideoPlayer.shared
-        let topIsPlayer = (navProvider?()?.topViewController is VideoPlayerVC)
+        let top = navProvider?()?.topViewController
+        let topIsPlayer = (top is VideoPlayerVC) || (top is ShortsPlayerVC)
         guard let video = sp.currentVideo, !topIsPlayer else {
             if !isHidden { isHidden = true }
             return

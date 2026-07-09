@@ -14,6 +14,17 @@ struct ResolvedStream {
     let isLocal: Bool
 }
 
+// A stream whose network resolution is done but whose final playable URL is not yet built.
+// `finalize` turns it into a ResolvedStream at the moment of playback. Splitting the two
+// steps lets callers prefetch the (slow) network part ahead of time WITHOUT registering a
+// StreamProxy route early — doing so bumps the proxy generation and would abort a
+// currently-playing iOS-6 stream. `.local` = a completed download; `.remote` = a raw
+// googlevideo URL not yet proxy-wrapped.
+enum PreparedStream {
+    case local(URL)
+    case remote(String)
+}
+
 final class StreamResolver {
 
     // Pick the muxed 360p stream (itag 18), falling back to any playable MP4/video stream.
@@ -52,6 +63,44 @@ final class StreamResolver {
             } else {
                 completion(nil)
             }
+        }
+    }
+
+    // Network-only half of resolve(): a completed download resolves immediately; otherwise the
+    // innertube getStreams call runs and the preferred remote URL is returned UN-wrapped (no
+    // StreamProxy route yet). Safe to call ahead of time (prefetch) without disturbing the
+    // active stream. completion fires on the main thread; nil = nothing playable.
+    static func prepare(_ video: Video, completion: @escaping (PreparedStream?) -> Void) {
+        if DownloadManager.isDownloaded(video.id) {
+            let url = URL(fileURLWithPath: DownloadManager.filePath(for: video.id))
+            completion(.local(url))
+            return
+        }
+        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _ in
+            guard let preferred = pickPreferred(streams) else {
+                completion(nil)
+                return
+            }
+            completion(.remote(preferred.url))
+        }
+    }
+
+    // Playback-time half: turn a PreparedStream into a playable ResolvedStream. On iOS 6 this
+    // is where the StreamProxy route is finally registered (bumping the proxy generation at the
+    // correct moment — the actual switch). Returns nil if the URL can't be built.
+    static func finalize(_ prepared: PreparedStream) -> ResolvedStream? {
+        switch prepared {
+        case .local(let url):
+            return ResolvedStream(url: url, isLocal: true)
+        case .remote(let remote):
+            let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
+            if iosVersion >= 7.0 {
+                guard let u = URL(string: remote) else { return nil }
+                return ResolvedStream(url: u, isLocal: false)
+            } else if let local = StreamProxy.shared.localURL(for: remote) {
+                return ResolvedStream(url: local, isLocal: false)
+            }
+            return nil
         }
     }
 }

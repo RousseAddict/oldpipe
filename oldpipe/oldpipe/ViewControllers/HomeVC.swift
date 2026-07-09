@@ -16,6 +16,26 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private var statusLabel: UILabel!
     private var refreshControl: UIRefreshControl?
 
+    // MARK: - Shorts-on-Home (optional, gated by AppSettings.shortsOnHome)
+    // When the Settings toggle is on, a Videos/Shorts tab bar sits above the feed and a
+    // second (2-column portrait grid) table shows shorts from the subscribed channels.
+    // All of this is inert unless the toggle is enabled — HomeVC then behaves exactly as
+    // before (videos-only, no tab bar).
+    private let tabBarH: CGFloat = 44
+    private var tabBar: UIView?
+    private var tabButtons: [UIButton] = []
+    private var tabIndicator: UIView?
+    private var selectedHomeTab = 0            // 0 Videos, 1 Shorts
+    private var shortsTabBuilt = false
+    private var shortsApplied = false          // last-applied visibility state
+
+    private var shorts: [Video] = []
+    private var shortsBuiltChannelIds: Set<String> = []
+    private var shortsLoading = false
+    private var shortsTable: UITableView?
+    private var shortsStatus: UILabel?
+    private var shortsReloadTimer: Timer?
+
     // Thin indeterminate top loading bar (3px overlay at the top of the content area).
     private var loadingBar: UIView?
     private var loadingBarSeg: CALayer?
@@ -39,12 +59,14 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     // channel renders instantly from cache. Stale (>TTL) or missing channels are refetched.
     private static let channelCacheKey = "home_channel_cache"        // [channelId: [videoDict]]
     private static let channelCacheTimeKey = "home_channel_cache_time" // [channelId: epochSeconds]
+    private static let shortsCacheKey = "home_shorts_cache"          // [channelId: [videoDict]]
+    private static let shortsCacheTimeKey = "home_shorts_cache_time" // [channelId: epochSeconds]
     private static let feedCacheTTL: TimeInterval = 1800  // 30 min — older cache refetches
 
     // Wipe the cached feed (Settings → Reset Cache). Subscriptions/playlists are untouched.
     // Also clears the legacy whole-feed keys so upgrading installs don't leave them behind.
     static func clearFeedCache() {
-        for k in [channelCacheKey, channelCacheTimeKey,
+        for k in [channelCacheKey, channelCacheTimeKey, shortsCacheKey, shortsCacheTimeKey,
                   "home_feed_cache", "home_feed_cache_subs", "home_feed_cache_time"] {
             UserDefaults.standard.removeObject(forKey: k)
         }
@@ -60,6 +82,17 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         var times = UserDefaults.standard.dictionary(forKey: channelCacheTimeKey) ?? [:]
         times[id] = Date().timeIntervalSince1970
         UserDefaults.standard.set(times, forKey: channelCacheTimeKey)
+        UserDefaults.standard.synchronize()
+    }
+
+    // Same as saveChannelVideos but for the per-channel Shorts cache.
+    private static func saveChannelShorts(_ videos: [Video], for id: String) {
+        var map = UserDefaults.standard.dictionary(forKey: shortsCacheKey) ?? [:]
+        map[id] = videos.map { $0.toDict() }
+        UserDefaults.standard.set(map, forKey: shortsCacheKey)
+        var times = UserDefaults.standard.dictionary(forKey: shortsCacheTimeKey) ?? [:]
+        times[id] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(times, forKey: shortsCacheTimeKey)
         UserDefaults.standard.synchronize()
     }
 
@@ -79,6 +112,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             didSetupUI = true
             setupUI()
         }
+        applyShortsTabVisibility()   // reflects the current Settings toggle (may have changed)
         refreshFeedIfNeeded()
     }
 
@@ -133,6 +167,232 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         seg.frame = CGRect(x: 0, y: 0, width: floor(w * 0.35), height: barH)
         bar.layer.addSublayer(seg)
         loadingBarSeg = seg
+    }
+
+    // MARK: - Shorts tab
+
+    // The row height of the 2-column portrait grid: a full-width portrait (9:16) thumbnail
+    // per card plus a 2-line title. Shared by heightForRowAt and the grid cell's layout.
+    static func shortRowHeight(width w: CGFloat) -> CGFloat {
+        let pad: CGFloat = 12
+        let cardW = (w - pad * 3) / 2
+        let thumbH = cardW * 16.0 / 9.0
+        return pad + thumbH + 6 + 34
+    }
+
+    // Build the tab bar + shorts grid table once, the first time the toggle is enabled.
+    private func buildShortsUIIfNeeded() {
+        guard !shortsTabBuilt else { return }
+        shortsTabBuilt = true
+        let w = UIScreen.main.bounds.width
+        let h = UIScreen.main.bounds.height
+        let navH: CGFloat = 64
+        let contentY = tabBarH
+        let contentFrame = CGRect(x: 0, y: contentY, width: w, height: h - navH - contentY)
+
+        // Shorts grid table (behind the tab bar in z-order; the videos tableView is already
+        // added). Both content tables share this VC as data source, branched by identity.
+        let st = UITableView(frame: contentFrame)
+        st.backgroundColor = bg
+        st.separatorStyle = .none
+        st.dataSource = self
+        st.delegate = self
+        st.register(ShortGridCell.self, forCellReuseIdentifier: ShortGridCell.reuseId)
+        st.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
+        st.tableFooterView = UIView()
+        st.autoresizingMask = iPadFlexWidthHeight
+        st.isHidden = true
+        view.addSubview(st)
+        shortsTable = st
+
+        let ss = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 40))
+        ss.backgroundColor = .clear
+        ss.textColor = UIColor(white: 0.5, alpha: 1)
+        ss.textAlignment = .center
+        ss.font = UIFont.systemFont(ofSize: 15)
+        ss.autoresizingMask = iPadFlexWidth
+        st.addSubview(ss)
+        shortsStatus = ss
+
+        // Tab bar on top (added last so it sits above both tables + the loading bar).
+        let tb = UIView(frame: CGRect(x: 0, y: 0, width: w, height: tabBarH))
+        tb.backgroundColor = UIColor(red: 0.10, green: 0.10, blue: 0.10, alpha: 1)
+        tb.autoresizingMask = iPadFlexWidth
+        view.addSubview(tb)
+        tabBar = tb
+
+        let titles = ["Videos", "Shorts"]
+        let bw = w / CGFloat(titles.count)
+        for (i, t) in titles.enumerated() {
+            let b = UIButton(type: .custom)
+            b.frame = CGRect(x: bw * CGFloat(i), y: 0, width: bw, height: tabBarH)
+            b.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
+            b.setTitle(t, for: .normal)
+            b.setTitleColor(UIColor(white: 0.55, alpha: 1), for: .normal)
+            b.tag = i
+            b.addTarget(self, action: #selector(homeTabTapped(_:)), for: .touchUpInside)
+            tb.addSubview(b)
+            tabButtons.append(b)
+        }
+        let hair = UIView(frame: CGRect(x: 0, y: tabBarH - 0.5, width: w, height: 0.5))
+        hair.backgroundColor = UIColor(white: 0.2, alpha: 1)
+        hair.autoresizingMask = iPadFlexWidth
+        tb.addSubview(hair)
+
+        let ind = UIView(frame: CGRect(x: 0, y: tabBarH - 2, width: bw, height: 2))
+        ind.backgroundColor = accent
+        tabBar?.addSubview(ind)
+        tabIndicator = ind
+    }
+
+    // Reflect the current Settings toggle: show/hide the tab bar + shorts table and size the
+    // videos table to leave room for the tab bar (or fill the view when the toggle is off).
+    private func applyShortsTabVisibility() {
+        let enabled = AppSettings.shortsOnHome
+        // No change since last apply and nothing to build → skip (cheap re-appears).
+        if enabled == shortsApplied && (!enabled || shortsTabBuilt) { return }
+        shortsApplied = enabled
+
+        let w = UIScreen.main.bounds.width
+        let h = UIScreen.main.bounds.height
+        let navH: CGFloat = 64
+
+        if enabled {
+            buildShortsUIIfNeeded()
+            tabBar?.isHidden = false
+            let contentY = tabBarH
+            tableView.frame = CGRect(x: 0, y: contentY, width: w, height: h - navH - contentY)
+            shortsTable?.frame = tableView.frame
+            loadingBar?.frame.origin.y = contentY
+            selectHomeTab(selectedHomeTab)
+        } else {
+            tabBar?.isHidden = true
+            shortsTable?.isHidden = true
+            selectedHomeTab = 0
+            tableView.isHidden = false
+            tableView.frame = CGRect(x: 0, y: 0, width: w, height: h - navH)
+            loadingBar?.frame.origin.y = 0
+        }
+    }
+
+    @objc private func homeTabTapped(_ sender: UIButton) {
+        selectHomeTab(sender.tag)
+    }
+
+    private func selectHomeTab(_ index: Int) {
+        selectedHomeTab = index
+        tableView.isHidden = (index != 0)
+        shortsTable?.isHidden = (index != 1)
+        updateHomeTabIndicator()
+        if index == 1 { loadShortsFeed() }
+    }
+
+    private func updateHomeTabIndicator() {
+        for (i, b) in tabButtons.enumerated() {
+            b.setTitleColor(i == selectedHomeTab ? accent : UIColor(white: 0.55, alpha: 1), for: .normal)
+        }
+        let bw = UIScreen.main.bounds.width / CGFloat(max(tabButtons.count, 1))
+        tabIndicator?.frame = CGRect(x: bw * CGFloat(selectedHomeTab), y: tabBarH - 2, width: bw, height: 2)
+    }
+
+    // MARK: - Shorts feed loading (fixed first batch — no load-more)
+
+    private func loadShortsFeed() {
+        let subs = SubscriptionManager.all()
+        let ids = Set(subs.map { $0.id })
+
+        if subs.isEmpty {
+            shorts = []
+            shortsBuiltChannelIds = []
+            shortsStatus?.text = "No subscriptions yet.\nSubscribe to channels to see their Shorts."
+            shortsStatus?.isHidden = false
+            shortsTable?.reloadData()
+            return
+        }
+
+        if shorts.isEmpty || ids != shortsBuiltChannelIds {
+            shortsBuiltChannelIds = ids
+            rebuildShortsFromCache()
+        }
+
+        guard !shortsLoading else { return }
+
+        let times = UserDefaults.standard.dictionary(forKey: HomeVC.shortsCacheTimeKey) ?? [:]
+        let now = Date().timeIntervalSince1970
+        let toFetch = subs.filter { ch in
+            guard let ts = (times[ch.id] as? NSNumber)?.doubleValue else { return true }
+            let age = now - ts
+            return !(age >= 0 && age < HomeVC.feedCacheTTL)
+        }
+        guard !toFetch.isEmpty else { return }
+
+        shortsLoading = true
+        if shorts.isEmpty {
+            shortsStatus?.text = "Loading shorts..."
+            shortsStatus?.isHidden = false
+        }
+
+        var remaining = toFetch.count
+        for channel in toFetch {
+            // priority:false — Shorts is a background feed like the videos feed.
+            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { [weak self] vids, _ in
+                guard let self = self else { return }
+                HomeVC.saveChannelShorts(Array(vids.prefix(6)), for: channel.id)
+                self.scheduleShortsReload()
+                remaining -= 1
+                if remaining == 0 { self.finishShortsFeed() }
+            }
+        }
+    }
+
+    private func scheduleShortsReload() {
+        guard shortsReloadTimer == nil else { return }
+        let t = Timer(timeInterval: 0.3, target: self,
+                      selector: #selector(shortsReloadFired), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+        shortsReloadTimer = t
+    }
+
+    @objc private func shortsReloadFired() {
+        shortsReloadTimer = nil
+        rebuildShortsFromCache()
+    }
+
+    private func finishShortsFeed() {
+        shortsLoading = false
+        shortsReloadTimer?.invalidate()
+        shortsReloadTimer = nil
+        rebuildShortsFromCache()
+    }
+
+    private func rebuildShortsFromCache() {
+        let subs = SubscriptionManager.all()
+        let map = UserDefaults.standard.dictionary(forKey: HomeVC.shortsCacheKey) ?? [:]
+        var merged: [Video] = []
+        var seen = Set<String>()
+        for ch in subs {
+            guard let dicts = map[ch.id] as? [[String: Any]] else { continue }
+            for d in dicts {
+                guard let v = Video.from(dict: d), !seen.contains(v.id) else { continue }
+                seen.insert(v.id)
+                merged.append(v)
+            }
+        }
+        merged.sort { HomeVC.approxAge($0.publishedText) < HomeVC.approxAge($1.publishedText) }
+        shorts = merged
+        if merged.isEmpty {
+            shortsStatus?.text = shortsLoading ? "Loading shorts..." : "No recent Shorts from your subscriptions."
+            shortsStatus?.isHidden = false
+        } else {
+            shortsStatus?.isHidden = true
+        }
+        shortsTable?.reloadData()
+    }
+
+    private func openShort(at index: Int) {
+        guard index >= 0, index < shorts.count else { return }
+        let vc = ShortsPlayerVC(shorts: shorts, startIndex: index)
+        navigationController?.pushViewController(vc, animated: true)
     }
 
     // MARK: - Loading bar
@@ -450,22 +710,128 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     // MARK: - UITableViewDataSource
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        if tableView === shortsTable { return (shorts.count + 1) / 2 }   // 2 cards per row
         return videos.count
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        if tableView === shortsTable {
+            let cell = tableView.dequeueReusableCell(withIdentifier: ShortGridCell.reuseId, for: indexPath) as! ShortGridCell
+            let i0 = indexPath.row * 2
+            let i1 = i0 + 1
+            cell.configureLeft(shorts[i0]) { [weak self] in self?.openShort(at: i0) }
+            if i1 < shorts.count {
+                cell.configureRight(shorts[i1]) { [weak self] in self?.openShort(at: i1) }
+            } else {
+                cell.clearRight()
+            }
+            return cell
+        }
         let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
         cell.configure(with: videos[indexPath.row])
         return cell
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        if tableView === shortsTable { return HomeVC.shortRowHeight(width: tableView.bounds.width) }
         return VideoRowCell.rowHeight
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
+        if tableView === shortsTable { return }   // shorts taps handled by the per-card button
         let vc = VideoPlayerVC(video: videos[indexPath.row])
         navigationController?.pushViewController(vc, animated: true)
+    }
+}
+
+// MARK: - Shorts grid cell (2 portrait cards per row)
+// A private grid row holding two ShortCardView columns. Not a separate file — mirrors the
+// DownloadCell pattern of a VC-local UITableViewCell subclass.
+
+private class ShortCardView: UIView {
+    private let thumb = AsyncImageView()
+    private let titleLabel = UILabel()
+    private let tapBtn = UIButton(type: .custom)
+    var onTap: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        thumb.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        thumb.contentMode = .scaleAspectFill
+        thumb.clipsToBounds = true
+        thumb.layer.cornerRadius = 6
+        thumb.layer.shouldRasterize = true
+        thumb.layer.rasterizationScale = UIScreen.main.scale
+        addSubview(thumb)
+
+        titleLabel.backgroundColor = .clear
+        titleLabel.textColor = UIColor(white: 0.95, alpha: 1)
+        titleLabel.font = UIFont.systemFont(ofSize: 13)
+        titleLabel.numberOfLines = 2
+        addSubview(titleLabel)
+
+        tapBtn.backgroundColor = .clear
+        tapBtn.addTarget(self, action: #selector(tapped), for: .touchUpInside)
+        addSubview(tapBtn)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    func configure(_ v: Video) {
+        isHidden = false
+        titleLabel.text = v.title
+        thumb.image = nil
+        if !v.thumbnailURL.isEmpty { thumb.load(url: v.thumbnailURL) }
+    }
+
+    func clear() {
+        isHidden = true
+        onTap = nil
+        thumb.cancel()
+        thumb.image = nil
+        titleLabel.text = nil
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let w = bounds.width
+        let thumbH = w * 16.0 / 9.0
+        thumb.frame = CGRect(x: 0, y: 0, width: w, height: thumbH)
+        titleLabel.frame = CGRect(x: 0, y: thumbH + 6, width: w, height: 34)
+        tapBtn.frame = bounds
+    }
+
+    @objc private func tapped() { onTap?() }
+}
+
+private class ShortGridCell: UITableViewCell {
+    static let reuseId = "ShortGridCell"
+    private let left = ShortCardView()
+    private let right = ShortCardView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
+        selectionStyle = .none
+        contentView.addSubview(left)
+        contentView.addSubview(right)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    func configureLeft(_ v: Video, onTap: @escaping () -> Void) { left.configure(v); left.onTap = onTap }
+    func configureRight(_ v: Video, onTap: @escaping () -> Void) { right.configure(v); right.onTap = onTap }
+    func clearRight() { right.clear() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let pad: CGFloat = 12
+        let w = contentView.bounds.width
+        let cardW = (w - pad * 3) / 2
+        let thumbH = cardW * 16.0 / 9.0
+        let cardH = thumbH + 6 + 34
+        left.frame = CGRect(x: pad, y: pad, width: cardW, height: cardH)
+        right.frame = CGRect(x: pad * 2 + cardW, y: pad, width: cardW, height: cardH)
     }
 }
