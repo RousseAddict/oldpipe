@@ -60,6 +60,38 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
         var y: CGFloat = 16
 
+        // ── Preferences ────────────────────────────────────────────────────────────
+        y = addHeader("Preferences", at: y, width: contentW, pad: pad)
+        y = addSubtitle("Show a Shorts tab on the Home screen with short videos from your subscribed channels.",
+                        at: y, width: contentW, pad: pad)
+
+        let rowH: CGFloat = 44
+        // Create the switch FIRST so we can size the label to stop before it. On iOS 6 a
+        // UISwitch is ~79pt wide (wider than the ~51pt of later OSes), so a fixed 60pt gutter
+        // let the (long) label text run under the switch. Anchor the switch right, then give
+        // the label exactly the space to its left.
+        let sw = UISwitch()
+        let swW = max(sw.bounds.width, 51)
+        sw.frame = CGRect(x: w - pad - swW, y: y + (rowH - sw.bounds.height) / 2,
+                          width: swW, height: sw.bounds.height)
+        sw.onTintColor = accent
+        sw.isOn = AppSettings.shortsOnHome
+        // Right-anchored so it stays pinned to the trailing edge when the iPad form widens.
+        sw.autoresizingMask = iPadFlexLeft
+        sw.addTarget(self, action: #selector(shortsSwitchChanged(_:)), for: .valueChanged)
+        scrollView.addSubview(sw)
+
+        let toggleLabel = UILabel(frame: CGRect(x: pad, y: y, width: sw.frame.origin.x - pad - 10, height: rowH))
+        toggleLabel.backgroundColor = .clear
+        toggleLabel.textColor = .white
+        toggleLabel.font = UIFont.systemFont(ofSize: 16)
+        toggleLabel.adjustsFontSizeToFitWidth = true
+        toggleLabel.minimumScaleFactor = 0.8
+        toggleLabel.text = "Enable Shorts on Home Screen"
+        toggleLabel.autoresizingMask = iPadFlexWidth
+        scrollView.addSubview(toggleLabel)
+        y += rowH + 28
+
         // ── Export ───────────────────────────────────────────────────────────────
         y = addHeader("Export", at: y, width: contentW, pad: pad)
         y = addSubtitle("Copy this text somewhere safe (Notes, email). It contains your subscriptions and playlists.",
@@ -145,6 +177,12 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         y += 40
 
         scrollView.contentSize = CGSize(width: w, height: y + 80)   // +80 covers mini player bar
+    }
+
+    // MARK: - Preferences
+
+    @objc private func shortsSwitchChanged(_ sender: UISwitch) {
+        AppSettings.shortsOnHome = sender.isOn
     }
 
     // MARK: - Cache size

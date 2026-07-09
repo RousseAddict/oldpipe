@@ -12,13 +12,32 @@ let iPadFlexWidthHeight: UIView.AutoresizingMask = [.flexibleWidth, .flexibleHei
 let iPadFlexWidthTop: UIView.AutoresizingMask = [.flexibleWidth, .flexibleTopMargin]
 let iPadFlexHeight: UIView.AutoresizingMask = [.flexibleHeight]
 let iPadFlexTop: UIView.AutoresizingMask = [.flexibleTopMargin]
+let iPadFlexLeft: UIView.AutoresizingMask = [.flexibleLeftMargin]
 #else
 let iPadFlexWidth: UIView.AutoresizingMask = []
 let iPadFlexWidthHeight: UIView.AutoresizingMask = []
 let iPadFlexWidthTop: UIView.AutoresizingMask = []
 let iPadFlexHeight: UIView.AutoresizingMask = []
 let iPadFlexTop: UIView.AutoresizingMask = []
+let iPadFlexLeft: UIView.AutoresizingMask = []
 #endif
+
+// MARK: - AppSettings
+// Simple persisted user preferences (UserDefaults booleans). Kept at module scope so both
+// SettingsVC (writes) and HomeVC (reads) can reach it without a shared instance. bool(forKey:)
+// returns false for a missing key, so the default is OFF without any extra registration —
+// and it sidesteps the 5.1.5 runtime's `as? Bool` NSNumber-nil gotcha.
+enum AppSettings {
+    private static let shortsOnHomeKey = "shorts_on_home"
+
+    static var shortsOnHome: Bool {
+        get { UserDefaults.standard.bool(forKey: shortsOnHomeKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: shortsOnHomeKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+}
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
