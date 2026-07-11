@@ -36,6 +36,18 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private var shortsStatus: UILabel?
     private var shortsReloadTimer: Timer?
 
+    // Continuous (infinite-scroll) Shorts pagination. The home Shorts feed is MERGED across
+    // every subscribed channel, so — unlike ChannelVC's single-channel Shorts tab — we track
+    // one continuation token PER channel. Reaching the end of the grid fetches the next page
+    // from every channel that still has a token; the new (de-duped, shuffled) videos are
+    // appended below what's already on screen so the scroll position never jumps. Pagination
+    // is session-only: continuation pages live in `shortsExtra` (memory), never in the cache,
+    // so a fresh launch/refresh restarts from the cached first page.
+    private var shortsTokens: [String: String] = [:]   // channelId → continuation token
+    private var shortsExtra: [Video] = []              // continuation pages (appended after page 1)
+    private var shortsSeen: Set<String> = []           // ids currently in `shorts` (dedup)
+    private var shortsLoadingMore = false
+
     // Thin indeterminate top loading bar (3px overlay at the top of the content area).
     private var loadingBar: UIView?
     private var loadingBarSeg: CALayer?
@@ -312,6 +324,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
         if shorts.isEmpty || ids != shortsBuiltChannelIds {
             shortsBuiltChannelIds = ids
+            // Fresh load / sub-set change → restart pagination from the cached first page.
+            shortsTokens.removeAll()
+            shortsExtra.removeAll()
             rebuildShortsFromCache()
         }
 
@@ -335,9 +350,12 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         var remaining = toFetch.count
         for channel in toFetch {
             // priority:false — Shorts is a background feed like the videos feed.
-            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { [weak self] vids, _ in
+            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { [weak self] vids, token in
                 guard let self = self else { return }
-                HomeVC.saveChannelShorts(Array(vids.prefix(6)), for: channel.id)
+                HomeVC.saveChannelShorts(Array(vids.prefix(12)), for: channel.id)
+                // Stash this channel's continuation token for infinite scroll (drop if absent).
+                if let t = token, !t.isEmpty { self.shortsTokens[channel.id] = t }
+                else { self.shortsTokens.removeValue(forKey: channel.id) }
                 self.scheduleShortsReload()
                 remaining -= 1
                 if remaining == 0 { self.finishShortsFeed() }
@@ -378,7 +396,18 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                 merged.append(v)
             }
         }
-        merged.sort { HomeVC.approxAge($0.publishedText) < HomeVC.approxAge($1.publishedText) }
+        // Shorts carry no publish date (the shortsLockupViewModel has no date field), so a
+        // time sort is impossible and concatenating per channel makes the feed feel grouped
+        // ("all of channel A, then all of channel B"). Shuffle instead for a mixed, less
+        // predictable feel. shuffle() is pure Swift stdlib (runtime-independent, safe on 5.1.5).
+        merged.shuffle()
+        // Re-append this session's continuation pages (de-duped against the rebuilt first page)
+        // so a progressive/background rebuild doesn't discard what infinite scroll fetched.
+        for v in shortsExtra where !seen.contains(v.id) {
+            seen.insert(v.id)
+            merged.append(v)
+        }
+        shortsSeen = seen
         shorts = merged
         if merged.isEmpty {
             shortsStatus?.text = shortsLoading ? "Loading shorts..." : "No recent Shorts from your subscriptions."
@@ -387,6 +416,41 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             shortsStatus?.isHidden = true
         }
         shortsTable?.reloadData()
+    }
+
+    // Infinite scroll: fetch the next page from every channel that still has a continuation
+    // token, then append the new (de-duped, shuffled) videos below the current feed. Runs on
+    // the background lane (priority:false, CurlFetcher caps concurrency at 4). Appending —
+    // rather than re-merging + re-shuffling the whole list — keeps the scroll position and
+    // already-seen ordering stable. Stops naturally once every channel is exhausted.
+    private func loadMoreShorts() {
+        guard !shortsLoadingMore, !shortsTokens.isEmpty else { return }
+        let names = Dictionary(SubscriptionManager.all().map { ($0.id, $0.name) },
+                               uniquingKeysWith: { a, _ in a })
+        let pending = shortsTokens   // snapshot — completions mutate shortsTokens
+        shortsLoadingMore = true
+        var remaining = pending.count
+        for (channelId, token) in pending {
+            let channelName = names[channelId] ?? ""
+            YoutubeAPI.getChannelContinuation(token: token, channelName: channelName, priority: false) { [weak self] vids, next in
+                guard let self = self else { return }
+                if let n = next, !n.isEmpty { self.shortsTokens[channelId] = n }
+                else { self.shortsTokens.removeValue(forKey: channelId) }   // channel exhausted
+                var batch: [Video] = []
+                for v in vids.prefix(12) where !self.shortsSeen.contains(v.id) {
+                    self.shortsSeen.insert(v.id)
+                    batch.append(v)
+                }
+                batch.shuffle()
+                self.shortsExtra.append(contentsOf: batch)
+                self.shorts.append(contentsOf: batch)
+                remaining -= 1
+                if remaining == 0 {
+                    self.shortsLoadingMore = false
+                    self.shortsTable?.reloadData()
+                }
+            }
+        }
     }
 
     private func openShort(at index: Int) {
@@ -735,6 +799,14 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         if tableView === shortsTable { return HomeVC.shortRowHeight(width: tableView.bounds.width) }
         return VideoRowCell.rowHeight
+    }
+
+    // Infinite scroll for the Shorts grid: when the last grid row is about to appear, pull the
+    // next page from every channel that still has a token. Videos feed is unchanged (no paging).
+    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        guard tableView === shortsTable else { return }
+        let rows = (shorts.count + 1) / 2
+        if indexPath.row >= rows - 1 { loadMoreShorts() }
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {

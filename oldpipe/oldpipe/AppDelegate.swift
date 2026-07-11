@@ -90,6 +90,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
+    // On return from the background, iOS may have (a) torn down StreamProxy's loopback listen
+    // socket and (b) deactivated our audio session while suspended. Both leave a resumed app
+    // unable to start a new iOS-6 stream — it stalls and falls back to download. Rebuild the
+    // proxy listener lazily (next play re-binds a fresh port) and re-activate the audio session.
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        StreamProxy.shared.reset()
+        VideoPlayer.shared.reactivateSession()
+    }
+
     // Chain-endpoint fallback for remote-control events (PlayerWindow handles them first).
     override func remoteControlReceived(with event: UIEvent?) {
         guard let event = event, event.type == .remoteControl else { return }
