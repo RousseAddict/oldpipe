@@ -16,15 +16,29 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var cacheSizeLabel: UILabel!
     private var copyBtn: UIButton?
     private var didSetupUI = false
+    private var loadingSpinner: UIActivityIndicatorView?
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
     private let accent = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
     private let fieldBg = UIColor(white: 0.12, alpha: 1)
 
+    // The two slow bits of loading Settings — serializing every subscription/playlist to JSON
+    // and scanning the on-disk thumbnail cache to sum its size — run here off the main thread
+    // so the screen shows a spinner instead of freezing.
+    private static let loadQueue = DispatchQueue(label: "com.oldpipe.settings.load")
+
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Settings"
         view.backgroundColor = bg
+
+        // Spinner shown while the (deferred) heavy load runs — visible during the push and
+        // until loadHeavyData finishes.
+        let spin = UIActivityIndicatorView(style: .whiteLarge)
+        spin.center = CGPoint(x: UIScreen.main.bounds.width / 2, y: (UIScreen.main.bounds.height - 64) / 2)
+        spin.startAnimating()
+        view.addSubview(spin)
+        loadingSpinner = spin
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -32,7 +46,24 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         guard !didSetupUI else { return }
         didSetupUI = true
         setupUI()
-        exportView.text = buildExportJSON()
+        loadHeavyData()
+    }
+
+    // Compute the export JSON + disk-cache size on a background queue, then fill the fields and
+    // remove the spinner on the main thread.
+    private func loadHeavyData() {
+        SettingsVC.loadQueue.async { [weak self] in
+            let json = self?.buildExportJSON() ?? "{}"
+            let bytes = AsyncImageView.diskCacheSize()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.exportView.text = json
+                self.cacheSizeLabel.text = "Current cache size: \(self.formatBytes(bytes))"
+                self.loadingSpinner?.stopAnimating()
+                self.loadingSpinner?.removeFromSuperview()
+                self.loadingSpinner = nil
+            }
+        }
     }
 
     private func setupUI() {
@@ -148,8 +179,8 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         cacheSizeLabel.textColor = UIColor(white: 0.7, alpha: 1)
         cacheSizeLabel.font = UIFont.boldSystemFont(ofSize: 13)
         cacheSizeLabel.autoresizingMask = iPadFlexWidth
+        cacheSizeLabel.text = "Calculating cache size\u{2026}"
         scrollView.addSubview(cacheSizeLabel)
-        refreshCacheSize()
         y += 20 + 8
 
         let resetBtn = makeButton("Reset Cache", at: y, width: contentW, pad: pad, accent: true)
@@ -188,7 +219,14 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     // MARK: - Cache size
 
     private func refreshCacheSize() {
-        cacheSizeLabel.text = "Current cache size: \(formatBytes(AsyncImageView.diskCacheSize()))"
+        cacheSizeLabel.text = "Calculating cache size\u{2026}"
+        SettingsVC.loadQueue.async { [weak self] in
+            let bytes = AsyncImageView.diskCacheSize()
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.cacheSizeLabel.text = "Current cache size: \(self.formatBytes(bytes))"
+            }
+        }
     }
 
     private func formatBytes(_ bytes: Int) -> String {

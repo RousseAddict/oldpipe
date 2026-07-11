@@ -147,6 +147,23 @@ final class StreamProxy: NSObject {
         lock.unlock()
     }
 
+    // Tear down the listen socket so the NEXT localURL(for:) opens a fresh one. iOS reclaims
+    // loopback listening sockets while an app is SUSPENDED in the background; on resume the old
+    // socket/port is dead, so localURL would hand AVPlayer a URL to a closed port → no bytes →
+    // the stream stalls past AVPlayer's readiness window → download fallback. Called from
+    // AppDelegate on foreground. Closing listenFd unblocks acceptLoop's accept() so that thread
+    // exits cleanly; flipping `started` back to false makes start() rebind on next use. No-op if
+    // the listener was never started (iOS 7+ never uses the proxy, so this stays a no-op there).
+    func reset() {
+        lock.lock()
+        guard started else { lock.unlock(); return }
+        started = false
+        let fd = listenFd
+        listenFd = -1
+        lock.unlock()
+        if fd >= 0 { close(fd) }
+    }
+
     // MARK: - Listener
 
     @discardableResult
