@@ -555,8 +555,17 @@ class YoutubeAPI {
                     // NSNumber); 0 when absent (some formats omit it). Used for size estimates.
                     let clen = Int64(str(fmt["contentLength"]) ?? "")
                         ?? (fmt["contentLength"] as? NSNumber)?.int64Value ?? 0
+                    // initRange/indexRange (DASH fMP4 adaptiveFormats only) are dicts with
+                    // STRING "start"/"end" values. -1 = absent (muxed format).
+                    func rangeEnd(_ v: Any?) -> Int64 {
+                        guard let r = v as? [String: Any] else { return -1 }
+                        return Int64(str(r["end"]) ?? "")
+                            ?? (r["end"] as? NSNumber)?.int64Value ?? -1
+                    }
                     streams.append(VideoStream(url: url, itag: itag, mimeType: mime,
-                                               quality: quality, contentLength: clen))
+                                               quality: quality, contentLength: clen,
+                                               initEnd: rangeEnd(fmt["initRange"]),
+                                               indexEnd: rangeEnd(fmt["indexRange"])))
                 }
             }
         }

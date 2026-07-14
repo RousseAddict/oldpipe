@@ -37,6 +37,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // discovery is running.
     private var castBtn: UIButton?
     private var castBtnSpinner: UIActivityIndicatorView?
+    // Quality picker (HLS transmux): "hd" button in the control bar + the HLS-capable
+    // video-only streams backing the last-shown sheet (index-aligned with its buttons).
+    private var hdBtn: UIButton?
+    private var pendingHLSStreams: [VideoStream] = []
 
     // Everything below the meta line is laid out by relayout() from contentBelowMetaY:
     // description (below meta) → download button → share row → related videos. The
@@ -886,12 +890,25 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             if buttonIndex < castDevices.count {
                 startCasting(to: castDevices[buttonIndex])
             }
+        } else if actionSheet.tag == 4 {
+            // Quality sheet: button 0 = 360p, then pendingHLSStreams in order, then Cancel.
+            guard buttonIndex != actionSheet.cancelButtonIndex else { return }
+            if buttonIndex == 0 {
+                playTapped()   // the default 360p path (offline copy / direct / proxied)
+            } else if buttonIndex - 1 < pendingHLSStreams.count {
+                playHLS(pendingHLSStreams[buttonIndex - 1])
+            }
         }
     }
 
     // MARK: - UIAlertViewDelegate (new-playlist name entry)
 
     func alertView(_ alertView: UIAlertView, clickedButtonAt buttonIndex: Int) {
+        // TEMPORARY (HLS debug): tag 99 = debug popup; "Copy" button → clipboard.
+        if alertView.tag == 99 {
+            if buttonIndex == 1 { UIPasteboard.general.string = alertView.message ?? "" }
+            return
+        }
         guard buttonIndex == 1 else { return }   // 0 = Cancel, 1 = Create
         let name = (alertView.textField(at: 0)?.text ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1174,11 +1191,18 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(fs)
         fsButton = fs
 
+        // Quality button — opens the 360p/HLS quality sheet. Left of the cast button.
+        let hd = UIButton(type: .custom)
+        hd.setImage(UIImage(named: "hd"), for: .normal)
+        hd.addTarget(self, action: #selector(hdTapped), for: .touchUpInside)
+        bar.addSubview(hd)
+        hdBtn = hd
+
         layoutControls(width: w)
     }
 
     // Position the control bar's children for a given bar width (bar frame set by caller).
-    // Layout: [play 36][cur 46] ===slider=== [dur 46][cast 36][fullscreen 36]
+    // Layout: [play 36][cur 46] ===slider=== [dur 46][hd 36][cast 36][fullscreen 36]
     // Times are left/right-aligned so they hug the adjacent buttons — spacing is uniform
     // on both ends and the slider is centered between them.
     private func layoutControls(width w: CGFloat) {
@@ -1189,9 +1213,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         currentTimeLabel?.frame = CGRect(x: btnW, y: 0, width: timeW, height: barH)
         fsButton?.frame = CGRect(x: w - btnW, y: 0, width: btnW, height: barH)
         castBtn?.frame = CGRect(x: w - btnW * 2, y: 0, width: btnW, height: barH)
-        durationLabel?.frame = CGRect(x: w - btnW * 2 - timeW, y: 0, width: timeW, height: barH)
+        hdBtn?.frame = CGRect(x: w - btnW * 3, y: 0, width: btnW, height: barH)
+        durationLabel?.frame = CGRect(x: w - btnW * 3 - timeW, y: 0, width: timeW, height: barH)
         let leftEdge = btnW + timeW
-        let rightEdge = btnW * 2 + timeW
+        let rightEdge = btnW * 3 + timeW
         // A UISlider reserves ~half its thumb width of empty space at each end of its frame
         // before the visible track begins, so the track looks like it has more padding than
         // the tight play/time gaps. Bleed the slider frame outward by that inset so the
@@ -1404,6 +1429,71 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             ?? streams.first
     }
 
+    // MARK: - HLS quality selection (>360p via local transmux)
+
+    // The DASH audio track backing every HLS quality. indexEnd > 0 = fMP4 with a sidx head.
+    private func audioStreamForHLS() -> VideoStream? {
+        return streams.first { $0.itag == 140 && $0.indexEnd > 0 }
+    }
+
+    // Video-only H.264 streams the transmux pipeline can serve, ascending quality
+    // (480p, 720p, 1080p). Empty when the audio track is missing (no way to mux).
+    private func hlsQualityOptions() -> [VideoStream] {
+        guard audioStreamForHLS() != nil else { return [] }
+        return [135, 136, 137].compactMap { tag in
+            streams.first { $0.itag == tag && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
+        }
+    }
+
+    @objc private func hdTapped() {
+        let opts = hlsQualityOptions()
+        guard !opts.isEmpty else {
+            let alert = UIAlertView()
+            alert.title = "Quality"
+            alert.message = streams.isEmpty ? "Still loading streams..."
+                                            : "No higher qualities available for this video."
+            alert.addButton(withTitle: "OK")
+            alert.cancelButtonIndex = 0
+            alert.show()
+            return
+        }
+        pendingHLSStreams = opts
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Quality"
+        sheet.addButton(withTitle: "360p")
+        for s in opts { sheet.addButton(withTitle: s.quality.isEmpty ? "itag \(s.itag)" : s.quality) }
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 4
+        sheet.show(in: view)
+    }
+
+    // Play a >360p quality through the local HLS transmux pipeline. Goes through StreamProxy
+    // on ALL iOS versions (the transmux runs locally — a direct googlevideo URL can't help),
+    // with the proxy-length readiness window: the first playlist request triggers two ranged
+    // head fetches + parse before AVPlayer even sees the segment list. Falls back to a 360p
+    // download-then-play via tryStream's onFail, same as the proxied 360p path.
+    private func playHLS(_ vStream: VideoStream) {
+        guard let aStream = audioStreamForHLS(),
+              let local = StreamProxy.shared.hlsURL(videoURL: vStream.url, audioURL: aStream.url,
+                                                    videoIndexEnd: vStream.indexEnd,
+                                                    audioIndexEnd: aStream.indexEnd) else {
+            statusLabel?.text = "Quality unavailable"
+            statusLabel?.isHidden = false
+            return
+        }
+        playBtn?.isHidden = true
+        statusLabel?.text = "Loading stream..."
+        statusLabel?.isHidden = false
+        showSpinner()
+        let fallback = preferredStream()?.url ?? vStream.url
+        // 120 ticks = 30s: first-play needs 2 head fetches + 2 ranged GETs + transmux per
+        // segment before AVPlayer reports ready — generous headroom on an iPhone 4S.
+        tryStream(urlStr: local.absoluteString, fallbackDownload: fallback, maxTicks: 120,
+                  hlsDebug: true)
+    }
+
     // MARK: - Playback
 
     @objc private func playTapped() {
@@ -1480,7 +1570,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Direct/proxied streaming with a quick download-then-play fallback.
-    private func tryStream(urlStr: String, fallbackDownload: String, maxTicks: Int = 16) {
+    private func tryStream(urlStr: String, fallbackDownload: String, maxTicks: Int = 16,
+                           hlsDebug: Bool = false) {
         guard let nsurl = URL(string: urlStr) else {
             statusLabel?.text = "Invalid stream URL"
             statusLabel?.isHidden = false
@@ -1498,7 +1589,25 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             self.showControls()
         }, onFail: { [weak self] in
             guard let self = self else { return }
+            // TEMPORARY (HLS debug): surface why the HLS attempt failed — read the item
+            // state BEFORE abandonLoad clears it.
+            if hlsDebug {
+                let alert = UIAlertView()
+                alert.tag = 99
+                alert.delegate = self
+                alert.title = "HLS debug"
+                alert.message = "itemFailed=\(self.sp.isFailed) err=\(self.sp.itemErrorText)\n"
+                    + (StreamProxy.shared.takeHLSDebug() ?? "no proxy activity")
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Copy")
+                alert.cancelButtonIndex = 0
+                alert.show()
+            }
             // Keep the spinner running — we're falling through to a download attempt.
+            // Tear down the never-ready item FIRST: a timed-out (not failed) item keeps
+            // AVPlayer fetching in the background (starving the download), and its non-nil
+            // item makes isActive() true so the completion handler would never auto-play.
+            self.sp.abandonLoad()
             self.detachLayer()
             self.statusLabel?.text = "Downloading..."
             self.statusLabel?.isHidden = false

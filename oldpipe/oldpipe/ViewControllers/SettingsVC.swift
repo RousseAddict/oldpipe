@@ -121,7 +121,9 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         toggleLabel.text = "Enable Shorts on Home Screen"
         toggleLabel.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(toggleLabel)
-        y += rowH + 28
+        y += rowH + 12
+
+        y += 16
 
         // ── Export ───────────────────────────────────────────────────────────────
         y = addHeader("Export", at: y, width: contentW, pad: pad)
@@ -413,3 +415,4 @@ private class SettingsBlockTarget: NSObject {
     init(_ block: @escaping () -> Void) { self.block = block }
     @objc func fire() { block() }
 }
+

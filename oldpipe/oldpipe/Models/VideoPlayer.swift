@@ -28,6 +28,7 @@ class VideoPlayer {
     private var artwork: UIImage?
     private var ticker: Timer?
     private var endObserver: NSObjectProtocol?   // AVPlayerItemDidPlayToEndTime for the current item
+    private var lastLoadWasHLS = false           // content type of the last load() — see type-switch note in load()
 
     // MARK: - Autoplay queue (playlists)
     // Set by PlaylistDetailVC before pushing the player. When the current item plays to the
@@ -57,6 +58,16 @@ class VideoPlayer {
     // waits for readiness first — iOS 6 won't reliably auto-start before tracks load).
     func load(video: Video, url: URL, isLocal: Bool, resume: Double, artwork: UIImage?) {
         configureAudioSession()
+        // iOS 6 AVPlayer cannot replaceCurrentItem across content types (progressive MP4
+        // <-> HLS): the new HLS item probes the playlist then fails with bare -11800
+        // without ever requesting a segment. Recreate the player on a type switch.
+        let isHLS = url.absoluteString.hasSuffix(".m3u8")
+        if player != nil && isHLS != lastLoadWasHLS {
+            player?.pause()
+            player?.replaceCurrentItem(with: nil)
+            player = nil
+        }
+        lastLoadWasHLS = isHLS
         if player == nil {
             let p = AVPlayer()
             player = p
@@ -84,6 +95,16 @@ class VideoPlayer {
 
     var isReady: Bool { return item?.status == .readyToPlay }
     var isFailed: Bool { return item?.status == .failed }
+
+    // TEMPORARY (HLS debug): AVFoundation error domain/code of the current item, if any.
+    var itemErrorText: String {
+        guard let e = item?.error as NSError? else { return "none" }
+        var s = "\(e.domain) \(e.code)"
+        if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
+            s += " / \(u.domain) \(u.code)"
+        }
+        return s
+    }
 
     // True when the current video's display size is taller than wide (e.g. a Short).
     // Uses the asset track's naturalSize + preferredTransform — iOS 4+ safe, unlike
@@ -161,6 +182,23 @@ class VideoPlayer {
         artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         try? AVAudioSession.sharedInstance().setActive(false)
+    }
+
+    // Abandon a load that never became ready (stream fallback path). Unlike stop() there is
+    // no position to save (nothing ever played) and the queue is left alone. Removing the item
+    // matters twice over: (1) a timed-out-but-not-failed item keeps AVPlayer fetching in the
+    // background — for HLS that means segment transmux fetches holding the feed turnstile and
+    // competing with the fallback download; (2) isActive() checks `item != nil`, so a lingering
+    // item makes the download-completion handler skip auto-play and freeze at "Downloading 100%".
+    func abandonLoad() {
+        ticker?.invalidate(); ticker = nil
+        if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        StreamProxy.shared.closeCurrentStream()   // abort in-flight proxy/HLS transfers promptly
+        item = nil
+        currentVideo = nil
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
     // The current item reached its end. Tear down the underlying proxy stream so a finished

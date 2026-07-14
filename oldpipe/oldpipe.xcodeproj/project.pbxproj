@@ -42,6 +42,7 @@
 		BB000001000000000000BC02 /* CurlFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB02 /* CurlFetcher.swift */; };
 		BB000001000000000000BC1E /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1E /* CastSession.swift */; };
 		BB000001000000000000BC1F /* StreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1F /* StreamResolver.swift */; };
+		BB000001000000000000BC21 /* HLSTransmuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB21 /* HLSTransmuxer.swift */; };
 		BB000001000000000000BC1D /* CastDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1D /* CastDiscovery.swift */; };
 		BB000001000000000000BC1C /* CastMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1C /* CastMessage.swift */; };
 		BB000001000000000000BC19 /* StreamProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB19 /* StreamProxy.swift */; };
@@ -128,6 +129,7 @@
 		BB000001000000000000BB02 /* CurlFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurlFetcher.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1E /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1F /* StreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamResolver.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB21 /* HLSTransmuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSTransmuxer.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1D /* CastDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastDiscovery.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1C /* CastMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastMessage.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB19 /* StreamProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamProxy.swift; sourceTree = "<group>"; };
@@ -266,6 +268,7 @@
 				BB000001000000000000BB02 /* CurlFetcher.swift */,
 				BB000001000000000000BB1E /* CastSession.swift */,
 				BB000001000000000000BB1F /* StreamResolver.swift */,
+				BB000001000000000000BB21 /* HLSTransmuxer.swift */,
 				BB000001000000000000BB1D /* CastDiscovery.swift */,
 				BB000001000000000000BB1C /* CastMessage.swift */,
 				BB000001000000000000BB19 /* StreamProxy.swift */,
@@ -481,6 +484,7 @@
 				BB000001000000000000BC02 /* CurlFetcher.swift in Sources */,
 				BB000001000000000000BC1E /* CastSession.swift in Sources */,
 				BB000001000000000000BC1F /* StreamResolver.swift in Sources */,
+				BB000001000000000000BC21 /* HLSTransmuxer.swift in Sources */,
 				BB000001000000000000BC1D /* CastDiscovery.swift in Sources */,
 				BB000001000000000000BC1C /* CastMessage.swift in Sources */,
 				BB000001000000000000BC19 /* StreamProxy.swift in Sources */,

@@ -93,6 +93,61 @@ private let proxyProgressCallback: @convention(c) (UnsafeMutableRawPointer?, Int
     return 0
 }
 
+// MARK: - Internal ranged fetch (HLS transmux)
+
+// Accumulates one bounded ranged GET (init+sidx head, or one DASH fragment) into memory.
+// Unlike ProxyConn there's no client socket — the bytes feed HLSTransmuxer, not AVPlayer.
+private final class RangeFetchCtx {
+    var data = Data()
+    let gen: UInt64
+    var aborted = false
+    init(gen: UInt64) { self.gen = gen }
+}
+
+private let rangeFetchWriteCallback: @convention(c) (UnsafeRawPointer?, Int, Int, UnsafeMutableRawPointer?) -> Int = { ptr, size, nmemb, userdata in
+    let bytes = size * nmemb
+    guard let ptr = ptr, let userdata = userdata else { return 0 }
+    let ctx = Unmanaged<RangeFetchCtx>.fromOpaque(userdata).takeUnretainedValue()
+    if ctx.aborted { return 0 }
+    ctx.data.append(Data(bytes: ptr, count: bytes))
+    return bytes
+}
+
+// Same superseded-generation abort as proxyProgressCallback: if a newer video is requested
+// while a segment fetch is mid-flight, kill it within ~1s so it can't hold the feed turnstile.
+private let rangeFetchProgressCallback: @convention(c) (UnsafeMutableRawPointer?, Int64, Int64, Int64, Int64) -> Int32 = { clientp, _, _, _, _ in
+    guard let clientp = clientp else { return 0 }
+    let ctx = Unmanaged<RangeFetchCtx>.fromOpaque(clientp).takeUnretainedValue()
+    if ctx.aborted { return 1 }
+    if StreamProxy.shared.isSuperseded(ctx.gen) { ctx.aborted = true; return 1 }
+    return 0
+}
+
+// MARK: - HLS session (HLS transmux)
+
+// One >360p playback: a video-only + audio-only DASH fMP4 pair served to AVPlayer as a local
+// HLS VOD stream (/hls/<id>/index.m3u8 + segN.ts, transmuxed on demand by HLSTransmuxer).
+// `info`/`playlistText` are parsed lazily on the FIRST playlist request (one ranged GET of each
+// stream's init+sidx head) and cached; parseLock serializes that against AVPlayer's habit of
+// opening parallel connections. `gen` follows the same generation-abort rules as mp4 routes.
+private final class HLSSession {
+    let videoURL: String
+    let audioURL: String
+    let videoIndexEnd: Int64
+    let audioIndexEnd: Int64
+    var gen: UInt64
+    var info: HLSStreamInfo?
+    var playlistText: String?
+    let parseLock = NSLock()
+    init(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64, gen: UInt64) {
+        self.videoURL = videoURL
+        self.audioURL = audioURL
+        self.videoIndexEnd = videoIndexEnd
+        self.audioIndexEnd = audioIndexEnd
+        self.gen = gen
+    }
+}
+
 // MARK: - StreamProxy
 
 final class StreamProxy: NSObject {
@@ -107,6 +162,8 @@ final class StreamProxy: NSObject {
     // the URL into the path (addingPercentEncoding / base64 options are iOS 7+). NSLock-guarded
     // because localURL(for:) is called on the main thread while connection threads read it.
     private var routes: [String: (url: String, gen: UInt64)] = [:]
+    // HLS transmux sessions, keyed by the <id> in /hls/<id>/... paths. Same lock as routes.
+    private var hlsSessions: [String: HLSSession] = [:]
     private var routeSeq: UInt64 = 0
     // Monotonic generation, bumped each time a new stream is requested. In-flight connections
     // from an older generation are aborted by proxyProgressCallback (see isSuperseded).
@@ -124,6 +181,39 @@ final class StreamProxy: NSObject {
         routes[token] = (remote, currentGen)
         lock.unlock()
         return URL(string: "http://127.0.0.1:\(port)/\(token)")
+    }
+
+    // Register a >360p HLS transmux session for a DASH video+audio fMP4 pair and return the
+    // local playlist URL for AVPlayer. indexEnd values come from the innertube indexRange —
+    // bytes 0...indexEnd is each stream's init+sidx head. Bumps the generation exactly like
+    // localURL(for:) so any previously playing stream is aborted at the switch moment.
+    func hlsURL(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) -> URL? {
+        guard videoIndexEnd > 0, audioIndexEnd > 0, start() else { return nil }
+        lock.lock()
+        routeSeq += 1
+        currentGen += 1
+        let id = "\(routeSeq)"
+        hlsSessions[id] = HLSSession(videoURL: videoURL, audioURL: audioURL,
+                                     videoIndexEnd: videoIndexEnd, audioIndexEnd: audioIndexEnd,
+                                     gen: currentGen)
+        lock.unlock()
+        return URL(string: "http://127.0.0.1:\(port)/hls/\(id)/index.m3u8")
+    }
+
+    // Debug breadcrumb for the HLS transmux pipeline — the LAST notable event (failure detail
+    // or success milestone). Read by the player's fallback path to surface WHY HLS failed on
+    // a device where we have no console. Same lock as routes.
+    private var hlsDebug: [String] = []
+    private func setHLSDebug(_ s: String) {
+        NSLog("[HLS] %@", s)
+        lock.lock()
+        hlsDebug.append(s)
+        if hlsDebug.count > 12 { hlsDebug.removeFirst(hlsDebug.count - 12) }
+        lock.unlock()
+    }
+    func takeHLSDebug() -> String? {
+        lock.lock(); let all = hlsDebug; hlsDebug = []; lock.unlock()
+        return all.isEmpty ? nil : all.joined(separator: "\n")
     }
 
     // True once a newer stream has been requested than the given generation. Read from the
@@ -144,6 +234,7 @@ final class StreamProxy: NSObject {
         currentGen += 1
         let bumped = currentGen
         for k in routes.keys { routes[k]?.gen = bumped }
+        for s in hlsSessions.values { s.gen = bumped }
         lock.unlock()
     }
 
@@ -245,9 +336,26 @@ final class StreamProxy: NSObject {
         var token = parts[1]
         if token.hasPrefix("/") { token.removeFirst() }
         if let q = token.firstIndex(of: "?") { token = String(token[..<q]) }
+        setHLSDebug("conn GET /\(token)")  // TEMPORARY (HLS debug): log EVERY request
+
+        // HLS transmux: "hls/<id>/index.m3u8" or "hls/<id>/segN.ts"
+        if token.hasPrefix("hls/") {
+            let comps = token.components(separatedBy: "/")
+            lock.lock()
+            let session = comps.count == 3 ? hlsSessions[comps[1]] : nil
+            lock.unlock()
+            guard let session = session else {
+                setHLSDebug("404 no hls session for /\(token)")
+                StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
+                return
+            }
+            serveHLS(session, file: comps[2], clientFd: clientFd)
+            return
+        }
 
         lock.lock(); let route = routes[token]; lock.unlock()
         guard let route = route else {
+            setHLSDebug("404 no route for /\(token)")
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
             return
         }
@@ -259,6 +367,128 @@ final class StreamProxy: NSObject {
         }
 
         proxy(remoteURL: route.url, gen: route.gen, rangeHeader: rangeHeader, clientFd: clientFd)
+    }
+
+    // MARK: - HLS transmux serving
+
+    // Serve one HLS request for a session: the VOD playlist (parsing the stream heads lazily on
+    // first hit) or one transmuxed TS segment (two bounded ranged GETs + mux, ~1.4MB for 720p).
+    // Runs on the per-connection thread — blocking here is fine, AVPlayer just waits.
+    private func serveHLS(_ session: HLSSession, file: String, clientFd: Int32) {
+        lock.lock(); let gen = session.gen; lock.unlock()
+        setHLSDebug("req \(file)")
+
+        guard let info = ensureParsed(session, gen: gen) else {
+            StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+
+        if file == "index.m3u8" {
+            session.parseLock.lock(); let text = session.playlistText ?? ""; session.parseLock.unlock()
+            let lines = text.components(separatedBy: "\n")
+            let td = lines.first { $0.hasPrefix("#EXT-X-TARGETDURATION") } ?? "no-td"
+            let inf = lines.first { $0.hasPrefix("#EXTINF") } ?? "no-inf"
+            // TEMPORARY (HLS debug): on-device self-check — the 5.1.5 runtime has already
+            // corrupted one interpolated line ("?"); scan the WHOLE playlist for anomalies.
+            var badLines = 0
+            var hasEnd = false
+            for l in lines {
+                if l.contains("?") { badLines += 1 }
+                if l == "#EXT-X-ENDLIST" { hasEnd = true }
+            }
+            setHLSDebug("playlist ok (\(info.segmentCount) segs, \(text.count)b, bad=\(badLines), end=\(hasEnd ? 1 : 0)) \(td) \(inf)")
+            sendResponse(clientFd, contentType: "application/vnd.apple.mpegurl", body: Data(text.utf8))
+            return
+        }
+
+        guard file.hasPrefix("seg"), file.hasSuffix(".ts"),
+              let seg = Int(String(file.dropFirst(3).dropLast(3))),
+              let vr = HLSTransmuxer.videoRange(info, seg: seg),
+              let ar = HLSTransmuxer.audioRange(info, seg: seg) else {
+            setHLSDebug("bad seg request: \(file)")
+            StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        guard let vBlob = fetchRange(url: session.videoURL, start: vr.start, end: vr.end, gen: gen),
+              let aBlob = fetchRange(url: session.audioURL, start: ar.start, end: ar.end, gen: gen) else {
+            StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        guard let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: vBlob, audioBlob: aBlob) else {
+            setHLSDebug("mux failed seg \(seg) (v=\(vBlob.count)b a=\(aBlob.count)b)")
+            StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        setHLSDebug("seg \(seg) ok (\(ts.count / 1024)KB)")
+        sendResponse(clientFd, contentType: "video/MP2T", body: ts)
+    }
+
+    // Fetch + parse both streams' init+sidx heads once per session; cache info + playlist.
+    // parseLock (NOT the routes lock — network I/O happens inside) serializes AVPlayer's
+    // parallel connections so the heads are fetched exactly once.
+    private func ensureParsed(_ session: HLSSession, gen: UInt64) -> HLSStreamInfo? {
+        session.parseLock.lock()
+        defer { session.parseLock.unlock() }
+        if let info = session.info { return info }
+        guard let vHead = fetchRange(url: session.videoURL, start: 0, end: session.videoIndexEnd, gen: gen),
+              let aHead = fetchRange(url: session.audioURL, start: 0, end: session.audioIndexEnd, gen: gen) else { return nil }
+        guard let info = HLSTransmuxer.parse(videoHead: vHead, audioHead: aHead) else {
+            setHLSDebug("head parse failed (v=\(vHead.count)b a=\(aHead.count)b)")
+            return nil
+        }
+        session.info = info
+        session.playlistText = HLSTransmuxer.playlist(info)
+        return info
+    }
+
+    // Bounded ranged GET through the curl bridge (googlevideo needs GCM TLS + android UA).
+    // Pauses the feed lane for the duration — same anti-concurrent-TLS rule as proxy() — but
+    // unlike proxy() these transfers are short and bounded, so pause/resume brackets the whole
+    // call. Returns nil on network error, non-2xx, abort, or short/over-long body.
+    private func fetchRange(url: String, start: Int64, end: Int64, gen: UInt64) -> Data? {
+        guard end >= start else { return nil }
+        let ctx = RangeFetchCtx(gen: gen)
+        let ctxPtr = Unmanaged.passUnretained(ctx).toOpaque()
+
+        guard let h = curl_bridge_init() else { return nil }
+        defer { curl_bridge_cleanup(h) }
+        url.withCString { curl_bridge_set_url(h, $0) }
+        curl_bridge_set_ssl_noverify(h)
+        curl_bridge_set_follow_redirects(h)
+        curl_bridge_set_timeout(h, 60)
+        "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip".withCString {
+            curl_bridge_set_useragent(h, $0)
+        }
+        "Range: bytes=\(start)-\(end)".withCString { curl_bridge_add_header(h, $0) }
+        curl_bridge_set_write_fn(h, rangeFetchWriteCallback, ctxPtr)
+        curl_bridge_set_progress_fn(h, rangeFetchProgressCallback, ctxPtr)
+
+        CurlFetcher.pauseFeed()
+        defer { CurlFetcher.resumeFeed() }
+
+        let t0 = Date()
+        let rc = curl_bridge_perform(h)
+        let code = curl_bridge_response_code(h)
+        let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        // Require the exact ranged byte count — a 200 (range ignored) or truncated body would
+        // silently corrupt fragment offsets downstream.
+        let want = end - start + 1
+        guard rc == 0, code == 206, !ctx.aborted, Int64(ctx.data.count) == want else {
+            setHLSDebug("fetch \(start)-\(end): rc=\(rc) http=\(code) got=\(ctx.data.count)/\(want)\(ctx.aborted ? " aborted" : "") \(ms)ms")
+            return nil
+        }
+        setHLSDebug("fetch \(start)-\(end) ok \(ms)ms")
+        return ctx.data
+    }
+
+    private func sendResponse(_ clientFd: Int32, contentType: String, body: Data) {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        guard StreamProxy.sendAll(clientFd, Array(head.utf8)) else { return }
+        body.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            if let base = raw.baseAddress {
+                _ = StreamProxy.sendAll(clientFd, base.assumingMemoryBound(to: UInt8.self), body.count)
+            }
+        }
     }
 
     // Read the request head (up to the blank line). Requests from AVPlayer are small.

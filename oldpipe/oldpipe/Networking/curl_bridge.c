@@ -18,25 +18,41 @@ typedef struct {
    immediately. The lock callbacks (a single mutex) make the shared cache thread-safe — REQUIRED
    when sharing across threads. */
 static CURLSH *g_share = NULL;
-static pthread_mutex_t g_share_lock = PTHREAD_MUTEX_INITIALIZER;
+/* One mutex PER lock-data type (indexed by curl_lock_data). CRITICAL: libcurl NESTS share
+   locks of different types — e.g. it holds the CONNECT (connection cache) lock while taking
+   the DNS or SSL_SESSION lock. A single non-recursive mutex for all types self-deadlocks on
+   the very first transfer once CONNECT sharing is enabled (DNS-only sharing never nested,
+   which is why one mutex used to work). curl never nests locks of the SAME type. */
+static pthread_mutex_t g_share_locks[CURL_LOCK_DATA_LAST];
 
 static void curl_bridge_share_lock(CURL *handle, curl_lock_data data,
                                    curl_lock_access access, void *userptr) {
-    (void)handle; (void)data; (void)access; (void)userptr;
-    pthread_mutex_lock(&g_share_lock);
+    (void)handle; (void)access; (void)userptr;
+    if (data >= 0 && data < CURL_LOCK_DATA_LAST) pthread_mutex_lock(&g_share_locks[data]);
 }
 static void curl_bridge_share_unlock(CURL *handle, curl_lock_data data, void *userptr) {
-    (void)handle; (void)data; (void)userptr;
-    pthread_mutex_unlock(&g_share_lock);
+    (void)handle; (void)userptr;
+    if (data >= 0 && data < CURL_LOCK_DATA_LAST) pthread_mutex_unlock(&g_share_locks[data]);
 }
 
 void curl_bridge_global_init(void) {
     curl_global_init(CURL_GLOBAL_ALL);
+    for (int i = 0; i < CURL_LOCK_DATA_LAST; i++) pthread_mutex_init(&g_share_locks[i], NULL);
     g_share = curl_share_init();
     if (g_share) {
         curl_share_setopt(g_share, CURLSHOPT_LOCKFUNC, curl_bridge_share_lock);
         curl_share_setopt(g_share, CURLSHOPT_UNLOCKFUNC, curl_bridge_share_unlock);
         curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_DNS);
+        /* Share the CONNECTION CACHE + TLS SESSION cache across handles too. Every
+           curl_bridge_init() makes a fresh easy handle whose private connection pool dies with
+           curl_easy_cleanup(), so each transfer paid a full TCP+TLS handshake (~1-3s on an
+           iPhone 4S). The HLS transmux path does many short bounded ranged GETs to the same
+           googlevideo host (2 head fetches + 2 per segment) — without connection reuse the
+           handshakes alone blow past AVPlayer's readiness window. With CONNECT shared, an idle
+           kept-alive googlevideo connection is reused by the next handle; SSL_SESSION makes any
+           new connection resume the TLS session instead of a full handshake. */
+        curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);
+        curl_share_setopt(g_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);
     }
 }
 

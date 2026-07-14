@@ -108,4 +108,10 @@ struct VideoStream {
     // Used to show "~48 MB" estimates in the download quality sheet. `var` with a default
     // keeps the synthesized memberwise init working for call sites that omit it.
     var contentLength: Int64 = 0
+    // DASH adaptiveFormats only: end byte of the init segment (`initRange.end`) and of the
+    // sidx segment index (`indexRange.end`). -1 when absent (muxed formats). A stream with
+    // indexEnd >= 0 is fMP4 and can feed the local HLS transmux pipeline: fetching
+    // bytes=0-indexEnd yields the full init+sidx head that HLSTransmuxer.parse needs.
+    var initEnd: Int64 = -1
+    var indexEnd: Int64 = -1
 }
