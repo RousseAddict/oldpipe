@@ -570,6 +570,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     private func openMenu() {
         buildMenuIfNeeded()
+        // The Shorts tab bar/table (if enabled later, from Settings reached via this very
+        // menu) is built lazily too and may be added to `view` AFTER menuOverlay, which
+        // would otherwise leave it stacked above the menu. Always bring the menu to front
+        // on open so z-order is correct regardless of which UI was built first.
+        view.bringSubviewToFront(menuOverlay)
         menuOverlay.isHidden = false
         menuOpen = true
         UIView.animate(withDuration: 0.25) {

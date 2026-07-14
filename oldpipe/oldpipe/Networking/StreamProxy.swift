@@ -200,22 +200,6 @@ final class StreamProxy: NSObject {
         return URL(string: "http://127.0.0.1:\(port)/hls/\(id)/index.m3u8")
     }
 
-    // Debug breadcrumb for the HLS transmux pipeline — the LAST notable event (failure detail
-    // or success milestone). Read by the player's fallback path to surface WHY HLS failed on
-    // a device where we have no console. Same lock as routes.
-    private var hlsDebug: [String] = []
-    private func setHLSDebug(_ s: String) {
-        NSLog("[HLS] %@", s)
-        lock.lock()
-        hlsDebug.append(s)
-        if hlsDebug.count > 12 { hlsDebug.removeFirst(hlsDebug.count - 12) }
-        lock.unlock()
-    }
-    func takeHLSDebug() -> String? {
-        lock.lock(); let all = hlsDebug; hlsDebug = []; lock.unlock()
-        return all.isEmpty ? nil : all.joined(separator: "\n")
-    }
-
     // True once a newer stream has been requested than the given generation. Read from the
     // libcurl progress callback (off the main thread) to abort a superseded transfer.
     func isSuperseded(_ gen: UInt64) -> Bool {
@@ -336,7 +320,6 @@ final class StreamProxy: NSObject {
         var token = parts[1]
         if token.hasPrefix("/") { token.removeFirst() }
         if let q = token.firstIndex(of: "?") { token = String(token[..<q]) }
-        setHLSDebug("conn GET /\(token)")  // TEMPORARY (HLS debug): log EVERY request
 
         // HLS transmux: "hls/<id>/index.m3u8" or "hls/<id>/segN.ts"
         if token.hasPrefix("hls/") {
@@ -345,7 +328,6 @@ final class StreamProxy: NSObject {
             let session = comps.count == 3 ? hlsSessions[comps[1]] : nil
             lock.unlock()
             guard let session = session else {
-                setHLSDebug("404 no hls session for /\(token)")
                 StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
                 return
             }
@@ -355,7 +337,6 @@ final class StreamProxy: NSObject {
 
         lock.lock(); let route = routes[token]; lock.unlock()
         guard let route = route else {
-            setHLSDebug("404 no route for /\(token)")
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
             return
         }
@@ -376,7 +357,6 @@ final class StreamProxy: NSObject {
     // Runs on the per-connection thread — blocking here is fine, AVPlayer just waits.
     private func serveHLS(_ session: HLSSession, file: String, clientFd: Int32) {
         lock.lock(); let gen = session.gen; lock.unlock()
-        setHLSDebug("req \(file)")
 
         guard let info = ensureParsed(session, gen: gen) else {
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
@@ -385,18 +365,6 @@ final class StreamProxy: NSObject {
 
         if file == "index.m3u8" {
             session.parseLock.lock(); let text = session.playlistText ?? ""; session.parseLock.unlock()
-            let lines = text.components(separatedBy: "\n")
-            let td = lines.first { $0.hasPrefix("#EXT-X-TARGETDURATION") } ?? "no-td"
-            let inf = lines.first { $0.hasPrefix("#EXTINF") } ?? "no-inf"
-            // TEMPORARY (HLS debug): on-device self-check — the 5.1.5 runtime has already
-            // corrupted one interpolated line ("?"); scan the WHOLE playlist for anomalies.
-            var badLines = 0
-            var hasEnd = false
-            for l in lines {
-                if l.contains("?") { badLines += 1 }
-                if l == "#EXT-X-ENDLIST" { hasEnd = true }
-            }
-            setHLSDebug("playlist ok (\(info.segmentCount) segs, \(text.count)b, bad=\(badLines), end=\(hasEnd ? 1 : 0)) \(td) \(inf)")
             sendResponse(clientFd, contentType: "application/vnd.apple.mpegurl", body: Data(text.utf8))
             return
         }
@@ -405,7 +373,6 @@ final class StreamProxy: NSObject {
               let seg = Int(String(file.dropFirst(3).dropLast(3))),
               let vr = HLSTransmuxer.videoRange(info, seg: seg),
               let ar = HLSTransmuxer.audioRange(info, seg: seg) else {
-            setHLSDebug("bad seg request: \(file)")
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
             return
         }
@@ -415,11 +382,9 @@ final class StreamProxy: NSObject {
             return
         }
         guard let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: vBlob, audioBlob: aBlob) else {
-            setHLSDebug("mux failed seg \(seg) (v=\(vBlob.count)b a=\(aBlob.count)b)")
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
             return
         }
-        setHLSDebug("seg \(seg) ok (\(ts.count / 1024)KB)")
         sendResponse(clientFd, contentType: "video/MP2T", body: ts)
     }
 
@@ -433,7 +398,6 @@ final class StreamProxy: NSObject {
         guard let vHead = fetchRange(url: session.videoURL, start: 0, end: session.videoIndexEnd, gen: gen),
               let aHead = fetchRange(url: session.audioURL, start: 0, end: session.audioIndexEnd, gen: gen) else { return nil }
         guard let info = HLSTransmuxer.parse(videoHead: vHead, audioHead: aHead) else {
-            setHLSDebug("head parse failed (v=\(vHead.count)b a=\(aHead.count)b)")
             return nil
         }
         session.info = info
@@ -466,18 +430,14 @@ final class StreamProxy: NSObject {
         CurlFetcher.pauseFeed()
         defer { CurlFetcher.resumeFeed() }
 
-        let t0 = Date()
         let rc = curl_bridge_perform(h)
         let code = curl_bridge_response_code(h)
-        let ms = Int(Date().timeIntervalSince(t0) * 1000)
         // Require the exact ranged byte count — a 200 (range ignored) or truncated body would
         // silently corrupt fragment offsets downstream.
         let want = end - start + 1
         guard rc == 0, code == 206, !ctx.aborted, Int64(ctx.data.count) == want else {
-            setHLSDebug("fetch \(start)-\(end): rc=\(rc) http=\(code) got=\(ctx.data.count)/\(want)\(ctx.aborted ? " aborted" : "") \(ms)ms")
             return nil
         }
-        setHLSDebug("fetch \(start)-\(end) ok \(ms)ms")
         return ctx.data
     }
 

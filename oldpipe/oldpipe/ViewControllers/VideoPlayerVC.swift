@@ -904,11 +904,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // MARK: - UIAlertViewDelegate (new-playlist name entry)
 
     func alertView(_ alertView: UIAlertView, clickedButtonAt buttonIndex: Int) {
-        // TEMPORARY (HLS debug): tag 99 = debug popup; "Copy" button → clipboard.
-        if alertView.tag == 99 {
-            if buttonIndex == 1 { UIPasteboard.general.string = alertView.message ?? "" }
-            return
-        }
         guard buttonIndex == 1 else { return }   // 0 = Cancel, 1 = Create
         let name = (alertView.textField(at: 0)?.text ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1490,8 +1485,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let fallback = preferredStream()?.url ?? vStream.url
         // 120 ticks = 30s: first-play needs 2 head fetches + 2 ranged GETs + transmux per
         // segment before AVPlayer reports ready — generous headroom on an iPhone 4S.
-        tryStream(urlStr: local.absoluteString, fallbackDownload: fallback, maxTicks: 120,
-                  hlsDebug: true)
+        tryStream(urlStr: local.absoluteString, fallbackDownload: fallback, maxTicks: 120)
     }
 
     // MARK: - Playback
@@ -1570,8 +1564,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Direct/proxied streaming with a quick download-then-play fallback.
-    private func tryStream(urlStr: String, fallbackDownload: String, maxTicks: Int = 16,
-                           hlsDebug: Bool = false) {
+    private func tryStream(urlStr: String, fallbackDownload: String, maxTicks: Int = 16) {
         guard let nsurl = URL(string: urlStr) else {
             statusLabel?.text = "Invalid stream URL"
             statusLabel?.isHidden = false
@@ -1589,20 +1582,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             self.showControls()
         }, onFail: { [weak self] in
             guard let self = self else { return }
-            // TEMPORARY (HLS debug): surface why the HLS attempt failed — read the item
-            // state BEFORE abandonLoad clears it.
-            if hlsDebug {
-                let alert = UIAlertView()
-                alert.tag = 99
-                alert.delegate = self
-                alert.title = "HLS debug"
-                alert.message = "itemFailed=\(self.sp.isFailed) err=\(self.sp.itemErrorText)\n"
-                    + (StreamProxy.shared.takeHLSDebug() ?? "no proxy activity")
-                alert.addButton(withTitle: "OK")
-                alert.addButton(withTitle: "Copy")
-                alert.cancelButtonIndex = 0
-                alert.show()
-            }
             // Keep the spinner running — we're falling through to a download attempt.
             // Tear down the never-ready item FIRST: a timed-out (not failed) item keeps
             // AVPlayer fetching in the background (starving the download), and its non-nil

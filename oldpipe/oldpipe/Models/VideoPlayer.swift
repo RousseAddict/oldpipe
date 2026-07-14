@@ -96,16 +96,6 @@ class VideoPlayer {
     var isReady: Bool { return item?.status == .readyToPlay }
     var isFailed: Bool { return item?.status == .failed }
 
-    // TEMPORARY (HLS debug): AVFoundation error domain/code of the current item, if any.
-    var itemErrorText: String {
-        guard let e = item?.error as NSError? else { return "none" }
-        var s = "\(e.domain) \(e.code)"
-        if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
-            s += " / \(u.domain) \(u.code)"
-        }
-        return s
-    }
-
     // True when the current video's display size is taller than wide (e.g. a Short).
     // Uses the asset track's naturalSize + preferredTransform — iOS 4+ safe, unlike
     // AVPlayerItem.presentationSize / AVPlayerLayer.videoRect (both iOS 7+).
