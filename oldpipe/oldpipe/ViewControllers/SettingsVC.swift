@@ -7,7 +7,7 @@ import UIKit
 // view (+ Copy button); Import parses pasted JSON and MERGES it into existing data
 // (subscriptions de-duplicated by channel id, playlists upserted by playlist id).
 
-class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDelegate {
+class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDelegate, UIActionSheetDelegate {
 
     private var scrollView: UIScrollView!
     private var exportView: UITextView!
@@ -15,6 +15,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var statusLabel: UILabel!
     private var cacheSizeLabel: UILabel!
     private var copyBtn: UIButton?
+    private var qualityBtn: UIButton?
     private var didSetupUI = false
     private var loadingSpinner: UIActivityIndicatorView?
 
@@ -123,6 +124,15 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         scrollView.addSubview(toggleLabel)
         y += rowH + 12
 
+        y = addSubtitle("Automatically use this quality for playback instead of picking each time (falls back to a lower tier if the exact quality isn't available for a video).",
+                        at: y, width: contentW, pad: pad)
+
+        let qBtn = makeButton("Default Quality: \(AppSettings.defaultQualityLabel())", at: y, width: contentW, pad: pad, accent: false)
+        qBtn.addTarget(self, action: #selector(qualityTapped), for: .touchUpInside)
+        scrollView.addSubview(qBtn)
+        qualityBtn = qBtn
+        y += 44 + 12
+
         y += 16
 
         // ── Export ───────────────────────────────────────────────────────────────
@@ -216,6 +226,30 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
     @objc private func shortsSwitchChanged(_ sender: UISwitch) {
         AppSettings.shortsOnHome = sender.isOn
+    }
+
+    // Empty-init + addButton (NOT the variadic otherButtonTitles: convenience init, which
+    // crashes on the 5.1.5 runtime).
+    @objc private func qualityTapped() {
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.tag = 10
+        sheet.title = "Default Video Quality"
+        sheet.addButton(withTitle: "Auto (360p)")
+        sheet.addButton(withTitle: "480p")
+        sheet.addButton(withTitle: "720p")
+        sheet.addButton(withTitle: "1080p")
+        sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = 4
+        sheet.show(in: view)
+    }
+
+    func actionSheet(_ actionSheet: UIActionSheet, clickedButtonAt buttonIndex: Int) {
+        guard actionSheet.tag == 10 else { return }
+        let values = ["auto", "480", "720", "1080"]
+        guard buttonIndex >= 0, buttonIndex < values.count else { return }
+        AppSettings.defaultQuality = values[buttonIndex]
+        qualityBtn?.setTitle("Default Quality: \(AppSettings.defaultQualityLabel())", for: .normal)
     }
 
     // MARK: - Cache size

@@ -37,6 +37,30 @@ enum AppSettings {
             UserDefaults.standard.synchronize()
         }
     }
+
+    private static let defaultQualityKey = "default_quality"
+
+    // "auto" = no preference, videos always start at the normal 360p path (the user picks
+    // quality manually via the hd button, same as before). Otherwise "480"/"720"/"1080" —
+    // VideoPlayerVC steps down through the HLS tiers when the exact pick isn't available
+    // for a given video. A plain string (not bool) so String(forKey:) sidesteps the 5.1.5
+    // runtime's `as? Bool`/`as? Int` NSNumber-nil gotcha entirely.
+    static var defaultQuality: String {
+        get { UserDefaults.standard.string(forKey: defaultQualityKey) ?? "auto" }
+        set {
+            UserDefaults.standard.set(newValue, forKey: defaultQualityKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+
+    static func defaultQualityLabel() -> String {
+        switch defaultQuality {
+        case "480": return "480p"
+        case "720": return "720p"
+        case "1080": return "1080p"
+        default: return "Auto (360p)"
+        }
+    }
 }
 
 @UIApplicationMain

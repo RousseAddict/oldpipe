@@ -1440,6 +1440,25 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
+    // Settings > Default Video Quality. Steps DOWN from the user's preferred tier through
+    // 720p/480p if the exact match isn't available for this video, so playback still starts
+    // at the closest quality instead of falling all the way back to 360p. Returns nil for
+    // "auto" (no preference — caller falls through to the normal 360p path unchanged) or when
+    // streams haven't loaded yet / no HLS tier at all exists for this video.
+    private func defaultQualityStream() -> VideoStream? {
+        let pref = AppSettings.defaultQuality
+        guard pref != "auto" else { return nil }
+        let opts = hlsQualityOptions()
+        guard !opts.isEmpty else { return nil }
+        let order = ["1080", "720", "480"]
+        let itagFor: [String: Int] = ["1080": 137, "720": 136, "480": 135]
+        guard let startIdx = order.firstIndex(of: pref) else { return nil }
+        for key in order[startIdx...] {
+            if let itag = itagFor[key], let s = opts.first(where: { $0.itag == itag }) { return s }
+        }
+        return nil
+    }
+
     @objc private func hdTapped() {
         let opts = hlsQualityOptions()
         guard !opts.isEmpty else {
@@ -1496,6 +1515,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             playBtn?.isHidden = true
             statusLabel?.isHidden = true
             startPlayback(url: URL(fileURLWithPath: DownloadManager.filePath(for: video.id)), isLocal: true)
+            return
+        }
+
+        // Apply the user's default quality preference (Settings), if set and available.
+        if let preset = defaultQualityStream() {
+            playHLS(preset)
             return
         }
 
