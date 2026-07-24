@@ -14,8 +14,10 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var importView: UITextView!
     private var statusLabel: UILabel!
     private var cacheSizeLabel: UILabel!
+    private var debugCountLabel: UILabel!
     private var copyBtn: UIButton?
     private var qualityBtn: UIButton?
+    private var copyDebugBtn: UIButton?
     private var didSetupUI = false
     private var loadingSpinner: UIActivityIndicatorView?
 
@@ -217,7 +219,53 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         statusLabel.numberOfLines = 2
         statusLabel.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(statusLabel)
-        y += 40
+        y += 40 + 16
+
+        // ── Debug ──────────────────────────────────────────────────────────────────
+        y = addHeader("Debug", at: y, width: contentW, pad: pad)
+        y = addSubtitle("Records a breadcrumb trail through video playback to help diagnose \"video won't play\" reports. Off by default, no cost when disabled.",
+                        at: y, width: contentW, pad: pad)
+
+        let debugSw = UISwitch()
+        let debugSwW = max(debugSw.bounds.width, 51)
+        debugSw.frame = CGRect(x: w - pad - debugSwW, y: y + (rowH - debugSw.bounds.height) / 2,
+                          width: debugSwW, height: debugSw.bounds.height)
+        debugSw.onTintColor = accent
+        debugSw.isOn = AppSettings.debugLoggingEnabled
+        debugSw.autoresizingMask = iPadFlexLeft
+        debugSw.addTarget(self, action: #selector(debugSwitchChanged(_:)), for: .valueChanged)
+        scrollView.addSubview(debugSw)
+
+        let debugToggleLabel = UILabel(frame: CGRect(x: pad, y: y, width: debugSw.frame.origin.x - pad - 10, height: rowH))
+        debugToggleLabel.backgroundColor = .clear
+        debugToggleLabel.textColor = .white
+        debugToggleLabel.font = UIFont.systemFont(ofSize: 16)
+        debugToggleLabel.adjustsFontSizeToFitWidth = true
+        debugToggleLabel.minimumScaleFactor = 0.8
+        debugToggleLabel.text = "Enable Debug Logging"
+        debugToggleLabel.autoresizingMask = iPadFlexWidth
+        scrollView.addSubview(debugToggleLabel)
+        y += rowH + 12
+
+        debugCountLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 20))
+        debugCountLabel.backgroundColor = .clear
+        debugCountLabel.textColor = UIColor(white: 0.7, alpha: 1)
+        debugCountLabel.font = UIFont.boldSystemFont(ofSize: 13)
+        debugCountLabel.autoresizingMask = iPadFlexWidth
+        debugCountLabel.text = "\(DebugLog.count()) log entries"
+        scrollView.addSubview(debugCountLabel)
+        y += 20 + 8
+
+        let copyDebug = makeButton("Copy Debug Log", at: y, width: contentW, pad: pad, accent: false)
+        copyDebug.addTarget(self, action: #selector(copyDebugTapped), for: .touchUpInside)
+        scrollView.addSubview(copyDebug)
+        copyDebugBtn = copyDebug
+        y += 44 + 10
+
+        let clearDebug = makeButton("Clear Debug Log", at: y, width: contentW, pad: pad, accent: false)
+        clearDebug.addTarget(self, action: #selector(clearDebugTapped), for: .touchUpInside)
+        scrollView.addSubview(clearDebug)
+        y += 44 + 28
 
         scrollView.contentSize = CGSize(width: w, height: y + 80)   // +80 covers mini player bar
     }
@@ -250,6 +298,22 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         guard buttonIndex >= 0, buttonIndex < values.count else { return }
         AppSettings.defaultQuality = values[buttonIndex]
         qualityBtn?.setTitle("Default Quality: \(AppSettings.defaultQualityLabel())", for: .normal)
+    }
+
+    // MARK: - Debug
+
+    @objc private func debugSwitchChanged(_ sender: UISwitch) {
+        AppSettings.debugLoggingEnabled = sender.isOn
+    }
+
+    @objc private func copyDebugTapped() {
+        UIPasteboard.general.string = DebugLog.exportText()
+        flash(copyDebugBtn, "Copied \u{2713}", revertTo: "Copy Debug Log")
+    }
+
+    @objc private func clearDebugTapped() {
+        DebugLog.clear()
+        debugCountLabel.text = "0 log entries"
     }
 
     // MARK: - Cache size

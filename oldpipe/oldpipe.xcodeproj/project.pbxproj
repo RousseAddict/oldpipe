@@ -61,6 +61,7 @@
 		BB000001000000000000BC14 /* Playlist.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB14 /* Playlist.swift */; };
 		BB000001000000000000BC0D /* SubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0D /* SubscriptionManager.swift */; };
 		BB000001000000000000BC1A /* HistoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1A /* HistoryManager.swift */; };
+		BB000001000000000000BC22 /* DebugLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB22 /* DebugLog.swift */; };
 		BB000001000000000000BC15 /* PlaylistManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB15 /* PlaylistManager.swift */; };
 		BB000001000000000000BC12 /* VideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB12 /* VideoPlayer.swift */; };
 		BB000001000000000000BC0E /* ChannelVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0E /* ChannelVC.swift */; };
@@ -148,6 +149,7 @@
 		BB000001000000000000BB14 /* Playlist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Playlist.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0D /* SubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1A /* HistoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryManager.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB22 /* DebugLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLog.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB15 /* PlaylistManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB12 /* VideoPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayer.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0E /* ChannelVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelVC.swift; sourceTree = "<group>"; };
@@ -289,6 +291,7 @@
 				BB000001000000000000BB14 /* Playlist.swift */,
 				BB000001000000000000BB0D /* SubscriptionManager.swift */,
 				BB000001000000000000BB1A /* HistoryManager.swift */,
+				BB000001000000000000BB22 /* DebugLog.swift */,
 				BB000001000000000000BB15 /* PlaylistManager.swift */,
 				BB000001000000000000BB12 /* VideoPlayer.swift */,
 			);
@@ -503,6 +506,7 @@
 				BB000001000000000000BC14 /* Playlist.swift in Sources */,
 				BB000001000000000000BC0D /* SubscriptionManager.swift in Sources */,
 				BB000001000000000000BC1A /* HistoryManager.swift in Sources */,
+				BB000001000000000000BC22 /* DebugLog.swift in Sources */,
 				BB000001000000000000BC15 /* PlaylistManager.swift in Sources */,
 				BB000001000000000000BC12 /* VideoPlayer.swift in Sources */,
 				BB000001000000000000BC0E /* ChannelVC.swift in Sources */,

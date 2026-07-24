@@ -61,6 +61,20 @@ enum AppSettings {
         default: return "Auto (360p)"
         }
     }
+
+    private static let debugLoggingKey = "debug_logging_enabled"
+
+    // Off by default. When on, DebugLog.log(_:_:) records breadcrumbs through the playback
+    // pipeline (Home tap -> stream resolution -> proxy -> AVPlayerItem status) so a user
+    // hitting "video won't play" can copy a trace from Settings > Debug instead of us having
+    // to reproduce it blind.
+    static var debugLoggingEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: debugLoggingKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: debugLoggingKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
 }
 
 @UIApplicationMain
@@ -119,6 +133,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // unable to start a new iOS-6 stream — it stalls and falls back to download. Rebuild the
     // proxy listener lazily (next play re-binds a fresh port) and re-activate the audio session.
     func applicationDidBecomeActive(_ application: UIApplication) {
+        DebugLog.log("App", "applicationDidBecomeActive — resetting proxy listener + reactivating audio session")
         StreamProxy.shared.reset()
         VideoPlayer.shared.reactivateSession()
     }
