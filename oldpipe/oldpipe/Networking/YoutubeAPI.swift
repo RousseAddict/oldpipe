@@ -87,27 +87,49 @@ class YoutubeAPI {
 
     // MARK: - Player (stream URLs + video details)
 
-    // completion: (streams, video details, full description text)
-    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String) -> Void) {
+    // completion: (streams, video details, full description text, failure reason)
+    // failure reason is empty when streams came back; otherwise it is a user-facing
+    // explanation of why there is nothing to play (bot check, paid, live, network...).
+    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String, String) -> Void) {
         if cachedVisitorData.isEmpty {
-            bootstrapVisitorData { performPlayer(videoId: videoId, completion: completion) }
+            bootstrapVisitorData { performPlayer(videoId: videoId, allowVisitorRetry: true, completion: completion) }
         } else {
-            performPlayer(videoId: videoId, completion: completion)
+            performPlayer(videoId: videoId, allowVisitorRetry: true, completion: completion)
         }
     }
 
-    private static func performPlayer(videoId: String, completion: @escaping ([VideoStream], Video?, String) -> Void) {
+    // allowVisitorRetry: on a LOGIN_REQUIRED response ("Sign in to confirm you're not a bot"),
+    // the cached visitor token is what YouTube rejected — drop it, fetch a fresh one and retry
+    // once. cachedVisitorData is captured once per launch, so without this a token that goes
+    // stale (or gets flagged on stricter, e.g. licensed-music, videos) breaks playback for the
+    // rest of the session with no way for the user to recover short of relaunching.
+    private static func performPlayer(videoId: String, allowVisitorRetry: Bool,
+                                      completion: @escaping ([VideoStream], Video?, String, String) -> Void) {
         var client = vrClient
         if !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
         let payload = body(client: client, extra: ["videoId": videoId])
-        guard let jsonStr = toJSON(payload) else { completion([], nil, ""); return }
+        guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request"); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: vrUserAgent, timeout: 30, priority: true) { data in
-            guard let data = data else { completion([], nil, ""); return }
+            guard let data = data else {
+                DebugLog.log("YoutubeAPI", "player request id=\(videoId) — no response (network/TLS)")
+                completion([], nil, "", "Network error — no response from YouTube")
+                return
+            }
             playerParseQueue.async {
-                let (streams, video, desc) = parsePlayerResponse(data, videoId: videoId)
-                DispatchQueue.main.async { completion(streams, video, desc) }
+                let (streams, video, desc, status, failure) = parsePlayerResponse(data, videoId: videoId)
+                DispatchQueue.main.async {
+                    if streams.isEmpty, status == "LOGIN_REQUIRED", allowVisitorRetry {
+                        DebugLog.log("YoutubeAPI", "LOGIN_REQUIRED id=\(videoId) — refreshing visitorData and retrying once")
+                        cachedVisitorData = ""
+                        bootstrapVisitorData {
+                            performPlayer(videoId: videoId, allowVisitorRetry: false, completion: completion)
+                        }
+                        return
+                    }
+                    completion(streams, video, desc, failure)
+                }
             }
         }
     }
@@ -509,9 +531,25 @@ class YoutubeAPI {
 
     // MARK: - Player response parsing
 
-    private static func parsePlayerResponse(_ data: Data, videoId: String) -> ([VideoStream], Video?, String) {
+    // returns (streams, video details, description, playabilityStatus, user-facing failure reason)
+    private static func parsePlayerResponse(_ data: Data, videoId: String) -> ([VideoStream], Video?, String, String, String) {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            return ([], nil, "")
+            DebugLog.log("YoutubeAPI", "player response id=\(videoId) — not valid JSON (\(data.count) bytes)")
+            return ([], nil, "", "", "YouTube sent an unreadable response")
+        }
+
+        // playabilityStatus explains WHY a video has no usable streams even on a 200 response
+        // (age-restricted, region-locked, LOGIN_REQUIRED, UNPLAYABLE, live, etc.) — this is the
+        // #1 signal for the "video won't play" class of reports, since the player can return
+        // zero formats/adaptiveFormats with no error surfaced anywhere else in the app.
+        var status = ""
+        var statusReason = ""
+        if let ps = dict(root["playabilityStatus"]) {
+            status = str(ps["status"]) ?? ""
+            statusReason = str(ps["reason"]) ?? ""
+            if status != "OK" {
+                DebugLog.log("YoutubeAPI", "player response id=\(videoId) playabilityStatus=\(status) reason=\"\(statusReason)\"")
+            }
         }
 
         // Video details
@@ -541,10 +579,16 @@ class YoutubeAPI {
 
         // Stream URLs
         var streams: [VideoStream] = []
+        // Formats that were listed but carry no direct `url` — YouTube's SABR delivery only
+        // exposes `serverAbrStreamingUrl` (a protobuf/UMP stream we cannot consume), so the
+        // response looks healthy while yielding nothing playable. Counted to tell that case
+        // apart from "the video is genuinely gated".
+        var formatsWithoutURL = 0
         if let sd = dict(root["streamingData"]) {
             for key in ["formats", "adaptiveFormats"] {
                 guard let formats = sd[key] as? [[String: Any]] else { continue }
                 for fmt in formats {
+                    if str(fmt["url"])?.isEmpty ?? true { formatsWithoutURL += 1 }
                     guard let url = str(fmt["url"]), !url.isEmpty else { continue }
                     // NSNumber.intValue — `as? Int` bridging is unreliable on the iOS 6 / Swift 5.1.5 runtime
                     guard let itag = (fmt["itag"] as? NSNumber)?.intValue
@@ -578,6 +622,22 @@ class YoutubeAPI {
             return ai < bi
         }
 
-        return (streams, video, description)
+        // Why is there nothing to play? Reported verbatim to the user instead of the old
+        // catch-all "No streams available", which hid gated/paid/bot-check cases alike.
+        var failure = ""
+        if streams.isEmpty {
+            if !statusReason.isEmpty {
+                failure = statusReason
+            } else if formatsWithoutURL > 0 {
+                failure = "YouTube served no direct stream for this video"
+                DebugLog.log("YoutubeAPI", "id=\(videoId) SABR-only: \(formatsWithoutURL) formats, none with a url")
+            } else if !status.isEmpty, status != "OK" {
+                failure = "Unavailable (\(status))"
+            } else {
+                failure = "No streams available"
+            }
+        }
+
+        return (streams, video, description, status, failure)
     }
 }

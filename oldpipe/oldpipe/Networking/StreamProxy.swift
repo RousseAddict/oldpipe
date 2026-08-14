@@ -173,13 +173,18 @@ final class StreamProxy: NSObject {
     // Return a local http:// URL that proxies to `remote`. Starts the listener on first use.
     // nil only if the socket could not be opened.
     func localURL(for remote: String) -> URL? {
-        guard start() else { return nil }
+        guard start() else {
+            DebugLog.log("StreamProxy", "localURL FAILED — listener could not start")
+            return nil
+        }
         lock.lock()
         routeSeq += 1
         currentGen += 1
+        let gen = currentGen
         let token = "\(routeSeq).mp4"
-        routes[token] = (remote, currentGen)
+        routes[token] = (remote, gen)
         lock.unlock()
+        DebugLog.log("StreamProxy", "localURL token=\(token) gen=\(gen) port=\(port)")
         return URL(string: "http://127.0.0.1:\(port)/\(token)")
     }
 
@@ -220,6 +225,7 @@ final class StreamProxy: NSObject {
         for k in routes.keys { routes[k]?.gen = bumped }
         for s in hlsSessions.values { s.gen = bumped }
         lock.unlock()
+        DebugLog.log("StreamProxy", "closeCurrentStream gen=\(bumped)")
     }
 
     // Tear down the listen socket so the NEXT localURL(for:) opens a fresh one. iOS reclaims
@@ -236,6 +242,7 @@ final class StreamProxy: NSObject {
         let fd = listenFd
         listenFd = -1
         lock.unlock()
+        DebugLog.log("StreamProxy", "reset — closing listen socket, will rebind on next use")
         if fd >= 0 { close(fd) }
     }
 
@@ -490,7 +497,10 @@ final class StreamProxy: NSObject {
         CurlFetcher.pauseFeed()
         defer { if !conn.feedResumed { conn.feedResumed = true; CurlFetcher.resumeFeed() } }
 
-        _ = curl_bridge_perform(h)
+        let result = curl_bridge_perform(h)
+        if result != 0 || conn.aborted {
+            DebugLog.log("StreamProxy", "proxy connection gen=\(gen) curlResult=\(result) aborted=\(conn.aborted) superseded=\(isSuperseded(gen)) url=\(remoteURL.prefix(80))")
+        }
 
         // Zero-body responses (e.g. 304/416) never reach the body callback — flush the head now.
         if !conn.headersSent && !conn.aborted {

@@ -84,28 +84,35 @@ final class StreamResolver {
     static func resolve(_ video: Video, completion: @escaping (ResolvedStream?) -> Void) {
         if DownloadManager.isDownloaded(video.id) {
             let url = URL(fileURLWithPath: DownloadManager.filePath(for: video.id))
+            DebugLog.log("StreamResolver", "resolve id=\(video.id) -> local download")
             completion(ResolvedStream(url: url, isLocal: true))
             return
         }
-        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _ in
+        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _ in
             if let vStream = defaultQualityStream(streams), let r = hlsResolvedStream(vStream, streams) {
+                DebugLog.log("StreamResolver", "resolve id=\(video.id) -> HLS transmux itag=\(vStream.itag)")
                 completion(r)
                 return
             }
             guard let preferred = pickPreferred(streams) else {
+                DebugLog.log("StreamResolver", "resolve id=\(video.id) -> FAILED, no usable stream (formats=\(streams.count))")
                 completion(nil)
                 return
             }
             let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
             if iosVersion >= 7.0 {
                 if let u = URL(string: preferred.url) {
+                    DebugLog.log("StreamResolver", "resolve id=\(video.id) -> direct itag=\(preferred.itag)")
                     completion(ResolvedStream(url: u, isLocal: false))
                 } else {
+                    DebugLog.log("StreamResolver", "resolve id=\(video.id) -> FAILED, invalid URL")
                     completion(nil)
                 }
             } else if let local = StreamProxy.shared.localURL(for: preferred.url) {
+                DebugLog.log("StreamResolver", "resolve id=\(video.id) -> proxy itag=\(preferred.itag)")
                 completion(ResolvedStream(url: local, isLocal: false))
             } else {
+                DebugLog.log("StreamResolver", "resolve id=\(video.id) -> FAILED, StreamProxy.localURL nil")
                 completion(nil)
             }
         }
@@ -122,7 +129,7 @@ final class StreamResolver {
             completion(.local(url))
             return
         }
-        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _ in
+        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _ in
             guard pickPreferred(streams) != nil else {
                 completion(nil)
                 return

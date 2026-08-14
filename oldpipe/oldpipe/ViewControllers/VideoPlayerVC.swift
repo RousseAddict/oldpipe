@@ -12,6 +12,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var video: Video
     private var streams: [VideoStream] = []
     private var didRequestStreams = false
+    // Set when an attempt failed hard (AVPlayerItem.status == .failed), which usually means
+    // the resolved URL itself is bad (expired signature, unplayable format). The next play
+    // tap then re-resolves the player response instead of replaying the same broken URL.
+    private var streamsStale = false
 
 
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
@@ -147,7 +151,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if DownloadManager.isDownloading(video.id) {
             downloadBtn?.isEnabled = false
             downloadBtn?.setTitle("Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%...", for: .normal)
-            observeDownload(autoPlay: false)
+            observeDownload()
         }
 
         // Fetch related videos immediately on open (once per VC instance).
@@ -224,6 +228,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         video = newVideo
         streams = []
         didRequestStreams = false
+        streamsStale = false
         didRequestRelated = false
         descriptionText = ""
         descExpanded = false
@@ -368,7 +373,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         container.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
         thumbView?.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
         playBtn?.frame = CGRect(x: (w - 64) / 2, y: (videoH - 64) / 2, width: 64, height: 64)
-        statusLabel?.frame = CGRect(x: 0, y: videoH - 28, width: w, height: 28)
+        statusLabel?.frame = CGRect(x: 0, y: videoH - 34, width: w, height: 34)
         spinner?.center = CGPoint(x: w / 2, y: videoH / 2)
 
         if fsOverlay == nil {
@@ -465,7 +470,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sl.font = UIFont.systemFont(ofSize: 13)
         sl.numberOfLines = 2
         sl.isHidden = true
-        sl.frame = CGRect(x: 0, y: videoH - 28, width: w, height: 28)
+        sl.frame = CGRect(x: 0, y: videoH - 34, width: w, height: 34)
         container.addSubview(sl)
         statusLabel = sl
 
@@ -1385,7 +1390,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // updateStatus == false when called purely to fetch the description while playback
     // is already live (reopened from the mini bar) — leaves the status label untouched.
-    private func loadStreams(updateStatus: Bool = true) {
+    private func loadStreams(updateStatus: Bool = true, completion: (() -> Void)? = nil) {
         didRequestStreams = true
         // Already downloaded — no network needed, play offline.
         if DownloadManager.isDownloaded(video.id) {
@@ -1393,6 +1398,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 statusLabel?.text = "Downloaded \u{2022} tap > to play"
                 statusLabel?.isHidden = false
             }
+            completion?()
             return
         }
 
@@ -1401,16 +1407,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             statusLabel?.isHidden = false
         }
 
-        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc in
+        DebugLog.log("Player", "loadStreams start id=\(video.id) updateStatus=\(updateStatus)")
+        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc, failure in
             guard let self = self else { return }
             self.streams = streams
+            DebugLog.log("Player", "getStreams result id=\(self.video.id) formats=\(streams.count) itags=\(streams.map { $0.itag }) failure=\"\(failure)\"")
             if updateStatus {
-                self.statusLabel?.text = streams.isEmpty ? "No streams available" : "Tap > to play"
+                // Report YouTube's own explanation (bot check, purchase required, live not
+                // started, region/age gate...) rather than a catch-all string.
+                self.statusLabel?.text = streams.isEmpty
+                    ? (failure.isEmpty ? "No streams available" : failure)
+                    : "Tap > to play"
             }
             if !desc.isEmpty {
                 self.descriptionText = desc
                 self.relayout()
             }
+            completion?()
         }
     }
 
@@ -1486,8 +1499,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Play a >360p quality through the local HLS transmux pipeline. Goes through StreamProxy
     // on ALL iOS versions (the transmux runs locally — a direct googlevideo URL can't help),
     // with the proxy-length readiness window: the first playlist request triggers two ranged
-    // head fetches + parse before AVPlayer even sees the segment list. Falls back to a 360p
-    // download-then-play via tryStream's onFail, same as the proxied 360p path.
+    // head fetches + parse before AVPlayer even sees the segment list. A stream that never
+    // becomes ready stops with a retry message, same as the proxied 360p path.
     private func playHLS(_ vStream: VideoStream) {
         guard let aStream = audioStreamForHLS(),
               let local = StreamProxy.shared.hlsURL(videoURL: vStream.url, audioURL: aStream.url,
@@ -1501,10 +1514,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         statusLabel?.text = "Loading stream..."
         statusLabel?.isHidden = false
         showSpinner()
-        let fallback = preferredStream()?.url ?? vStream.url
         // 120 ticks = 30s: first-play needs 2 head fetches + 2 ranged GETs + transmux per
         // segment before AVPlayer reports ready — generous headroom on an iPhone 4S.
-        tryStream(urlStr: local.absoluteString, fallbackDownload: fallback, maxTicks: 120)
+        tryStream(urlStr: local.absoluteString, maxTicks: 120)
     }
 
     // MARK: - Playback
@@ -1518,6 +1530,18 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
 
+        // Retry after a hard failure: fetch a fresh player response first, then come back
+        // through here with new URLs. streamsStale is cleared up front so this can't loop.
+        if streamsStale {
+            streamsStale = false
+            playBtn?.isHidden = true
+            statusLabel?.text = "Reloading stream..."
+            statusLabel?.isHidden = false
+            showSpinner()
+            loadStreams(updateStatus: false) { [weak self] in self?.playTapped() }
+            return
+        }
+
         // Apply the user's default quality preference (Settings), if set and available.
         if let preset = defaultQualityStream() {
             playHLS(preset)
@@ -1525,8 +1549,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
 
         guard let preferred = preferredStream() else {
-            statusLabel?.text = "Still loading streams..."
+            hideSpinner()
+            statusLabel?.text = streams.isEmpty ? "No streams available" : "Still loading streams..."
             statusLabel?.isHidden = false
+            playBtn?.isHidden = false
             return
         }
 
@@ -1539,19 +1565,25 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // HTTP->HTTPS proxy (StreamProxy): AVPlayer talks plain HTTP to 127.0.0.1, the proxy
         // forwards to googlevideo over libcurl+OpenSSL (which speaks the required ciphers).
         // iOS 7+ supports the ciphers natively, so it streams the googlevideo URL directly.
-        // Either way, a quick download-then-play fallback covers a stream that won't start.
-        // maxTicks are in 0.25s poll units: 16 = 4s (direct), 80 = 20s (proxy).
+        // A stream that won't start just stops with a status message — the play button comes
+        // back and tapping it retries (downloading is left to the explicit Download button).
+        // maxTicks are in 0.25s poll units: 40 = 10s (direct), 80 = 20s (proxy).
         let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
         statusLabel?.text = "Loading stream..."
+        DebugLog.log("Player", "playTapped id=\(video.id) itag=\(preferred.itag) mime=\(preferred.mimeType) iOS=\(iosVersion)")
         if iosVersion >= 7.0 {
-            tryStream(urlStr: preferred.url, fallbackDownload: preferred.url, maxTicks: 16)
+            tryStream(urlStr: preferred.url, maxTicks: 40)
         } else if let local = StreamProxy.shared.localURL(for: preferred.url) {
             // Give the proxy path more time — the first read primes a TLS handshake to
             // googlevideo through libcurl before AVPlayer sees any bytes.
-            tryStream(urlStr: local.absoluteString, fallbackDownload: preferred.url, maxTicks: 80)
+            DebugLog.log("Player", "id=\(video.id) routing via StreamProxy \(local.absoluteString)")
+            tryStream(urlStr: local.absoluteString, maxTicks: 80)
         } else {
-            statusLabel?.text = "Downloading..."
-            download(url: preferred.url, autoPlay: true)
+            DebugLog.log("Player", "id=\(video.id) StreamProxy.localURL failed — cannot stream")
+            hideSpinner()
+            statusLabel?.text = "Stream unavailable \u{2022} tap > to retry"
+            statusLabel?.isHidden = false
+            playBtn?.isHidden = false
         }
     }
 
@@ -1564,7 +1596,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         downloadBtn?.isEnabled = false
         downloadBtn?.setTitle("Downloading...", for: .normal)
-        download(url: preferred.url, autoPlay: false)
+        download(url: preferred.url)
     }
 
     // Load a URL into the singleton, attach the shared layer, and play once ready.
@@ -1572,24 +1604,29 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let resume = DownloadManager.position(for: video.id)
         sp.load(video: video, url: url, isLocal: isLocal, resume: resume, artwork: thumbView?.image)
         attachLayer()
+        DebugLog.log("Player", "startPlayback id=\(video.id) isLocal=\(isLocal) url=\(url.absoluteString)")
         pollUntilReady(maxTicks: 40, interval: 0.25, onReady: { [weak self] in
             guard let self = self else { return }
+            DebugLog.log("Player", "startPlayback ready id=\(self.video.id)")
             self.hideSpinner()
             self.thumbView?.isHidden = true
             self.statusLabel?.isHidden = true
             self.sp.applyResumeAndPlay()
             self.showControls()
-        }, onFail: { [weak self] in
+        }, onFail: { [weak self] timedOut in
             guard let self = self else { return }
+            let itemError = self.sp.currentItemError?.localizedDescription ?? "none"
+            DebugLog.log("Player", "startPlayback FAILED id=\(self.video.id) timedOut=\(timedOut) itemError=\(itemError)")
             self.hideSpinner()
-            self.statusLabel?.text = "Playback failed"
+            self.statusLabel?.text = "Playback failed \u{2022} tap > to retry"
             self.statusLabel?.isHidden = false
             self.playBtn?.isHidden = false
         })
     }
 
-    // Direct/proxied streaming with a quick download-then-play fallback.
-    private func tryStream(urlStr: String, fallbackDownload: String, maxTicks: Int = 16) {
+    // Direct/proxied streaming. On failure it stops and re-shows the play button rather than
+    // silently downloading the video behind the user's back — tapping > retries.
+    private func tryStream(urlStr: String, maxTicks: Int = 40) {
         guard let nsurl = URL(string: urlStr) else {
             statusLabel?.text = "Invalid stream URL"
             statusLabel?.isHidden = false
@@ -1598,30 +1635,41 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         sp.load(video: video, url: nsurl, isLocal: false, resume: DownloadManager.position(for: video.id), artwork: thumbView?.image)
         attachLayer()
+        DebugLog.log("Player", "tryStream id=\(video.id) url=\(urlStr) maxTicks=\(maxTicks)")
         pollUntilReady(maxTicks: maxTicks, interval: 0.25, onReady: { [weak self] in
             guard let self = self else { return }
+            DebugLog.log("Player", "tryStream ready id=\(self.video.id)")
             self.hideSpinner()
             self.thumbView?.isHidden = true
             self.statusLabel?.isHidden = true
             self.sp.applyResumeAndPlay()
             self.showControls()
-        }, onFail: { [weak self] in
+        }, onFail: { [weak self] timedOut in
             guard let self = self else { return }
-            // Keep the spinner running — we're falling through to a download attempt.
-            // Tear down the never-ready item FIRST: a timed-out (not failed) item keeps
-            // AVPlayer fetching in the background (starving the download), and its non-nil
-            // item makes isActive() true so the completion handler would never auto-play.
+            // The AVPlayerItem error, when present, is the single most useful clue for
+            // "video won't play" since AVPlayer failures otherwise surface nowhere in the UI.
+            let itemError = self.sp.currentItemError?.localizedDescription ?? "none"
+            DebugLog.log("Player", "tryStream FAILED id=\(self.video.id) url=\(urlStr) timedOut=\(timedOut) itemError=\(itemError)")
+            // Tear the never-ready item down: a timed-out (not failed) item keeps AVPlayer
+            // fetching in the background, and its non-nil item makes isActive() true.
             self.sp.abandonLoad()
             self.detachLayer()
-            self.statusLabel?.text = "Downloading..."
+            self.hideSpinner()
+            // A timeout may just be a slow connection, so the resolved URLs are kept and a
+            // retry reuses them. A hard failure points at the URL itself — force a re-resolve.
+            if !timedOut { self.streamsStale = true }
+            self.statusLabel?.text = timedOut ? "Stream timed out \u{2022} tap > to retry"
+                                              : "Stream failed \u{2022} tap > to retry"
             self.statusLabel?.isHidden = false
-            self.download(url: fallbackDownload, autoPlay: true)
+            self.playBtn?.isHidden = false
         })
     }
 
     // Poll the singleton's item status; fire onReady when ready, onFail on failure/timeout.
+    // onFail's flag separates the two: true = ran out of ticks while still loading (the item
+    // may simply be slow), false = AVPlayerItem reported .failed (the URL itself is bad).
     private func pollUntilReady(maxTicks: Int, interval: TimeInterval,
-                                onReady: @escaping () -> Void, onFail: @escaping () -> Void) {
+                                onReady: @escaping () -> Void, onFail: @escaping (Bool) -> Void) {
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
         var count = 0
         let timer = Timer(timeInterval: interval, target: BlockTarget { [weak self] in
@@ -1631,8 +1679,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
                 onReady()
             } else if self.sp.isFailed || count > maxTicks {
+                let timedOut = !self.sp.isFailed
                 if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
-                onFail()
+                onFail(timedOut)
             }
         }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
@@ -1642,14 +1691,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Hand the transfer to DownloadManager (which owns the completion), then poll for UI.
     // Because the manager — not this VC — holds the curl completion, the download keeps
     // running and registers as complete even after this VC is popped.
-    private func download(url: String, autoPlay: Bool) {
+    private func download(url: String) {
         DownloadManager.startDownload(video, url: url)
-        observeDownload(autoPlay: autoPlay)
+        observeDownload()
     }
 
     // VC-owned poll timer that mirrors the manager-owned download's state into the UI.
     // Safe to lose (it's torn down on disappear) — the transfer itself lives in the manager.
-    private func observeDownload(autoPlay: Bool) {
+    private func observeDownload() {
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
         let t = Timer(timeInterval: 0.5, target: BlockTarget { [weak self] in
             guard let self = self else { return }
@@ -1657,22 +1706,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 let pct = Int(DownloadManager.progress(for: self.video.id) * 100)
                 self.statusLabel?.text = "Downloading \(pct)%..."
                 self.statusLabel?.isHidden = false
-                if !autoPlay { self.downloadBtn?.setTitle("Downloading \(pct)%...", for: .normal) }
+                self.downloadBtn?.setTitle("Downloading \(pct)%...", for: .normal)
                 return
             }
             // Transfer finished (success or failure) — stop polling and resolve the UI.
             if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
             if DownloadManager.isDownloaded(self.video.id) {
                 self.updateDownloadButton()
-                if autoPlay && !self.sp.isActive(self.video.id) {
-                    self.statusLabel?.isHidden = true
-                    self.thumbView?.isHidden = true
-                    self.startPlayback(url: URL(fileURLWithPath: DownloadManager.filePath(for: self.video.id)), isLocal: true)
-                } else if !autoPlay {
-                    self.hideSpinner()
-                    self.statusLabel?.text = "Saved for offline"
-                    self.statusLabel?.isHidden = false
-                }
+                self.hideSpinner()
+                self.statusLabel?.text = "Saved for offline"
+                self.statusLabel?.isHidden = false
             } else {
                 self.hideSpinner()
                 self.statusLabel?.text = "Download failed"

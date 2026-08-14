@@ -57,6 +57,7 @@ class VideoPlayer {
     // Load a new item. Does not seek/play until applyResumeAndPlay() is called (the VC
     // waits for readiness first — iOS 6 won't reliably auto-start before tracks load).
     func load(video: Video, url: URL, isLocal: Bool, resume: Double, artwork: UIImage?) {
+        DebugLog.log("VideoPlayer", "load id=\(video.id) isLocal=\(isLocal) resume=\(resume) url=\(url.absoluteString)")
         configureAudioSession()
         // iOS 6 AVPlayer cannot replaceCurrentItem across content types (progressive MP4
         // <-> HLS): the new HLS item probes the playlist then fails with bare -11800
@@ -95,6 +96,9 @@ class VideoPlayer {
 
     var isReady: Bool { return item?.status == .readyToPlay }
     var isFailed: Bool { return item?.status == .failed }
+    // The AVPlayerItem's error, when status == .failed. AVPlayerItem failures otherwise surface
+    // nowhere in the UI (silent on iOS 6) — this is what DebugLog call sites report.
+    var currentItemError: Error? { return item?.error }
 
     // True when the current video's display size is taller than wide (e.g. a Short).
     // Uses the asset track's naturalSize + preferredTransform — iOS 4+ safe, unlike
@@ -217,7 +221,10 @@ class VideoPlayer {
             // Bail if the queue changed or was cleared while resolving.
             guard !self.queue.isEmpty, self.queueIndex < self.queue.count,
                   self.queue[self.queueIndex].id == next.id else { return }
-            guard let r = resolved else { return }   // couldn't resolve — stop the chain
+            guard let r = resolved else {
+                DebugLog.log("VideoPlayer", "autoplay-advance FAILED to resolve id=\(next.id) — stopping queue")
+                return   // couldn't resolve — stop the chain
+            }
             let resume = DownloadManager.position(for: next.id)
             self.load(video: next, url: r.url, isLocal: r.isLocal, resume: resume, artwork: nil)
             self.onAdvance?(next)   // let the frontmost VideoPlayerVC swap its content

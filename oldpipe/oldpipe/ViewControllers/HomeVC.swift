@@ -817,7 +817,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         if tableView === shortsTable { return }   // shorts taps handled by the per-card button
-        let vc = VideoPlayerVC(video: videos[indexPath.row])
+        let video = videos[indexPath.row]
+        DebugLog.log("Home", "tap video id=\(video.id) title=\"\(video.title)\" channel=\(video.channelName)")
+        let vc = VideoPlayerVC(video: video)
         navigationController?.pushViewController(vc, animated: true)
     }
 }
