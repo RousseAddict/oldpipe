@@ -88,7 +88,7 @@ final class StreamResolver {
             completion(ResolvedStream(url: url, isLocal: true))
             return
         }
-        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _ in
+        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _, _ in
             if let vStream = defaultQualityStream(streams), let r = hlsResolvedStream(vStream, streams) {
                 DebugLog.log("StreamResolver", "resolve id=\(video.id) -> HLS transmux itag=\(vStream.itag)")
                 completion(r)
@@ -129,7 +129,7 @@ final class StreamResolver {
             completion(.local(url))
             return
         }
-        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _ in
+        YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _, _ in
             guard pickPreferred(streams) != nil else {
                 completion(nil)
                 return

@@ -105,11 +105,13 @@ class CurlFetcher {
         }
     }
 
-    // GET request
-    static func fetchData(url: String, timeout: Int = 30, completion: @escaping (Data?) -> Void) {
+    // GET request. priority: true routes through the high-priority lane (preempts the
+    // background feed), same as postJSON — used for user-initiated GETs like captions.
+    static func fetchData(url: String, timeout: Int = 30, priority: Bool = false,
+                          completion: @escaping (Data?) -> Void) {
         let fetcher = CurlFetcher()
         retain(fetcher)
-        submit {
+        submit(highPriority: priority) {
             let data = fetcher.syncFetchData(url: url, timeout: timeout)
             DispatchQueue.main.async { release(fetcher); completion(data) }
         }

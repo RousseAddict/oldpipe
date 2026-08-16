@@ -50,6 +50,7 @@
 		BB000001000000000000BC04 /* atomic_stubs.c in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB04 /* atomic_stubs.c */; settings = {COMPILER_FLAGS = "-fno-builtin"; }; };
 		BB000001000000000000BC05 /* atomic_stubs.S in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB05 /* atomic_stubs.S */; };
 		BB000001000000000000BC06 /* Video.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB06 /* Video.swift */; };
+		BB000001000000000000BC23 /* Captions.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB23 /* Captions.swift */; };
 		BB000001000000000000BC07 /* AsyncImageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB07 /* AsyncImageView.swift */; };
 		BB000001000000000000BC08 /* SearchVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB08 /* SearchVC.swift */; };
 		BB000001000000000000BC09 /* VideoPlayerVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB09 /* VideoPlayerVC.swift */; };
@@ -138,6 +139,7 @@
 		BB000001000000000000BB04 /* atomic_stubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = atomic_stubs.c; sourceTree = "<group>"; };
 		BB000001000000000000BB05 /* atomic_stubs.S */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = atomic_stubs.S; sourceTree = "<group>"; };
 		BB000001000000000000BB06 /* Video.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Video.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB23 /* Captions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Captions.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB07 /* AsyncImageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AsyncImageView.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB08 /* SearchVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB09 /* VideoPlayerVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayerVC.swift; sourceTree = "<group>"; };
@@ -286,6 +288,7 @@
 			isa = PBXGroup;
 			children = (
 				BB000001000000000000BB06 /* Video.swift */,
+				BB000001000000000000BB23 /* Captions.swift */,
 				BB000001000000000000BB0A /* DownloadManager.swift */,
 				BB000001000000000000BB0C /* Channel.swift */,
 				BB000001000000000000BB14 /* Playlist.swift */,
@@ -495,6 +498,7 @@
 				BB000001000000000000BC04 /* atomic_stubs.c in Sources */,
 				BB000001000000000000BC05 /* atomic_stubs.S in Sources */,
 				BB000001000000000000BC06 /* Video.swift in Sources */,
+				BB000001000000000000BC23 /* Captions.swift in Sources */,
 				BB000001000000000000BC07 /* AsyncImageView.swift in Sources */,
 				BB000001000000000000BC08 /* SearchVC.swift in Sources */,
 				BB000001000000000000BC09 /* VideoPlayerVC.swift in Sources */,

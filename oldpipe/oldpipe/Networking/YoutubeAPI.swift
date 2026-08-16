@@ -87,10 +87,10 @@ class YoutubeAPI {
 
     // MARK: - Player (stream URLs + video details)
 
-    // completion: (streams, video details, full description text, failure reason)
+    // completion: (streams, video details, full description text, failure reason, caption tracks)
     // failure reason is empty when streams came back; otherwise it is a user-facing
     // explanation of why there is nothing to play (bot check, paid, live, network...).
-    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String, String) -> Void) {
+    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
         if cachedVisitorData.isEmpty {
             bootstrapVisitorData { performPlayer(videoId: videoId, allowVisitorRetry: true, completion: completion) }
         } else {
@@ -104,21 +104,21 @@ class YoutubeAPI {
     // stale (or gets flagged on stricter, e.g. licensed-music, videos) breaks playback for the
     // rest of the session with no way for the user to recover short of relaunching.
     private static func performPlayer(videoId: String, allowVisitorRetry: Bool,
-                                      completion: @escaping ([VideoStream], Video?, String, String) -> Void) {
+                                      completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
         var client = vrClient
         if !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
         let payload = body(client: client, extra: ["videoId": videoId])
-        guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request"); return }
+        guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request", []); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: vrUserAgent, timeout: 30, priority: true) { data in
             guard let data = data else {
                 DebugLog.log("YoutubeAPI", "player request id=\(videoId) — no response (network/TLS)")
-                completion([], nil, "", "Network error — no response from YouTube")
+                completion([], nil, "", "Network error — no response from YouTube", [])
                 return
             }
             playerParseQueue.async {
-                let (streams, video, desc, status, failure) = parsePlayerResponse(data, videoId: videoId)
+                let (streams, video, desc, status, failure, captions) = parsePlayerResponse(data, videoId: videoId)
                 DispatchQueue.main.async {
                     if streams.isEmpty, status == "LOGIN_REQUIRED", allowVisitorRetry {
                         DebugLog.log("YoutubeAPI", "LOGIN_REQUIRED id=\(videoId) — refreshing visitorData and retrying once")
@@ -128,7 +128,7 @@ class YoutubeAPI {
                         }
                         return
                     }
-                    completion(streams, video, desc, failure)
+                    completion(streams, video, desc, failure, captions)
                 }
             }
         }
@@ -531,11 +531,12 @@ class YoutubeAPI {
 
     // MARK: - Player response parsing
 
-    // returns (streams, video details, description, playabilityStatus, user-facing failure reason)
-    private static func parsePlayerResponse(_ data: Data, videoId: String) -> ([VideoStream], Video?, String, String, String) {
+    // returns (streams, video details, description, playabilityStatus, user-facing failure
+    // reason, caption tracks)
+    private static func parsePlayerResponse(_ data: Data, videoId: String) -> ([VideoStream], Video?, String, String, String, [CaptionTrack]) {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
             DebugLog.log("YoutubeAPI", "player response id=\(videoId) — not valid JSON (\(data.count) bytes)")
-            return ([], nil, "", "", "YouTube sent an unreadable response")
+            return ([], nil, "", "", "YouTube sent an unreadable response", [])
         }
 
         // playabilityStatus explains WHY a video has no usable streams even on a 200 response
@@ -638,6 +639,25 @@ class YoutubeAPI {
             }
         }
 
-        return (streams, video, description, status, failure)
+        // Caption tracks. Ships in the same player response as the streams, so subtitles
+        // cost no extra API call — only the transcript GET once the user picks a track.
+        // The ANDROID_VR client labels tracks with `name.runs[]` (other clients use
+        // `simpleText`), hence both lookups.
+        var captions: [CaptionTrack] = []
+        if let tracklist = dict(dict(root["captions"])?["playerCaptionsTracklistRenderer"]),
+           let tracks = arr(tracklist["captionTracks"]) {
+            for t in tracks {
+                guard let base = str(t["baseUrl"]), !base.isEmpty else { continue }
+                let lang = str(t["languageCode"]) ?? ""
+                let label = str(arr(dict(t["name"])?["runs"])?.first?["text"])
+                    ?? str(dict(t["name"])?["simpleText"])
+                    ?? lang
+                captions.append(CaptionTrack(baseUrl: base, languageCode: lang,
+                                             name: label.isEmpty ? lang : label,
+                                             isASR: (str(t["kind"]) ?? "") == "asr"))
+            }
+        }
+
+        return (streams, video, description, status, failure, captions)
     }
 }

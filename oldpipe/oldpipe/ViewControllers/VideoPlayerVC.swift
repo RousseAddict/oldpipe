@@ -45,6 +45,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // video-only streams backing the last-shown sheet (index-aligned with its buttons).
     private var hdBtn: UIButton?
     private var pendingHLSStreams: [VideoStream] = []
+    // Whether the last quality sheet listed qualities at all (it may be captions-only),
+    // and the index of its "Captions: ..." row (-1 when the video has no caption tracks).
+    private var qualitySheetHasQuality = false
+    private var captionsSheetIndex = -1
+
+    // Captions. The track list arrives with the streams (same player response); cues are
+    // fetched only when the user picks a track. Rendered into captionPlate/captionLabel by
+    // captionTick() — AVPlayer cannot render external subtitles on iOS 6.
+    private var captionTracks: [CaptionTrack] = []
+    private var captionCues: [CaptionCue] = []
+    private var activeCaptionIndex = -1   // index into captionTracks, -1 = off
+    private var captionCueIndex = -1
+    private var captionPlate: UIView?
+    private var captionLabel: UILabel?
 
     // Everything below the meta line is laid out by relayout() from contentBelowMetaY:
     // description (below meta) → download button → share row → related videos. The
@@ -160,6 +174,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // Own the singleton's autoplay-advance callback while we're the frontmost player,
         // so a playlist auto-advance swaps this VC's content in place.
         sp.onAdvance = { [weak self] v in self?.handleAutoAdvance(v) }
+
+        // Captions survive a push/pop of another VC (cues stay parsed) — restart the ticker
+        // that viewWillDisappear stopped.
+        if activeCaptionIndex >= 0, !captionCues.isEmpty {
+            captionCueIndex = -1
+            ensureCaptionPlate()
+            startCaptionTimer()
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -173,6 +195,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &controlsHideKey) as? Timer { t.invalidate() }
+        stopCaptionTimer()
         if fsOverlay != nil { exitFullscreen() }
         // Detach the shared layer — do NOT stop. Playback (audio) continues; the mini bar
         // takes over the UI. The layer is reattached on the next appear.
@@ -233,6 +256,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         descriptionText = ""
         descExpanded = false
         relatedVideos = []
+        resetCaptions()   // the new video has its own track list (refetched by loadStreams)
 
         let w = UIScreen.main.bounds.width
         let padding: CGFloat = 12
@@ -401,6 +425,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         contentBelowMetaY = y
 
+        layoutCaptionPlate()
         relayout()
     }
     #endif
@@ -896,13 +921,27 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 startCasting(to: castDevices[buttonIndex])
             }
         } else if actionSheet.tag == 4 {
-            // Quality sheet: button 0 = 360p, then pendingHLSStreams in order, then Cancel.
+            // Quality sheet: [360p, pendingHLSStreams...] (only when qualitySheetHasQuality),
+            // then the captions row, then Cancel.
             guard buttonIndex != actionSheet.cancelButtonIndex else { return }
-            if buttonIndex == 0 {
-                playTapped()   // the default 360p path (offline copy / direct / proxied)
-            } else if buttonIndex - 1 < pendingHLSStreams.count {
-                playHLS(pendingHLSStreams[buttonIndex - 1])
+            if buttonIndex == captionsSheetIndex {
+                // Present the second sheet only after this one has finished dismissing —
+                // showing it from inside the delegate fights the dismissal animation on iOS 6.
+                let t = Timer(timeInterval: 0.35, target: BlockTarget { [weak self] in
+                    self?.showCaptionSheet()
+                }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+                RunLoop.main.add(t, forMode: .common)
+            } else if qualitySheetHasQuality {
+                if buttonIndex == 0 {
+                    playTapped()   // the default 360p path (offline copy / direct / proxied)
+                } else if buttonIndex - 1 < pendingHLSStreams.count {
+                    playHLS(pendingHLSStreams[buttonIndex - 1])
+                }
             }
+        } else if actionSheet.tag == 5 {
+            // Captions sheet: button 0 = Off, then captionTracks in order, then Cancel.
+            guard buttonIndex != actionSheet.cancelButtonIndex else { return }
+            selectCaption(buttonIndex - 1)
         }
     }
 
@@ -1191,9 +1230,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(fs)
         fsButton = fs
 
-        // Quality button — opens the 360p/HLS quality sheet. Left of the cast button.
+        // Settings button — opens the quality + captions sheet. Left of the cast button.
+        // A gear, not an "hd" glyph: the sheet now hosts captions as well as quality.
         let hd = UIButton(type: .custom)
-        hd.setImage(UIImage(named: "hd"), for: .normal)
+        hd.setImage(UIImage(named: "gear"), for: .normal)
         hd.addTarget(self, action: #selector(hdTapped), for: .touchUpInside)
         bar.addSubview(hd)
         hdBtn = hd
@@ -1408,9 +1448,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
 
         DebugLog.log("Player", "loadStreams start id=\(video.id) updateStatus=\(updateStatus)")
-        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc, failure in
+        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc, failure, captions in
             guard let self = self else { return }
             self.streams = streams
+            self.captionTracks = captions
             DebugLog.log("Player", "getStreams result id=\(self.video.id) formats=\(streams.count) itags=\(streams.map { $0.itag }) failure=\"\(failure)\"")
             if updateStatus {
                 // Report YouTube's own explanation (bot check, purchase required, live not
@@ -1472,9 +1513,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         return nil
     }
 
+    // The "hd" button opens the quality sheet, which also hosts the captions entry (the
+    // control bar has no room for a separate CC button at 320pt). Either half can be empty:
+    // a video with no HLS tiers still gets a captions row, and vice versa.
     @objc private func hdTapped() {
         let opts = hlsQualityOptions()
-        guard !opts.isEmpty else {
+        guard !opts.isEmpty || !captionTracks.isEmpty else {
             let alert = UIAlertView()
             alert.title = "Quality"
             alert.message = streams.isEmpty ? "Still loading streams..."
@@ -1485,15 +1529,164 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
         pendingHLSStreams = opts
+        qualitySheetHasQuality = !opts.isEmpty
+        captionsSheetIndex = -1
         let sheet = UIActionSheet()
         sheet.delegate = self
-        sheet.title = "Quality"
-        sheet.addButton(withTitle: "360p")
-        for s in opts { sheet.addButton(withTitle: s.quality.isEmpty ? "itag \(s.itag)" : s.quality) }
+        sheet.title = qualitySheetHasQuality ? "Quality" : "Captions"
+        if qualitySheetHasQuality {
+            sheet.addButton(withTitle: "360p")
+            for s in opts { sheet.addButton(withTitle: s.quality.isEmpty ? "itag \(s.itag)" : s.quality) }
+        }
+        if !captionTracks.isEmpty {
+            captionsSheetIndex = sheet.addButton(withTitle: "Captions: \(currentCaptionLabel())")
+        }
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 4
-        sheet.show(in: view)
+        // Host in the fullscreen overlay when it's up — a sheet shown in `view` would be
+        // buried (and untappable) behind the overlay.
+        sheet.show(in: fsOverlay ?? view)
+    }
+
+    // MARK: - Captions
+
+    private func currentCaptionLabel() -> String {
+        guard activeCaptionIndex >= 0, activeCaptionIndex < captionTracks.count else { return "Off" }
+        return captionTracks[activeCaptionIndex].name
+    }
+
+    // Second-level sheet listing Off + every available track, current pick check-marked.
+    private func showCaptionSheet() {
+        guard !captionTracks.isEmpty else { return }
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Captions"
+        sheet.addButton(withTitle: (activeCaptionIndex < 0 ? "\u{2713} " : "") + "Off")
+        for (i, t) in captionTracks.enumerated() {
+            sheet.addButton(withTitle: (i == activeCaptionIndex ? "\u{2713} " : "") + t.name)
+        }
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 5
+        sheet.show(in: fsOverlay ?? view)
+    }
+
+    // index < 0 turns captions off; otherwise fetch + parse the track, then start ticking.
+    private func selectCaption(_ index: Int) {
+        captionCueIndex = -1
+        captionLabel?.text = ""
+        captionPlate?.isHidden = true
+        guard index >= 0, index < captionTracks.count else {
+            activeCaptionIndex = -1
+            captionCues = []
+            stopCaptionTimer()
+            return
+        }
+        activeCaptionIndex = index
+        captionCues = []
+        let track = captionTracks[index]
+        Captions.load(track) { [weak self] cues in
+            guard let self = self else { return }
+            // A newer pick (or an auto-advance) may have landed while this was in flight.
+            guard self.activeCaptionIndex >= 0, self.activeCaptionIndex < self.captionTracks.count,
+                  self.captionTracks[self.activeCaptionIndex].baseUrl == track.baseUrl else { return }
+            self.captionCues = cues
+            if cues.isEmpty {
+                self.activeCaptionIndex = -1
+                self.stopCaptionTimer()
+                let alert = UIAlertView()
+                alert.title = "Captions"
+                alert.message = "Could not load \(track.name)."
+                alert.addButton(withTitle: "OK")
+                alert.cancelButtonIndex = 0
+                alert.show()
+                return
+            }
+            self.ensureCaptionPlate()
+            self.startCaptionTimer()
+        }
+    }
+
+    // Translucent plate + label, hosted in whichever view currently shows the video so it
+    // rides into fullscreen (same host rule as the seek indicator). Non-interactive so it
+    // never steals taps from the tap-catcher underneath.
+    private func ensureCaptionPlate() {
+        guard let host = fsOverlay ?? videoContainer else { return }
+        if captionPlate == nil {
+            let plate = UIView()
+            plate.backgroundColor = UIColor(white: 0, alpha: 0.6)
+            plate.layer.cornerRadius = 4
+            plate.isUserInteractionEnabled = false
+            plate.isHidden = true
+            captionPlate = plate
+
+            let lbl = UILabel()
+            lbl.backgroundColor = .clear     // iOS 6 defaults UILabel backgrounds to WHITE
+            lbl.textColor = .white
+            lbl.font = UIFont.boldSystemFont(ofSize: 14)
+            lbl.textAlignment = .center
+            lbl.numberOfLines = 3
+            plate.addSubview(lbl)
+            captionLabel = lbl
+        }
+        if captionPlate?.superview !== host {
+            captionPlate.map { host.addSubview($0) }
+        }
+        host.bringSubviewToFront(captionPlate!)
+        layoutCaptionPlate()
+    }
+
+    // Bottom-centered, above the 40pt control bar, sized to the current line.
+    private func layoutCaptionPlate() {
+        guard let plate = captionPlate, let lbl = captionLabel,
+              let host = fsOverlay ?? videoContainer else { return }
+        let text = lbl.text ?? ""
+        guard !text.isEmpty, castSession == nil else { plate.isHidden = true; return }
+        let maxW = max(host.bounds.width - 24, 40)
+        let size = lbl.sizeThatFits(CGSize(width: maxW, height: 200))
+        let w = min(maxW, ceil(size.width)) + 12
+        let h = ceil(size.height) + 8
+        plate.frame = CGRect(x: floor((host.bounds.width - w) / 2),
+                             y: max(0, host.bounds.height - 46 - h), width: w, height: h)
+        lbl.frame = CGRect(x: 6, y: 4, width: w - 12, height: h - 8)
+        plate.isHidden = false
+    }
+
+    private func startCaptionTimer() {
+        stopCaptionTimer()
+        let t = Timer(timeInterval: 0.25, target: BlockTarget { [weak self] in
+            self?.captionTick()
+        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        objc_setAssociatedObject(self, &captionTimerKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func stopCaptionTimer() {
+        if let t = objc_getAssociatedObject(self, &captionTimerKey) as? Timer { t.invalidate() }
+        objc_setAssociatedObject(self, &captionTimerKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        captionPlate?.isHidden = true
+    }
+
+    // Runs on its own timer, NOT the control-bar progress timer — that one is stopped
+    // whenever the controls auto-hide, which is exactly when captions matter most.
+    private func captionTick() {
+        guard !captionCues.isEmpty, sp.isActive(video.id) else { return }
+        let i = Captions.cueIndex(at: sp.currentSeconds, in: captionCues, hint: captionCueIndex)
+        guard i != captionCueIndex else { return }
+        captionCueIndex = i
+        captionLabel?.text = (i >= 0) ? captionCues[i].text : ""
+        layoutCaptionPlate()
+    }
+
+    // Drop all caption state (new video loaded into this VC via playlist auto-advance).
+    private func resetCaptions() {
+        stopCaptionTimer()
+        captionTracks = []
+        captionCues = []
+        activeCaptionIndex = -1
+        captionCueIndex = -1
+        captionLabel?.text = ""
     }
 
     // Play a >360p quality through the local HLS transmux pipeline. Goes through StreamProxy
@@ -1829,6 +2022,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             overlay.addSubview(bar)
             layoutControls(width: overlay.bounds.width)
         }
+
+        // Captions ride into the overlay too (host rule = fsOverlay ?? videoContainer).
+        if captionPlate != nil { ensureCaptionPlate() }
     }
 
     private func setFSStatusBar(hidden: Bool) {
@@ -1868,6 +2064,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         overlay.removeFromSuperview()
         fsOverlay = nil
+        // fsOverlay is now nil, so the host resolves back to videoContainer.
+        if captionPlate != nil { ensureCaptionPlate() }
     }
 }
 
@@ -1877,6 +2075,7 @@ private var timerKey = "timerKey"
 private var progressTimerKey = "progressTimerKey"
 private var downloadPollKey = "downloadPollKey"
 private var controlsHideKey = "controlsHideKey"
+private var captionTimerKey = "captionTimerKey"
 
 private class BlockTarget: NSObject {
     let block: () -> Void
