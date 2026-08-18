@@ -48,6 +48,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Whether the last quality sheet listed qualities at all (it may be captions-only),
     // and the index of its "Captions: ..." row (-1 when the video has no caption tracks).
     private var qualitySheetHasQuality = false
+    // Whether that sheet's row 0 was the direct muxed "360p" entry — absent when the player
+    // response has no muxed format, in which case the rows map 1:1 onto pendingHLSStreams.
+    private var qualitySheetMuxedRow = false
     private var captionsSheetIndex = -1
 
     // Captions. The track list arrives with the streams (same player response); cues are
@@ -921,7 +924,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 startCasting(to: castDevices[buttonIndex])
             }
         } else if actionSheet.tag == 4 {
-            // Quality sheet: [360p, pendingHLSStreams...] (only when qualitySheetHasQuality),
+            // Quality sheet: [360p?, pendingHLSStreams...] (only when qualitySheetHasQuality),
             // then the captions row, then Cancel.
             guard buttonIndex != actionSheet.cancelButtonIndex else { return }
             if buttonIndex == captionsSheetIndex {
@@ -932,10 +935,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
                 RunLoop.main.add(t, forMode: .common)
             } else if qualitySheetHasQuality {
-                if buttonIndex == 0 {
+                if qualitySheetMuxedRow, buttonIndex == 0 {
                     playTapped()   // the default 360p path (offline copy / direct / proxied)
-                } else if buttonIndex - 1 < pendingHLSStreams.count {
-                    playHLS(pendingHLSStreams[buttonIndex - 1])
+                } else {
+                    let idx = qualitySheetMuxedRow ? buttonIndex - 1 : buttonIndex
+                    if idx >= 0, idx < pendingHLSStreams.count { playHLS(pendingHLSStreams[idx]) }
                 }
             }
         } else if actionSheet.tag == 5 {
@@ -998,8 +1002,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     private func startCasting(to device: CastDevice) {
+        // A Chromecast fetches the URL itself, so it needs a self-contained muxed file — it can
+        // neither reach the local transmux proxy nor mux two adaptive tracks on its own.
         guard let preferred = preferredStream() else {
-            statusLabel?.text = "No stream to cast yet"
+            statusLabel?.text = streams.isEmpty ? "No stream to cast yet"
+                                               : "This video can't be cast (no muxed stream)"
             statusLabel?.isHidden = false
             return
         }
@@ -1470,12 +1477,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // MARK: - Stream selection
 
+    // The muxed stream to play/download/cast directly, or nil when the player response carries
+    // none (the IOS fallback client is adaptive-only). Fallbacks are restricted to progressive
+    // formats: an adaptive match would be video-only and play silently.
     private func preferredStream() -> VideoStream? {
         // Prefer muxed 360p MP4 (itag 18) — plays on AVPlayer, small, castable.
         return streams.first { $0.itag == 18 }
-            ?? streams.first { $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
-            ?? streams.first { $0.mimeType.contains("video") }
-            ?? streams.first
+            ?? streams.first { $0.isProgressive && $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
+            ?? streams.first { $0.isProgressive && $0.mimeType.contains("video") }
+            ?? streams.first { $0.isProgressive }
     }
 
     // MARK: - HLS quality selection (>360p via local transmux)
@@ -1487,9 +1497,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Video-only H.264 streams the transmux pipeline can serve, ascending quality
     // (480p, 720p, 1080p). Empty when the audio track is missing (no way to mux).
+    // 360p (itag 134) joins the list only when the response has no muxed format to play
+    // directly — otherwise it would duplicate the sheet's hardcoded "360p" row.
     private func hlsQualityOptions() -> [VideoStream] {
         guard audioStreamForHLS() != nil else { return [] }
-        return [135, 136, 137].compactMap { tag in
+        var tags = [135, 136, 137]
+        if preferredStream() == nil { tags.insert(134, at: 0) }
+        return tags.compactMap { tag in
             streams.first { $0.itag == tag && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
         }
     }
@@ -1530,12 +1544,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         pendingHLSStreams = opts
         qualitySheetHasQuality = !opts.isEmpty
+        // Row 0 is the direct muxed 360p only when such a format exists; otherwise every row
+        // maps straight onto pendingHLSStreams (whose first entry is then the 360p tier).
+        qualitySheetMuxedRow = preferredStream() != nil
         captionsSheetIndex = -1
         let sheet = UIActionSheet()
         sheet.delegate = self
         sheet.title = qualitySheetHasQuality ? "Quality" : "Captions"
         if qualitySheetHasQuality {
-            sheet.addButton(withTitle: "360p")
+            if qualitySheetMuxedRow { sheet.addButton(withTitle: "360p") }
             for s in opts { sheet.addButton(withTitle: s.quality.isEmpty ? "itag \(s.itag)" : s.quality) }
         }
         if !captionTracks.isEmpty {
@@ -1742,6 +1759,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
 
         guard let preferred = preferredStream() else {
+            // No muxed format in the response (the IOS fallback client is adaptive-only), so
+            // the default tier is 360p through the transmux pipeline instead of a direct URL.
+            if let hls = hlsQualityOptions().first {
+                DebugLog.log("Player", "id=\(video.id) no muxed format — defaulting to HLS itag=\(hls.itag)")
+                playHLS(hls)
+                return
+            }
             hideSpinner()
             statusLabel?.text = streams.isEmpty ? "No streams available" : "Still loading streams..."
             statusLabel?.isHidden = false
@@ -1782,8 +1806,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     @objc private func downloadTapped() {
         guard !DownloadManager.isDownloaded(video.id) else { return }
+        // Downloads store a single self-contained file, so they need a muxed stream — the
+        // adaptive-only IOS fallback response has none to offer.
         guard let preferred = preferredStream() else {
-            statusLabel?.text = "Still loading streams..."
+            statusLabel?.text = streams.isEmpty ? "Still loading streams..."
+                                               : "This video can't be downloaded (no muxed stream)"
             statusLabel?.isHidden = false
             return
         }

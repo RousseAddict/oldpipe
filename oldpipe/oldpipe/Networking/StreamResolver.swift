@@ -31,17 +31,27 @@ enum PreparedStream {
 
 final class StreamResolver {
 
-    // Pick the muxed 360p stream (itag 18), falling back to any playable MP4/video stream.
+    // Pick the muxed 360p stream (itag 18), falling back to any other PROGRESSIVE MP4/video
+    // stream. Adaptive formats are excluded on purpose: they are video-only and would play
+    // silently. Returns nil for an adaptive-only response (the IOS player client) — callers
+    // then go through fallbackHLSStream instead. Mirrors VideoPlayerVC.preferredStream.
     static func pickPreferred(_ streams: [VideoStream]) -> VideoStream? {
         return streams.first { $0.itag == 18 }
-            ?? streams.first { $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
-            ?? streams.first { $0.mimeType.contains("video") }
-            ?? streams.first
+            ?? streams.first { $0.isProgressive && $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
+            ?? streams.first { $0.isProgressive && $0.mimeType.contains("video") }
+            ?? streams.first { $0.isProgressive }
     }
 
     // The DASH audio track backing every HLS quality. Mirrors VideoPlayerVC.audioStreamForHLS.
     private static func audioStreamForHLS(_ streams: [VideoStream]) -> VideoStream? {
         return streams.first { $0.itag == 140 && $0.indexEnd > 0 }
+    }
+
+    // The 360p adaptive tier (itag 134) — the default when a response carries no muxed format
+    // at all, in which case playback can only happen through the transmux pipeline.
+    private static func fallbackHLSStream(_ streams: [VideoStream]) -> VideoStream? {
+        guard audioStreamForHLS(streams) != nil else { return nil }
+        return streams.first { $0.itag == 134 && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
     }
 
     // Settings > Default Video Quality, applied to non-interactive playback paths (playlist
@@ -95,6 +105,11 @@ final class StreamResolver {
                 return
             }
             guard let preferred = pickPreferred(streams) else {
+                if let v = fallbackHLSStream(streams), let r = hlsResolvedStream(v, streams) {
+                    DebugLog.log("StreamResolver", "resolve id=\(video.id) -> HLS 360p (no muxed format)")
+                    completion(r)
+                    return
+                }
                 DebugLog.log("StreamResolver", "resolve id=\(video.id) -> FAILED, no usable stream (formats=\(streams.count))")
                 completion(nil)
                 return
@@ -130,7 +145,7 @@ final class StreamResolver {
             return
         }
         YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _, _ in
-            guard pickPreferred(streams) != nil else {
+            guard pickPreferred(streams) != nil || fallbackHLSStream(streams) != nil else {
                 completion(nil)
                 return
             }
@@ -150,7 +165,10 @@ final class StreamResolver {
             if let vStream = defaultQualityStream(streams), let r = hlsResolvedStream(vStream, streams) {
                 return r
             }
-            guard let preferred = pickPreferred(streams) else { return nil }
+            guard let preferred = pickPreferred(streams) else {
+                guard let v = fallbackHLSStream(streams) else { return nil }
+                return hlsResolvedStream(v, streams)
+            }
             let iosVersion = (UIDevice.current.systemVersion as NSString).floatValue
             if iosVersion >= 7.0 {
                 guard let u = URL(string: preferred.url) else { return nil }

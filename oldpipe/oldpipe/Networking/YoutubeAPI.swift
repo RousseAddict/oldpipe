@@ -2,11 +2,13 @@ import Foundation
 
 // MARK: - YoutubeAPI
 // Accesses YouTube via the internal innertube API.
-// As of 2024+, YouTube added attestation (poToken/integrity) to the ANDROID/IOS
-// innertube clients, which now return HTTP 400 FAILED_PRECONDITION. Two clients
-// still work without attestation:
+// YouTube gates most innertube clients behind attestation (poToken/integrity). The ones that
+// still work without it:
 //   - WEB        : for search   (returns twoColumnSearchResultsRenderer)
-//   - ANDROID_VR : for player   (returns streamingData with direct, un-ciphered URLs)
+//   - ANDROID_VR : player, first choice — the only client that still returns a MUXED format,
+//                  but as of 2026-08 it is bot-gated (LOGIN_REQUIRED) on most videos
+//   - IOS        : player fallback — un-gated but adaptive-only (no muxed format), and only
+//                  a current clientVersion is accepted
 // All network calls go through CurlFetcher (libcurl + OpenSSL) for GCM cipher support on iOS 6.
 
 class YoutubeAPI {
@@ -40,6 +42,24 @@ class YoutubeAPI {
     ]
     private static let vrUserAgent =
         "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; GB) gzip"
+
+    // IOS client — player fallback for videos where ANDROID_VR is bot-gated (2026-08 onward).
+    // Un-ciphered URLs like ANDROID_VR, but adaptive-only: `formats[]` is always empty, so
+    // there is no muxed itag 18/22 and playback has to go through the HLS transmux pipeline.
+    // The version string matters: only a CURRENT client version is accepted (19.x and older
+    // return HTTP 400), so this is the one line to bump when the fallback stops working.
+    private static let iosClient: [String: Any] = [
+        "clientName": "IOS",
+        "clientVersion": "20.03.02",
+        "deviceMake": "Apple",
+        "deviceModel": "iPhone16,2",
+        "osName": "iPhone",
+        "osVersion": "18.2.1.22C161",
+        "hl": "en",
+        "gl": "US"
+    ]
+    private static let iosUserAgent =
+        "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X)"
 
     private static let jsonHeaders = [
         "Content-Type: application/json",
@@ -92,26 +112,30 @@ class YoutubeAPI {
     // explanation of why there is nothing to play (bot check, paid, live, network...).
     static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
         if cachedVisitorData.isEmpty {
-            bootstrapVisitorData { performPlayer(videoId: videoId, allowVisitorRetry: true, completion: completion) }
+            bootstrapVisitorData { performPlayer(videoId: videoId, useIOS: false, completion: completion) }
         } else {
-            performPlayer(videoId: videoId, allowVisitorRetry: true, completion: completion)
+            performPlayer(videoId: videoId, useIOS: false, completion: completion)
         }
     }
 
-    // allowVisitorRetry: on a LOGIN_REQUIRED response ("Sign in to confirm you're not a bot"),
-    // the cached visitor token is what YouTube rejected — drop it, fetch a fresh one and retry
-    // once. cachedVisitorData is captured once per launch, so without this a token that goes
-    // stale (or gets flagged on stricter, e.g. licensed-music, videos) breaks playback for the
-    // rest of the session with no way for the user to recover short of relaunching.
-    private static func performPlayer(videoId: String, allowVisitorRetry: Bool,
+    // ANDROID_VR is bot-gated on most videos as of 2026-08 (LOGIN_REQUIRED, "Sign in to confirm
+    // you're not a bot"), but where it still answers it is the only client that returns a MUXED
+    // format — which the direct-play, download and Chromecast paths need. So: ANDROID_VR first,
+    // IOS client as fallback whenever it yields nothing playable.
+    // Refreshing visitorData is NOT the fix and is no longer attempted: the gate fires with a
+    // freshly minted token and with no token at all, so a same-client retry only wasted a round
+    // trip. The gate is per-video and server-side, not per-session.
+    private static func performPlayer(videoId: String, useIOS: Bool,
                                       completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        var client = vrClient
-        if !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
+        var client = useIOS ? iosClient : vrClient
+        // visitorData is a WEB-issued identity — only sent with the ANDROID_VR request.
+        if !useIOS, !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
         let payload = body(client: client, extra: ["videoId": videoId])
         guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request", []); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: vrUserAgent, timeout: 30, priority: true) { data in
+                             userAgent: useIOS ? iosUserAgent : vrUserAgent,
+                             timeout: 30, priority: true) { data in
             guard let data = data else {
                 DebugLog.log("YoutubeAPI", "player request id=\(videoId) — no response (network/TLS)")
                 completion([], nil, "", "Network error — no response from YouTube", [])
@@ -120,12 +144,9 @@ class YoutubeAPI {
             playerParseQueue.async {
                 let (streams, video, desc, status, failure, captions) = parsePlayerResponse(data, videoId: videoId)
                 DispatchQueue.main.async {
-                    if streams.isEmpty, status == "LOGIN_REQUIRED", allowVisitorRetry {
-                        DebugLog.log("YoutubeAPI", "LOGIN_REQUIRED id=\(videoId) — refreshing visitorData and retrying once")
-                        cachedVisitorData = ""
-                        bootstrapVisitorData {
-                            performPlayer(videoId: videoId, allowVisitorRetry: false, completion: completion)
-                        }
+                    if streams.isEmpty, !useIOS {
+                        DebugLog.log("YoutubeAPI", "ANDROID_VR yielded nothing id=\(videoId) status=\(status) — retrying with the IOS client")
+                        performPlayer(videoId: videoId, useIOS: true, completion: completion)
                         return
                     }
                     completion(streams, video, desc, failure, captions)
@@ -589,6 +610,14 @@ class YoutubeAPI {
             for key in ["formats", "adaptiveFormats"] {
                 guard let formats = sd[key] as? [[String: Any]] else { continue }
                 for fmt in formats {
+                    // The IOS client lists one audio format PER language (auto-dubbed tracks)
+                    // plus a DRC (compressed-loudness) duplicate of the original. Everything
+                    // downstream assumes `first { itag == 140 }` IS the audio track, so keep
+                    // only the original, non-DRC one — otherwise HLS playback can end up muxing
+                    // a random dubbed language.
+                    if let track = dict(fmt["audioTrack"]),
+                       !((track["audioIsDefault"] as? NSNumber)?.boolValue ?? false) { continue }
+                    if (fmt["isDrc"] as? NSNumber)?.boolValue ?? false { continue }
                     if str(fmt["url"])?.isEmpty ?? true { formatsWithoutURL += 1 }
                     guard let url = str(fmt["url"]), !url.isEmpty else { continue }
                     // NSNumber.intValue — `as? Int` bridging is unreliable on the iOS 6 / Swift 5.1.5 runtime

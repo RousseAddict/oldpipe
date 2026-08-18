@@ -114,4 +114,9 @@ struct VideoStream {
     // bytes=0-indexEnd yields the full init+sidx head that HLSTransmuxer.parse needs.
     var initEnd: Int64 = -1
     var indexEnd: Int64 = -1
+
+    // Progressive = one file carrying BOTH video and audio (`formats[]`, itag 18/22): directly
+    // playable by AVPlayer, and the only kind a download or a Chromecast can use. Adaptive
+    // formats are video-only or audio-only and must go through the HLS transmux pipeline.
+    var isProgressive: Bool { return indexEnd < 0 }
 }
