@@ -4,11 +4,16 @@ import Foundation
 // Accesses YouTube via the internal innertube API.
 // YouTube gates most innertube clients behind attestation (poToken/integrity). The ones that
 // still work without it:
-//   - WEB        : for search   (returns twoColumnSearchResultsRenderer)
-//   - ANDROID_VR : player, first choice — the only client that still returns a MUXED format,
-//                  but as of 2026-08 it is bot-gated (LOGIN_REQUIRED) on most videos
-//   - IOS        : player fallback — un-gated but adaptive-only (no muxed format), and only
-//                  a current clientVersion is accepted
+//   - WEB     : for search — returns twoColumnSearchResultsRenderer
+//   - ANDROID : player, first leg — the only un-gated client that still returns a MUXED format
+//               (itag 18), which direct play, downloads and Chromecast all need. Its
+//               adaptiveFormats are SABR-only (no `url`), so it yields 360p and nothing else.
+//   - IOS     : player, second leg — every adaptive tier with a plain url (what the HLS
+//               transmuxer needs), but `formats[]` is always empty, so no muxed format.
+// The two are COMPLEMENTARY, not alternatives: their stream lists are merged (see resolveStreams).
+// For both mobile clients only a CURRENT clientVersion is accepted — a stale version comes back
+// FAILED_PRECONDITION, which is what made ANDROID look permanently dead in earlier notes.
+// ANDROID_VR was dropped in 2026-08: bot-gated (LOGIN_REQUIRED) on effectively every video.
 // All network calls go through CurlFetcher (libcurl + OpenSSL) for GCM cipher support on iOS 6.
 
 class YoutubeAPI {
@@ -29,25 +34,28 @@ class YoutubeAPI {
     private static let webUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
-    // ANDROID_VR client — used for the player. Still returns direct stream URLs.
-    private static let vrClient: [String: Any] = [
-        "clientName": "ANDROID_VR",
-        "clientVersion": "1.60.19",
-        "deviceModel": "Quest 3",
-        "androidSdkVersion": 32,
+    // ANDROID client — first player leg. Supplies the muxed itag 18 (plain url, no cipher, no
+    // poToken) that direct play, downloads and Chromecast depend on. Nothing else about the
+    // request matters for passing the bot check: the gate keys off clientVersion ALONE — the
+    // endpoint host, visitorData, cpn and even a mismatched User-Agent are all irrelevant.
+    // So this version string is the one line to bump when the player starts failing.
+    private static let androidClient: [String: Any] = [
+        "clientName": "ANDROID",
+        "clientVersion": "21.03.36",
+        "platform": "MOBILE",
         "osName": "Android",
-        "osVersion": "12",
+        "osVersion": "16",
+        "androidSdkVersion": 36,
         "hl": "en",
         "gl": "US"
     ]
-    private static let vrUserAgent =
-        "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12; GB) gzip"
+    private static let androidUserAgent =
+        "com.google.android.youtube/21.03.36 (Linux; U; Android 15; US) gzip"
 
-    // IOS client — player fallback for videos where ANDROID_VR is bot-gated (2026-08 onward).
-    // Un-ciphered URLs like ANDROID_VR, but adaptive-only: `formats[]` is always empty, so
-    // there is no muxed itag 18/22 and playback has to go through the HLS transmux pipeline.
-    // The version string matters: only a CURRENT client version is accepted (19.x and older
-    // return HTTP 400), so this is the one line to bump when the fallback stops working.
+    // IOS client — second player leg, source of every adaptive tier (134/135/136/137/140...)
+    // with a plain url, which is what the HLS transmux pipeline needs for >360p. `formats[]` is
+    // always empty here, so it can never supply a muxed stream. Same version rule as ANDROID:
+    // a stale clientVersion returns FAILED_PRECONDITION, so bump this line when HD breaks.
     private static let iosClient: [String: Any] = [
         "clientName": "IOS",
         "clientVersion": "20.03.02",
@@ -112,29 +120,56 @@ class YoutubeAPI {
     // explanation of why there is nothing to play (bot check, paid, live, network...).
     static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
         if cachedVisitorData.isEmpty {
-            bootstrapVisitorData { performPlayer(videoId: videoId, useIOS: false, completion: completion) }
+            bootstrapVisitorData { resolveStreams(videoId: videoId, completion: completion) }
         } else {
-            performPlayer(videoId: videoId, useIOS: false, completion: completion)
+            resolveStreams(videoId: videoId, completion: completion)
         }
     }
 
-    // ANDROID_VR is bot-gated on most videos as of 2026-08 (LOGIN_REQUIRED, "Sign in to confirm
-    // you're not a bot"), but where it still answers it is the only client that returns a MUXED
-    // format — which the direct-play, download and Chromecast paths need. So: ANDROID_VR first,
-    // IOS client as fallback whenever it yields nothing playable.
-    // Refreshing visitorData is NOT the fix and is no longer attempted: the gate fires with a
-    // freshly minted token and with no token at all, so a same-client retry only wasted a round
-    // trip. The gate is per-video and server-side, not per-session.
+    // Two-leg resolution. ANDROID answers first and is the ONLY source of a muxed itag 18, but
+    // its adaptiveFormats are SABR-only, so it alone would cap every video at 360p and kill the
+    // quality sheet. The IOS leg supplies the adaptive tiers and the two lists are MERGED — so
+    // downstream code finds both a progressive stream (direct play / download / cast) and the
+    // fMP4 tiers (HLS transmux) exactly as it did when ANDROID_VR returned both in one response.
+    // Second request is conditional, not unconditional: if YouTube ever restores plain urls to
+    // ANDROID's adaptiveFormats this collapses back to a single round trip on its own.
+    // Refreshing visitorData is NOT a fix for a gated response and is never attempted — the gate
+    // is per-video and server-side, and fires with a freshly minted token and with none at all.
+    private static func resolveStreams(videoId: String,
+                                       completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
+        performPlayer(videoId: videoId, useIOS: false) { streams, video, desc, failure, captions in
+            // !isProgressive == carries initRange/indexRange == usable by the HLS transmuxer.
+            if streams.contains(where: { !$0.isProgressive }) {
+                completion(streams, video, desc, failure, captions)
+                return
+            }
+            DebugLog.log("YoutubeAPI", "ANDROID gave \(streams.count) stream(s), no adaptive tier id=\(videoId) — adding the IOS client")
+            performPlayer(videoId: videoId, useIOS: true) { iosStreams, iosVideo, iosDesc, iosFailure, iosCaptions in
+                // Prefer the ANDROID leg's metadata; fall back to IOS's when ANDROID came back
+                // empty-handed (gated video, livestream, or a failed request).
+                let merged = streams + iosStreams
+                completion(merged,
+                           video ?? iosVideo,
+                           desc.isEmpty ? iosDesc : desc,
+                           merged.isEmpty ? (failure.isEmpty ? iosFailure : failure) : "",
+                           captions.isEmpty ? iosCaptions : captions)
+            }
+        }
+    }
+
+    // One player request against one client. Returns whatever that client gave, with no retry —
+    // chaining the clients is resolveStreams' job.
     private static func performPlayer(videoId: String, useIOS: Bool,
                                       completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        var client = useIOS ? iosClient : vrClient
-        // visitorData is a WEB-issued identity — only sent with the ANDROID_VR request.
+        var client = useIOS ? iosClient : androidClient
+        // visitorData is a WEB-issued identity. Not required to pass the bot check (verified),
+        // but harmless and it keeps the response context consistent across our requests.
         if !useIOS, !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
         let payload = body(client: client, extra: ["videoId": videoId])
         guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request", []); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: useIOS ? iosUserAgent : vrUserAgent,
+                             userAgent: useIOS ? iosUserAgent : androidUserAgent,
                              timeout: 30, priority: true) { data in
             guard let data = data else {
                 DebugLog.log("YoutubeAPI", "player request id=\(videoId) — no response (network/TLS)")
@@ -144,11 +179,7 @@ class YoutubeAPI {
             playerParseQueue.async {
                 let (streams, video, desc, status, failure, captions) = parsePlayerResponse(data, videoId: videoId)
                 DispatchQueue.main.async {
-                    if streams.isEmpty, !useIOS {
-                        DebugLog.log("YoutubeAPI", "ANDROID_VR yielded nothing id=\(videoId) status=\(status) — retrying with the IOS client")
-                        performPlayer(videoId: videoId, useIOS: true, completion: completion)
-                        return
-                    }
+                    DebugLog.log("YoutubeAPI", "\(useIOS ? "IOS" : "ANDROID") player id=\(videoId) status=\(status) streams=\(streams.count)")
                     completion(streams, video, desc, failure, captions)
                 }
             }
@@ -670,7 +701,7 @@ class YoutubeAPI {
 
         // Caption tracks. Ships in the same player response as the streams, so subtitles
         // cost no extra API call — only the transcript GET once the user picks a track.
-        // The ANDROID_VR client labels tracks with `name.runs[]` (other clients use
+        // The ANDROID and IOS clients both label tracks with `name.runs[]` (some others use
         // `simpleText`), hence both lookups.
         var captions: [CaptionTrack] = []
         if let tracklist = dict(dict(root["captions"])?["playerCaptionsTracklistRenderer"]),

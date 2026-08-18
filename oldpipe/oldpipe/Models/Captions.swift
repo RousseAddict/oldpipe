@@ -1,9 +1,9 @@
 import Foundation
 
 // MARK: - Captions
-// Subtitle support. The caption track list already ships inside the ANDROID_VR player
-// response we fetch for stream URLs (captions.playerCaptionsTracklistRenderer), so
-// offering captions costs no extra API call — only one GET for the chosen transcript.
+// Subtitle support. The caption track list already ships inside the player response we fetch
+// for stream URLs (captions.playerCaptionsTracklistRenderer), so offering captions costs no
+// extra API call — only one GET for the chosen transcript.
 //
 // AVPlayer cannot render these on iOS 6: AVMediaSelectionGroup only covers tracks embedded
 // in the asset / HLS playlist, and AVPlayerItemLegibleOutput is iOS 7+. So cues are drawn
