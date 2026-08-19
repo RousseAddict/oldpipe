@@ -34,6 +34,17 @@ private final class ProxyConn {
     // Set once the feed lane (paused during this stream's handshake) has been reopened, so we
     // never signal the turnstile more than once per connection (which would break its balance).
     var feedResumed = false
+    // Body bytes already handed to AVPlayer. A dropped upstream transfer resumes from this
+    // offset (see StreamProxy.proxy) so the client never sees a truncated response.
+    var bytesRelayed: Int64 = 0
+    // How many body bytes the head we forwarded promised (its Content-Length). -1 = unknown,
+    // in which case a resume is not attempted: without it there is no way to tell a completed
+    // transfer from a truncated one.
+    var expectedBody: Int64 = -1
+    // Set while a resume leg is in flight. Its head must be a 206 continuation — a fresh
+    // 200/403/416 body would be spliced into the middle of the stream and corrupt it.
+    var isResumeLeg = false
+    var resumeAccepted = false
     init(_ fd: Int32, gen: UInt64) { clientFd = fd; self.gen = gen }
 }
 
@@ -50,12 +61,18 @@ private let proxyHeaderCallback: @convention(c) (UnsafeRawPointer?, Int, Int, Un
     let lower = line.lowercased()
     if lower.hasPrefix("http/") {
         conn.responseHead = line            // new response block — discard any redirect head
+        if conn.isResumeLeg { conn.resumeAccepted = line.contains(" 206") }
+        if !conn.headersSent { conn.expectedBody = -1 }
     } else if line == "\r\n" || line == "\n" || line.isEmpty {
         // blank line = end of head; keep buffered lines, don't append the terminator
     } else if lower.hasPrefix("transfer-encoding:") || lower.hasPrefix("connection:") {
         // hop-by-hop — libcurl already de-framed the body; forwarding these would break it
     } else {
         conn.responseHead += line
+        if !conn.headersSent, lower.hasPrefix("content-length:") {
+            conn.expectedBody = Int64(line.dropFirst(15)
+                .trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+        }
     }
     return bytes
 }
@@ -68,6 +85,10 @@ private let proxyBodyCallback: @convention(c) (UnsafeRawPointer?, Int, Int, Unsa
     guard let ptr = ptr, let userdata = userdata else { return 0 }
     let conn = Unmanaged<ProxyConn>.fromOpaque(userdata).takeUnretainedValue()
     if conn.aborted { return 0 }
+    // A resume leg that didn't come back as a 206 isn't a continuation of what we already sent:
+    // swallow its body rather than splicing it into the stream (the leg is retried/abandoned by
+    // the loop in StreamProxy.proxy, which sees bytesRelayed stand still).
+    if conn.isResumeLeg && !conn.resumeAccepted { return bytes }
     if !conn.headersSent {
         // First body byte = handshake done and bytes flowing → reopen the feed lane we paused.
         if !conn.feedResumed { conn.feedResumed = true; CurlFetcher.resumeFeed() }
@@ -77,6 +98,7 @@ private let proxyBodyCallback: @convention(c) (UnsafeRawPointer?, Int, Int, Unsa
     }
     let ok = StreamProxy.sendAll(conn.clientFd, ptr.assumingMemoryBound(to: UInt8.self), bytes)
     if !ok { conn.aborted = true; return 0 }   // returning < bytes tells libcurl to abort
+    conn.bytesRelayed += Int64(bytes)
     return bytes
 }
 
@@ -471,10 +493,62 @@ final class StreamProxy: NSObject {
         return String(data: data, encoding: .isoLatin1)
     }
 
+    // How many times a dropped transfer is reconnected before giving up.
+    private static let maxProxyResumes = 3
+
     private func proxy(remoteURL: String, gen: UInt64, rangeHeader: String?, clientFd: Int32) {
         let conn = ProxyConn(clientFd, gen: gen)
         let connPtr = Unmanaged.passUnretained(conn).toOpaque()
 
+        // Where AVPlayer's request starts and ends, so a resume can ask for the remainder.
+        // nil = the header exists but isn't a form we can offset into (e.g. a suffix range),
+        // which disables resuming rather than reconnecting at a guessed position.
+        let range = StreamProxy.parseByteRange(rangeHeader)
+
+        // Pause the feed lane while this stream's TLS handshake to googlevideo runs, then reopen
+        // it as soon as bytes flow (in the body callback). Guarantees the handshake isn't stalled
+        // by concurrent feed TLS on OpenSSL's global locks — the cause of the download fallback
+        // when tapping play during feed load. Balanced by the defer below for zero-body/error paths.
+        CurlFetcher.pauseFeed()
+        defer { if !conn.feedResumed { conn.feedResumed = true; CurlFetcher.resumeFeed() } }
+
+        // googlevideo drops a long-lived progressive transfer mid-file often enough to matter
+        // (CURLE_RECV_ERROR, seen ~2min into a 2m41s video). Left alone, the client socket just
+        // closes and AVPlayer reads the short body as end-of-stream — the video stops before the
+        // end. So reconnect from the byte we last relayed and keep writing into the SAME socket:
+        // the head, Content-Length included, went out on the first leg, so the continuation is
+        // invisible to AVPlayer and the promised byte count is still delivered exactly.
+        var legRange = rangeHeader
+        var resumes = 0
+        while true {
+            let result = performLeg(remoteURL: remoteURL, rangeHeader: legRange, connPtr: connPtr)
+            let complete = result == 0 && (conn.expectedBody < 0 || conn.bytesRelayed >= conn.expectedBody)
+            if complete || conn.aborted { break }
+            DebugLog.log("StreamProxy", "proxy connection gen=\(gen) curlResult=\(result) aborted=\(conn.aborted) superseded=\(isSuperseded(gen)) relayed=\(conn.bytesRelayed)/\(conn.expectedBody) url=\(remoteURL.prefix(80))")
+            // Only resumable once a head has been committed to AVPlayer AND its Content-Length
+            // told us how much is still owed. Anything else keeps the old behaviour (give up, let
+            // the caller close the socket) rather than guessing at the stream position.
+            guard let range = range, conn.headersSent, conn.expectedBody > 0,
+                  !isSuperseded(gen), resumes < StreamProxy.maxProxyResumes else { break }
+            resumes += 1
+            conn.isResumeLeg = true
+            conn.resumeAccepted = false
+            let from = range.start + conn.bytesRelayed
+            legRange = "Range: bytes=\(from)-" + (range.end.map { String($0) } ?? "")
+            DebugLog.log("StreamProxy", "proxy resume gen=\(gen) attempt=\(resumes) from=\(from)")
+        }
+
+        // Zero-body responses (e.g. 304/416) never reach the body callback — flush the head now.
+        if !conn.headersSent && !conn.aborted {
+            let head = (conn.responseHead.isEmpty ? "HTTP/1.1 502 Bad Gateway\r\n" : conn.responseHead) + "Connection: close\r\n\r\n"
+            StreamProxy.sendAll(clientFd, Array(head.utf8))
+        }
+    }
+
+    // One upstream GET attempt. A fresh handle per leg — libcurl handles are not reusable once a
+    // transfer has been aborted, and a resume needs a different Range header anyway.
+    private func performLeg(remoteURL: String, rangeHeader: String?,
+                            connPtr: UnsafeMutableRawPointer) -> Int32 {
         let h = curl_bridge_init()
         defer { curl_bridge_cleanup(h) }
         remoteURL.withCString { curl_bridge_set_url(h, $0) }
@@ -489,24 +563,21 @@ final class StreamProxy: NSObject {
         curl_bridge_set_write_fn(h, proxyBodyCallback, connPtr)
         // Abort this transfer promptly if a newer video is requested (see proxyProgressCallback).
         curl_bridge_set_progress_fn(h, proxyProgressCallback, connPtr)
+        return curl_bridge_perform(h)
+    }
 
-        // Pause the feed lane while this stream's TLS handshake to googlevideo runs, then reopen
-        // it as soon as bytes flow (in the body callback). Guarantees the handshake isn't stalled
-        // by concurrent feed TLS on OpenSSL's global locks — the cause of the download fallback
-        // when tapping play during feed load. Balanced by the defer below for zero-body/error paths.
-        CurlFetcher.pauseFeed()
-        defer { if !conn.feedResumed { conn.feedResumed = true; CurlFetcher.resumeFeed() } }
-
-        let result = curl_bridge_perform(h)
-        if result != 0 || conn.aborted {
-            DebugLog.log("StreamProxy", "proxy connection gen=\(gen) curlResult=\(result) aborted=\(conn.aborted) superseded=\(isSuperseded(gen)) url=\(remoteURL.prefix(80))")
-        }
-
-        // Zero-body responses (e.g. 304/416) never reach the body callback — flush the head now.
-        if !conn.headersSent && !conn.aborted {
-            let head = (conn.responseHead.isEmpty ? "HTTP/1.1 502 Bad Gateway\r\n" : conn.responseHead) + "Connection: close\r\n\r\n"
-            StreamProxy.sendAll(clientFd, Array(head.utf8))
-        }
+    // "Range: bytes=START-END" -> (START, END). No header at all means a plain GET, i.e. start 0
+    // with no end. nil is returned for anything else (suffix range "bytes=-500", multi-range,
+    // garbage) so the caller knows it cannot compute a resume offset.
+    private static func parseByteRange(_ header: String?) -> (start: Int64, end: Int64?)? {
+        guard let header = header else { return (0, nil) }
+        guard let eq = header.range(of: "bytes=") else { return nil }
+        let spec = header[eq.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        let bounds = spec.components(separatedBy: "-")
+        guard bounds.count == 2, let start = Int64(bounds[0]) else { return nil }
+        if bounds[1].isEmpty { return (start, nil) }
+        guard let end = Int64(bounds[1]) else { return nil }
+        return (start, end)
     }
 
     // MARK: - Socket write helpers (called from the C callbacks too)
