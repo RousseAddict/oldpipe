@@ -8,7 +8,7 @@ import Foundation
 //   - ANDROID : player, first leg — the only un-gated client that still returns a MUXED format
 //               (itag 18), which direct play, downloads and Chromecast all need. Its
 //               adaptiveFormats are SABR-only (no `url`), so it yields 360p and nothing else.
-//   - IOS     : player, second leg — every adaptive tier with a plain url (what the HLS
+//   - VISIONOS: player, second leg — every adaptive tier with a plain url (what the HLS
 //               transmuxer needs), but `formats[]` is always empty, so no muxed format.
 // The two are COMPLEMENTARY, not alternatives: their stream lists are merged (see resolveStreams).
 // For both mobile clients only a CURRENT clientVersion is accepted — a stale version comes back
@@ -52,22 +52,32 @@ class YoutubeAPI {
     private static let androidUserAgent =
         "com.google.android.youtube/21.03.36 (Linux; U; Android 15; US) gzip"
 
-    // IOS client — second player leg, source of every adaptive tier (134/135/136/137/140...)
+    // VISIONOS client — second player leg, source of every adaptive tier (134/135/136/137/140...)
     // with a plain url, which is what the HLS transmux pipeline needs for >360p. `formats[]` is
     // always empty here, so it can never supply a muxed stream. Same version rule as ANDROID:
     // a stale clientVersion returns FAILED_PRECONDITION, so bump this line when HD breaks.
-    private static let iosClient: [String: Any] = [
-        "clientName": "IOS",
-        "clientVersion": "20.03.02",
+    //
+    // NOT the IOS client, which looks equivalent but hands out BYTE-CAPPED urls: on some videos
+    // every IOS adaptive url answers 403 to any Range starting past ~50-57% of contentLength
+    // (measured: itag 137 cap 57%, itag 140 cap 52% — i.e. only the first ~70s of a 134s video is
+    // fetchable). The cap is fixed per url: a freshly minted url 403s on the tail immediately and
+    // fetching sequentially from byte 0 does not move it. Since the transmuxer fetches a byte range
+    // per HLS segment, that made playback die around the 1-minute mark with AVPlayer revising the
+    // asset duration DOWN to whatever it managed to read. VISIONOS urls for the very same
+    // videos/itags serve their full length. It also omits the AV1/39x tiers, which we never use.
+    private static let visionOSClient: [String: Any] = [
+        "clientName": "VISIONOS",
+        "clientVersion": "1.02",
+        "platform": "MOBILE",
         "deviceMake": "Apple",
-        "deviceModel": "iPhone16,2",
-        "osName": "iPhone",
-        "osVersion": "18.2.1.22C161",
+        "deviceModel": "RealityDevice14,1",
+        "osName": "visionOS",
+        "osVersion": "25.6.0.23O471",
         "hl": "en",
         "gl": "US"
     ]
-    private static let iosUserAgent =
-        "com.google.ios.youtube/20.03.02 (iPhone16,2; U; CPU iOS 18_2_1 like Mac OS X)"
+    private static let visionOSUserAgent =
+        "com.google.visionos.youtube/1.02(RealityDevice14,1; U; CPU visionOS 25_6_0 like Mac OS X; US)"
 
     private static let jsonHeaders = [
         "Content-Type: application/json",
@@ -128,7 +138,7 @@ class YoutubeAPI {
 
     // Two-leg resolution. ANDROID answers first and is the ONLY source of a muxed itag 18, but
     // its adaptiveFormats are SABR-only, so it alone would cap every video at 360p and kill the
-    // quality sheet. The IOS leg supplies the adaptive tiers and the two lists are MERGED — so
+    // quality sheet. The VISIONOS leg supplies the adaptive tiers and the two lists are MERGED — so
     // downstream code finds both a progressive stream (direct play / download / cast) and the
     // fMP4 tiers (HLS transmux) exactly as it did when ANDROID_VR returned both in one response.
     // Second request is conditional, not unconditional: if YouTube ever restores plain urls to
@@ -137,39 +147,42 @@ class YoutubeAPI {
     // is per-video and server-side, and fires with a freshly minted token and with none at all.
     private static func resolveStreams(videoId: String,
                                        completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        performPlayer(videoId: videoId, useIOS: false) { streams, video, desc, failure, captions in
+        performPlayer(videoId: videoId, useVisionOS: false) { streams, video, desc, failure, captions in
             // !isProgressive == carries initRange/indexRange == usable by the HLS transmuxer.
             if streams.contains(where: { !$0.isProgressive }) {
                 completion(streams, video, desc, failure, captions)
                 return
             }
-            DebugLog.log("YoutubeAPI", "ANDROID gave \(streams.count) stream(s), no adaptive tier id=\(videoId) — adding the IOS client")
-            performPlayer(videoId: videoId, useIOS: true) { iosStreams, iosVideo, iosDesc, iosFailure, iosCaptions in
-                // Prefer the ANDROID leg's metadata; fall back to IOS's when ANDROID came back
+            DebugLog.log("YoutubeAPI", "ANDROID gave \(streams.count) stream(s), no adaptive tier id=\(videoId) — adding the VISIONOS client")
+            performPlayer(videoId: videoId, useVisionOS: true) { vrStreams, vrVideo, vrDesc, vrFailure, vrCaptions in
+                // Prefer the ANDROID leg's metadata; fall back to VISIONOS's when ANDROID came back
                 // empty-handed (gated video, livestream, or a failed request).
-                let merged = streams + iosStreams
+                let merged = streams + vrStreams
                 completion(merged,
-                           video ?? iosVideo,
-                           desc.isEmpty ? iosDesc : desc,
-                           merged.isEmpty ? (failure.isEmpty ? iosFailure : failure) : "",
-                           captions.isEmpty ? iosCaptions : captions)
+                           video ?? vrVideo,
+                           desc.isEmpty ? vrDesc : desc,
+                           merged.isEmpty ? (failure.isEmpty ? vrFailure : failure) : "",
+                           captions.isEmpty ? vrCaptions : captions)
             }
         }
     }
 
     // One player request against one client. Returns whatever that client gave, with no retry —
     // chaining the clients is resolveStreams' job.
-    private static func performPlayer(videoId: String, useIOS: Bool,
+    private static func performPlayer(videoId: String, useVisionOS: Bool,
                                       completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        var client = useIOS ? iosClient : androidClient
-        // visitorData is a WEB-issued identity. Not required to pass the bot check (verified),
-        // but harmless and it keeps the response context consistent across our requests.
-        if !useIOS, !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
+        var client = useVisionOS ? visionOSClient : androidClient
+        // visitorData is a WEB-issued identity (bootstrapVisitorData mints it off a WEB search;
+        // verified that a WEB-minted token is accepted here). ANDROID does not need it — but
+        // VISIONOS absolutely does: without it every video comes back LOGIN_REQUIRED / "Sign in
+        // to confirm you're not a bot", the adaptive leg yields nothing, and the quality sheet
+        // ends up empty with playback silently limited to ANDROID's muxed 360p.
+        if !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
         let payload = body(client: client, extra: ["videoId": videoId])
         guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request", []); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: useIOS ? iosUserAgent : androidUserAgent,
+                             userAgent: useVisionOS ? visionOSUserAgent : androidUserAgent,
                              timeout: 30, priority: true) { data in
             guard let data = data else {
                 DebugLog.log("YoutubeAPI", "player request id=\(videoId) — no response (network/TLS)")
@@ -179,7 +192,7 @@ class YoutubeAPI {
             playerParseQueue.async {
                 let (streams, video, desc, status, failure, captions) = parsePlayerResponse(data, videoId: videoId)
                 DispatchQueue.main.async {
-                    DebugLog.log("YoutubeAPI", "\(useIOS ? "IOS" : "ANDROID") player id=\(videoId) status=\(status) streams=\(streams.count)")
+                    DebugLog.log("YoutubeAPI", "\(useVisionOS ? "VISIONOS" : "ANDROID") player id=\(videoId) status=\(status) streams=\(streams.count)")
                     completion(streams, video, desc, failure, captions)
                 }
             }
@@ -641,7 +654,7 @@ class YoutubeAPI {
             for key in ["formats", "adaptiveFormats"] {
                 guard let formats = sd[key] as? [[String: Any]] else { continue }
                 for fmt in formats {
-                    // The IOS client lists one audio format PER language (auto-dubbed tracks)
+                    // The adaptive leg lists one audio format PER language (auto-dubbed tracks)
                     // plus a DRC (compressed-loudness) duplicate of the original. Everything
                     // downstream assumes `first { itag == 140 }` IS the audio track, so keep
                     // only the original, non-DRC one — otherwise HLS playback can end up muxing
@@ -701,7 +714,7 @@ class YoutubeAPI {
 
         // Caption tracks. Ships in the same player response as the streams, so subtitles
         // cost no extra API call — only the transcript GET once the user picks a track.
-        // The ANDROID and IOS clients both label tracks with `name.runs[]` (some others use
+        // The ANDROID and VISIONOS clients both label tracks with `name.runs[]` (some others use
         // `simpleText`), hence both lookups.
         var captions: [CaptionTrack] = []
         if let tracklist = dict(dict(root["captions"])?["playerCaptionsTracklistRenderer"]),
