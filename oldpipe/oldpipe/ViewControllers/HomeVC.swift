@@ -73,12 +73,17 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private static let channelCacheTimeKey = "home_channel_cache_time" // [channelId: epochSeconds]
     private static let shortsCacheKey = "home_shorts_cache"          // [channelId: [videoDict]]
     private static let shortsCacheTimeKey = "home_shorts_cache_time" // [channelId: epochSeconds]
+    // Publish dates for Shorts, read from each channel's Atom feed (see ChannelRSS) because the
+    // innertube Shorts tab carries none. Kept per channel so it is bounded by the subscription
+    // count and drops out with the rest of a channel's cache.
+    private static let shortsDatesKey = "home_shorts_dates"          // [channelId: [videoId: epochSeconds]]
     private static let feedCacheTTL: TimeInterval = 1800  // 30 min — older cache refetches
 
     // Wipe the cached feed (Settings → Reset Cache). Subscriptions/playlists are untouched.
     // Also clears the legacy whole-feed keys so upgrading installs don't leave them behind.
     static func clearFeedCache() {
         for k in [channelCacheKey, channelCacheTimeKey, shortsCacheKey, shortsCacheTimeKey,
+                  shortsDatesKey,
                   "home_feed_cache", "home_feed_cache_subs", "home_feed_cache_time"] {
             UserDefaults.standard.removeObject(forKey: k)
         }
@@ -106,6 +111,29 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         times[id] = Date().timeIntervalSince1970
         UserDefaults.standard.set(times, forKey: shortsCacheTimeKey)
         UserDefaults.standard.synchronize()
+    }
+
+    private static func saveChannelShortsDates(_ dates: [String: Double], for id: String) {
+        var map = UserDefaults.standard.dictionary(forKey: shortsDatesKey) ?? [:]
+        map[id] = dates
+        UserDefaults.standard.set(map, forKey: shortsDatesKey)
+        UserDefaults.standard.synchronize()
+    }
+
+    // Flattened videoId → publish date across every channel's feed.
+    private static func cachedShortsDates() -> [String: Double] {
+        guard let map = UserDefaults.standard.dictionary(forKey: shortsDatesKey) else { return [:] }
+        var out: [String: Double] = [:]
+        for (_, value) in map {
+            guard let perChannel = value as? [String: Any] else { continue }
+            for (videoId, ts) in perChannel {
+                // Numeric `as? Double` silently returns nil on the Swift 5.1.5 runtime — go
+                // through NSNumber.
+                guard let n = (ts as? NSNumber)?.doubleValue, n > 0 else { continue }
+                out[videoId] = n
+            }
+        }
+        return out
     }
 
     override func viewDidLoad() {
@@ -360,6 +388,15 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                 remaining -= 1
                 if remaining == 0 { self.finishShortsFeed() }
             }
+            // The Shorts tab gives us no publish date, so pull the channel's Atom feed for one.
+            // Deliberately NOT part of the `remaining` count: it is an ordering improvement, so
+            // the feed must never wait on it, and a failed fetch just leaves those Shorts in the
+            // shuffled tail. Whichever lands last triggers the coalesced rebuild.
+            ChannelRSS.fetchPublishDates(channelId: channel.id, priority: false) { [weak self] dates in
+                guard let self = self, !dates.isEmpty else { return }
+                HomeVC.saveChannelShortsDates(dates, for: channel.id)
+                self.scheduleShortsReload()
+            }
         }
     }
 
@@ -396,11 +433,21 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                 merged.append(v)
             }
         }
-        // Shorts carry no publish date (the shortsLockupViewModel has no date field), so a
-        // time sort is impossible and concatenating per channel makes the feed feel grouped
-        // ("all of channel A, then all of channel B"). Shuffle instead for a mixed, less
-        // predictable feel. shuffle() is pure Swift stdlib (runtime-independent, safe on 5.1.5).
+        // The shortsLockupViewModel these came from has no date field, so the date comes from
+        // the channel's Atom feed instead (ChannelRSS), which does list Shorts. Anything the
+        // feed covered — the recent Shorts, which is what the top of the feed is — sorts
+        // newest-first; the rest keeps the old shuffle and follows behind, because
+        // concatenating them per channel would make the tail feel grouped ("all of channel A,
+        // then all of channel B"). shuffle() and sorted() are pure Swift stdlib
+        // (runtime-independent, safe on 5.1.5).
+        let dates = HomeVC.cachedShortsDates()
+        for i in 0..<merged.count {
+            if let ts = dates[merged[i].id] { merged[i].publishedTimestamp = ts }
+        }
         merged.shuffle()
+        let dated = merged.filter { $0.publishedTimestamp > 0 }
+            .sorted { $0.publishedTimestamp > $1.publishedTimestamp }
+        merged = dated + merged.filter { $0.publishedTimestamp <= 0 }
         // Re-append this session's continuation pages (de-duped against the rebuilt first page)
         // so a progressive/background rebuild doesn't discard what infinite scroll fetched.
         for v in shortsExtra where !seen.contains(v.id) {

@@ -39,9 +39,12 @@ class YoutubeAPI {
     // request matters for passing the bot check: the gate keys off clientVersion ALONE — the
     // endpoint host, visitorData, cpn and even a mismatched User-Agent are all irrelevant.
     // So this version string is the one line to bump when the player starts failing.
+    // 21.26.364 verified live 2026-08-27 over 9 videos: identical results to the previous
+    // 21.03.36 (same playability, same format lists, itag 18 present on 8 of 9). Bumped as
+    // insurance against the version ageing out, not as a fix for anything observed.
     private static let androidClient: [String: Any] = [
         "clientName": "ANDROID",
-        "clientVersion": "21.03.36",
+        "clientVersion": "21.26.364",
         "platform": "MOBILE",
         "osName": "Android",
         "osVersion": "16",
@@ -50,7 +53,7 @@ class YoutubeAPI {
         "gl": "US"
     ]
     private static let androidUserAgent =
-        "com.google.android.youtube/21.03.36 (Linux; U; Android 15; US) gzip"
+        "com.google.android.youtube/21.26.364 (Linux; U; Android 15; US) gzip"
 
     // VISIONOS client — second player leg, source of every adaptive tier (134/135/136/137/140...)
     // with a plain url, which is what the HLS transmux pipeline needs for >360p. `formats[]` is
