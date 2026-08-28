@@ -9,6 +9,28 @@ import UIKit
 // StreamProxy on iOS 6) but deliberately has NO download fallback: if a stream can't be
 // resolved, the queue simply stops rather than duplicating the VC's fragile fallback logic.
 
+// MARK: - StreamTiers
+// The itags the app knows how to play, in ONE place. This list used to exist twice — here and
+// in VideoPlayerVC — so every change had to be made in both files or the two silently
+// disagreed. Anything itag-shaped that both the VC and the resolver need belongs here.
+enum StreamTiers {
+    // Muxed 360p MP4 — the only format that can be played directly, downloaded or cast,
+    // since all three need one self-contained file.
+    static let muxed360 = 18
+    // The DASH audio track backing every transmuxed quality.
+    static let audio = 140
+    // 360p adaptive tier, offered only when a response carries no muxed format at all.
+    static let base360 = 134
+    // Video-only H.264 tiers the transmuxer can serve, ascending: 480p30, 720p30, 1080p30.
+    // NOTE: 60fps uploads ship as itag 298/299 instead of 136/137, so they are still invisible
+    // to the quality sheet. That fix is now a one-line change here instead of two.
+    static let h264: [Int] = [135, 136, 137]
+    // Settings > Default Video Quality: the preference order (highest first — selection steps
+    // DOWN it looking for a tier this video actually has) and the itag each value maps to.
+    static let qualityOrder = ["1080", "720", "480"]
+    static let itagForQuality: [String: Int] = ["1080": 137, "720": 136, "480": 135]
+}
+
 struct ResolvedStream {
     let url: URL
     let isLocal: Bool
@@ -36,7 +58,7 @@ final class StreamResolver {
     // silently. Returns nil for an adaptive-only response (the IOS player client) — callers
     // then go through fallbackHLSStream instead. Mirrors VideoPlayerVC.preferredStream.
     static func pickPreferred(_ streams: [VideoStream]) -> VideoStream? {
-        return streams.first { $0.itag == 18 }
+        return streams.first { $0.itag == StreamTiers.muxed360 }
             ?? streams.first { $0.isProgressive && $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
             ?? streams.first { $0.isProgressive && $0.mimeType.contains("video") }
             ?? streams.first { $0.isProgressive }
@@ -44,14 +66,14 @@ final class StreamResolver {
 
     // The DASH audio track backing every HLS quality. Mirrors VideoPlayerVC.audioStreamForHLS.
     private static func audioStreamForHLS(_ streams: [VideoStream]) -> VideoStream? {
-        return streams.first { $0.itag == 140 && $0.indexEnd > 0 }
+        return streams.first { $0.itag == StreamTiers.audio && $0.indexEnd > 0 }
     }
 
     // The 360p adaptive tier (itag 134) — the default when a response carries no muxed format
     // at all, in which case playback can only happen through the transmux pipeline.
     private static func fallbackHLSStream(_ streams: [VideoStream]) -> VideoStream? {
         guard audioStreamForHLS(streams) != nil else { return nil }
-        return streams.first { $0.itag == 134 && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
+        return streams.first { $0.itag == StreamTiers.base360 && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
     }
 
     // Settings > Default Video Quality, applied to non-interactive playback paths (playlist
@@ -62,15 +84,15 @@ final class StreamResolver {
     static func defaultQualityStream(_ streams: [VideoStream]) -> VideoStream? {
         let pref = AppSettings.defaultQuality
         guard pref != "auto", audioStreamForHLS(streams) != nil else { return nil }
-        let opts: [VideoStream] = [135, 136, 137].compactMap { tag in
+        let opts: [VideoStream] = StreamTiers.h264.compactMap { tag in
             streams.first { $0.itag == tag && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
         }
         guard !opts.isEmpty else { return nil }
-        let order = ["1080", "720", "480"]
-        let itagFor: [String: Int] = ["1080": 137, "720": 136, "480": 135]
+        let order = StreamTiers.qualityOrder
         guard let startIdx = order.firstIndex(of: pref) else { return nil }
         for key in order[startIdx...] {
-            if let itag = itagFor[key], let s = opts.first(where: { $0.itag == itag }) { return s }
+            if let itag = StreamTiers.itagForQuality[key],
+               let s = opts.first(where: { $0.itag == itag }) { return s }
         }
         return nil
     }

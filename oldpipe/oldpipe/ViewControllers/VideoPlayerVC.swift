@@ -1482,7 +1482,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // formats: an adaptive match would be video-only and play silently.
     private func preferredStream() -> VideoStream? {
         // Prefer muxed 360p MP4 (itag 18) — plays on AVPlayer, small, castable.
-        return streams.first { $0.itag == 18 }
+        return streams.first { $0.itag == StreamTiers.muxed360 }
             ?? streams.first { $0.isProgressive && $0.mimeType.contains("mp4") && !$0.mimeType.contains("av01") }
             ?? streams.first { $0.isProgressive && $0.mimeType.contains("video") }
             ?? streams.first { $0.isProgressive }
@@ -1492,7 +1492,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // The DASH audio track backing every HLS quality. indexEnd > 0 = fMP4 with a sidx head.
     private func audioStreamForHLS() -> VideoStream? {
-        return streams.first { $0.itag == 140 && $0.indexEnd > 0 }
+        return streams.first { $0.itag == StreamTiers.audio && $0.indexEnd > 0 }
     }
 
     // Video-only H.264 streams the transmux pipeline can serve, ascending quality
@@ -1501,8 +1501,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // directly — otherwise it would duplicate the sheet's hardcoded "360p" row.
     private func hlsQualityOptions() -> [VideoStream] {
         guard audioStreamForHLS() != nil else { return [] }
-        var tags = [135, 136, 137]
-        if preferredStream() == nil { tags.insert(134, at: 0) }
+        var tags = StreamTiers.h264
+        if preferredStream() == nil { tags.insert(StreamTiers.base360, at: 0) }
         return tags.compactMap { tag in
             streams.first { $0.itag == tag && $0.indexEnd > 0 && $0.mimeType.contains("avc1") }
         }
@@ -1518,11 +1518,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         guard pref != "auto" else { return nil }
         let opts = hlsQualityOptions()
         guard !opts.isEmpty else { return nil }
-        let order = ["1080", "720", "480"]
-        let itagFor: [String: Int] = ["1080": 137, "720": 136, "480": 135]
+        let order = StreamTiers.qualityOrder
         guard let startIdx = order.firstIndex(of: pref) else { return nil }
         for key in order[startIdx...] {
-            if let itag = itagFor[key], let s = opts.first(where: { $0.itag == itag }) { return s }
+            if let itag = StreamTiers.itagForQuality[key],
+               let s = opts.first(where: { $0.itag == itag }) { return s }
         }
         return nil
     }

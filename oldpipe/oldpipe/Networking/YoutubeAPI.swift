@@ -34,31 +34,61 @@ class YoutubeAPI {
     private static let webUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 
-    // ANDROID client — first player leg. Supplies the muxed itag 18 (plain url, no cipher, no
-    // poToken) that direct play, downloads and Chromecast depend on. Nothing else about the
-    // request matters for passing the bot check: the gate keys off clientVersion ALONE — the
-    // endpoint host, visitorData, cpn and even a mismatched User-Agent are all irrelevant.
-    // So this version string is the one line to bump when the player starts failing.
+    // One innertube player-client identity. `version` is the single field that decides whether
+    // a request passes the bot check, and it also appears inside the User-Agent, so both are
+    // built from the same string — bumping a client is one edit that cannot go half-done.
+    // `deviceFields` carries whatever else that particular client needs to look plausible.
+    private struct PlayerClient {
+        let name: String
+        let version: String
+        let userAgent: String
+        let deviceFields: [String: Any]
+
+        // The `context.client` block for the request body.
+        func context(visitorData: String) -> [String: Any] {
+            var c: [String: Any] = [
+                "clientName": name,
+                "clientVersion": version,
+                "hl": "en",
+                "gl": "US"
+            ]
+            for (k, v) in deviceFields { c[k] = v }
+            // visitorData is a WEB-issued identity (bootstrapVisitorData mints it off a WEB
+            // search; a WEB-minted token is accepted here). ANDROID does not need it — but
+            // VISIONOS absolutely does: without one every video comes back LOGIN_REQUIRED /
+            // "Sign in to confirm you're not a bot", the adaptive leg yields nothing, and the
+            // quality sheet ends up empty with playback silently limited to muxed 360p. Sent
+            // for both clients rather than per-client: harmless to ANDROID, one less thing
+            // to get wrong.
+            if !visitorData.isEmpty { c["visitorData"] = visitorData }
+            return c
+        }
+    }
+
+    // First player leg. Supplies the muxed itag 18 (plain url, no cipher, no poToken) that
+    // direct play, downloads and Chromecast depend on. Nothing else about the request matters
+    // for passing the bot check: the gate keys off clientVersion ALONE — the endpoint host,
+    // visitorData, cpn and even a mismatched User-Agent are all irrelevant. So androidVersion
+    // is the one line to change when the player starts failing.
     // 21.26.364 verified live 2026-08-27 over 9 videos: identical results to the previous
     // 21.03.36 (same playability, same format lists, itag 18 present on 8 of 9). Bumped as
     // insurance against the version ageing out, not as a fix for anything observed.
-    private static let androidClient: [String: Any] = [
-        "clientName": "ANDROID",
-        "clientVersion": "21.26.364",
-        "platform": "MOBILE",
-        "osName": "Android",
-        "osVersion": "16",
-        "androidSdkVersion": 36,
-        "hl": "en",
-        "gl": "US"
-    ]
-    private static let androidUserAgent =
-        "com.google.android.youtube/21.26.364 (Linux; U; Android 15; US) gzip"
+    private static let androidVersion = "21.26.364"
+    private static let androidPlayer = PlayerClient(
+        name: "ANDROID",
+        version: androidVersion,
+        userAgent: "com.google.android.youtube/\(androidVersion) (Linux; U; Android 15; US) gzip",
+        deviceFields: [
+            "platform": "MOBILE",
+            "osName": "Android",
+            "osVersion": "16",
+            "androidSdkVersion": 36
+        ])
 
-    // VISIONOS client — second player leg, source of every adaptive tier (134/135/136/137/140...)
+    // Second player leg, source of every adaptive tier (134/135/136/137/140...)
     // with a plain url, which is what the HLS transmux pipeline needs for >360p. `formats[]` is
     // always empty here, so it can never supply a muxed stream. Same version rule as ANDROID:
-    // a stale clientVersion returns FAILED_PRECONDITION, so bump this line when HD breaks.
+    // a stale clientVersion returns FAILED_PRECONDITION, so bump visionOSVersion when HD breaks.
     //
     // NOT the IOS client, which looks equivalent but hands out BYTE-CAPPED urls: on some videos
     // every IOS adaptive url answers 403 to any Range starting past ~50-57% of contentLength
@@ -68,19 +98,18 @@ class YoutubeAPI {
     // per HLS segment, that made playback die around the 1-minute mark with AVPlayer revising the
     // asset duration DOWN to whatever it managed to read. VISIONOS urls for the very same
     // videos/itags serve their full length. It also omits the AV1/39x tiers, which we never use.
-    private static let visionOSClient: [String: Any] = [
-        "clientName": "VISIONOS",
-        "clientVersion": "1.02",
-        "platform": "MOBILE",
-        "deviceMake": "Apple",
-        "deviceModel": "RealityDevice14,1",
-        "osName": "visionOS",
-        "osVersion": "25.6.0.23O471",
-        "hl": "en",
-        "gl": "US"
-    ]
-    private static let visionOSUserAgent =
-        "com.google.visionos.youtube/1.02(RealityDevice14,1; U; CPU visionOS 25_6_0 like Mac OS X; US)"
+    private static let visionOSVersion = "1.02"
+    private static let visionOSPlayer = PlayerClient(
+        name: "VISIONOS",
+        version: visionOSVersion,
+        userAgent: "com.google.visionos.youtube/\(visionOSVersion)(RealityDevice14,1; U; CPU visionOS 25_6_0 like Mac OS X; US)",
+        deviceFields: [
+            "platform": "MOBILE",
+            "deviceMake": "Apple",
+            "deviceModel": "RealityDevice14,1",
+            "osName": "visionOS",
+            "osVersion": "25.6.0.23O471"
+        ])
 
     private static let jsonHeaders = [
         "Content-Type: application/json",
@@ -150,16 +179,16 @@ class YoutubeAPI {
     // is per-video and server-side, and fires with a freshly minted token and with none at all.
     private static func resolveStreams(videoId: String,
                                        completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        performPlayer(videoId: videoId, useVisionOS: false) { streams, video, desc, failure, captions in
+        performPlayer(videoId: videoId, client: androidPlayer) { streams, video, desc, failure, captions in
             // !isProgressive == carries initRange/indexRange == usable by the HLS transmuxer.
             if streams.contains(where: { !$0.isProgressive }) {
                 completion(streams, video, desc, failure, captions)
                 return
             }
-            DebugLog.log("YoutubeAPI", "ANDROID gave \(streams.count) stream(s), no adaptive tier id=\(videoId) — adding the VISIONOS client")
-            performPlayer(videoId: videoId, useVisionOS: true) { vrStreams, vrVideo, vrDesc, vrFailure, vrCaptions in
-                // Prefer the ANDROID leg's metadata; fall back to VISIONOS's when ANDROID came back
-                // empty-handed (gated video, livestream, or a failed request).
+            DebugLog.log("YoutubeAPI", "\(androidPlayer.name) gave \(streams.count) stream(s), no adaptive tier id=\(videoId) — adding the \(visionOSPlayer.name) client")
+            performPlayer(videoId: videoId, client: visionOSPlayer) { vrStreams, vrVideo, vrDesc, vrFailure, vrCaptions in
+                // Prefer the first leg's metadata; fall back to the second's when the first came
+                // back empty-handed (gated video, livestream, or a failed request).
                 let merged = streams + vrStreams
                 completion(merged,
                            video ?? vrVideo,
@@ -172,20 +201,14 @@ class YoutubeAPI {
 
     // One player request against one client. Returns whatever that client gave, with no retry —
     // chaining the clients is resolveStreams' job.
-    private static func performPlayer(videoId: String, useVisionOS: Bool,
+    private static func performPlayer(videoId: String, client: PlayerClient,
                                       completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        var client = useVisionOS ? visionOSClient : androidClient
-        // visitorData is a WEB-issued identity (bootstrapVisitorData mints it off a WEB search;
-        // verified that a WEB-minted token is accepted here). ANDROID does not need it — but
-        // VISIONOS absolutely does: without it every video comes back LOGIN_REQUIRED / "Sign in
-        // to confirm you're not a bot", the adaptive leg yields nothing, and the quality sheet
-        // ends up empty with playback silently limited to ANDROID's muxed 360p.
-        if !cachedVisitorData.isEmpty { client["visitorData"] = cachedVisitorData }
-        let payload = body(client: client, extra: ["videoId": videoId])
+        let payload = body(client: client.context(visitorData: cachedVisitorData),
+                           extra: ["videoId": videoId])
         guard let jsonStr = toJSON(payload) else { completion([], nil, "", "Could not build request", []); return }
         let url = "\(baseURL)/player?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
-                             userAgent: useVisionOS ? visionOSUserAgent : androidUserAgent,
+                             userAgent: client.userAgent,
                              timeout: 30, priority: true) { data in
             guard let data = data else {
                 DebugLog.log("YoutubeAPI", "player request id=\(videoId) — no response (network/TLS)")
@@ -195,7 +218,7 @@ class YoutubeAPI {
             playerParseQueue.async {
                 let (streams, video, desc, status, failure, captions) = parsePlayerResponse(data, videoId: videoId)
                 DispatchQueue.main.async {
-                    DebugLog.log("YoutubeAPI", "\(useVisionOS ? "VISIONOS" : "ANDROID") player id=\(videoId) status=\(status) streams=\(streams.count)")
+                    DebugLog.log("YoutubeAPI", "\(client.name) player id=\(videoId) status=\(status) streams=\(streams.count)")
                     completion(streams, video, desc, failure, captions)
                 }
             }
