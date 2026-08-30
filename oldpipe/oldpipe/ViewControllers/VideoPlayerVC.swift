@@ -178,6 +178,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // so a playlist auto-advance swaps this VC's content in place.
         sp.onAdvance = { [weak self] v in self?.handleAutoAdvance(v) }
 
+        // Same ownership deal for the mid-playback recovery callback: report what the
+        // watchdog is doing rather than leaving a frozen frame with no explanation.
+        sp.onRecovery = { [weak self] state in self?.handleRecovery(state) }
+
         // Captions survive a push/pop of another VC (cues stay parsed) — restart the ticker
         // that viewWillDisappear stopped.
         if activeCaptionIndex >= 0, !captionCues.isEmpty {
@@ -192,6 +196,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // Release the advance callback — the next frontmost VC (or none) takes over. When
         // no VC is on screen, autoplay still advances; only the mini bar reflects it.
         sp.onAdvance = nil
+        sp.onRecovery = nil
         NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
@@ -250,6 +255,31 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // meta block (title height depends on the new text), reset the async description/related
     // state, and re-fetch them for the new video without flashing "Loading..." over the
     // live layer.
+    // The singleton's watchdog found the stream dead mid-playback and is re-resolving it.
+    // Nothing to drive here — the singleton reloads and replays on its own — so this only
+    // narrates what is happening, and puts the play button back if it ran out of attempts.
+    private func handleRecovery(_ state: VideoPlayer.RecoveryState) {
+        switch state {
+        case .reconnecting(let attempt):
+            showSpinner()
+            statusLabel?.text = "Connection lost \u{2022} reconnecting (\(attempt)/3)..."
+            statusLabel?.isHidden = false
+            showControls()
+        case .recovered:
+            hideSpinner()
+            statusLabel?.isHidden = true
+        case .failed:
+            hideSpinner()
+            // The resolved URLs are the prime suspect after repeated drops on the same stream,
+            // so make the next tap re-fetch them instead of reusing what just failed.
+            streamsStale = true
+            detachLayer()
+            statusLabel?.text = "Connection lost \u{2022} tap > to retry"
+            statusLabel?.isHidden = false
+            playBtn?.isHidden = false
+        }
+    }
+
     private func handleAutoAdvance(_ newVideo: Video) {
         video = newVideo
         streams = []
