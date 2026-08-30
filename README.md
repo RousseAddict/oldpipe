@@ -5,7 +5,7 @@
 <h1 align="center">oldpipe</h1>
 
 <p align="center">
-  A lightweight, ad-free, account-free YouTube client for <b>iOS 6, 7, 8 and 9</b>.<br>
+  A lightweight, ad-free, account-free YouTube client for <b>iOS 6 through 12</b>.<br>
   Written in Swift, built for hardware Google gave up on more than a decade ago.
 </p>
 
@@ -115,7 +115,7 @@ Prebuilt IPAs live in [`build/`](build/). Pick the one that matches the device:
 |---|---|---|
 | `build/oldpipe_ios6.ipa` | iOS 6 – 7 | Portrait-locked. The baseline build. |
 | `build/oldpipe_ios7.ipa` | iOS 7 | Same as above, plus the layout fix for the translucent iOS 7 navigation bar. |
-| `build/oldpipe_ios8.ipa` | iOS 8 – 9 | Adds iPad rotation and layout reflow. |
+| `build/oldpipe_ios8.ipa` | iOS 8 – 12 | Adds iPad rotation and layout reflow. Tested as far up as iOS 12. |
 
 The IPAs are **ad-hoc signed**, so they install on a jailbroken device
 (Filza, `ipainstaller`, AppSync) but not on a stock one. To run on a stock device you must
@@ -125,11 +125,12 @@ re-sign the IPA with your own certificate.
 
 ## Tested on
 
-| Device | OS | Status |
-|---|---|---|
-| iPhone 4S | iOS 6 | Works |
-| iPhone 5 | iOS 7 | Works, full 4-inch screen |
-| iPad mini (1st gen) | iOS 8 | Works, rotation enabled |
+| Device | OS | Build | Status |
+|---|---|---|---|
+| iPhone 4S | iOS 6 | `ios6` | Works |
+| iPhone 5 | iOS 7 | `ios6` / `ios7` | Works, full 4-inch screen |
+| iPad mini (1st gen) | iOS 8 | `ios8` | Works, rotation enabled |
+| iPhone 5s | iOS 12 | `ios8` | Works |
 
 ---
 
