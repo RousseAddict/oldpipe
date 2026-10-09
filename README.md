@@ -70,9 +70,12 @@ oldpipe follows the same principles as [NewPipe](https://newpipe.net) on Android
 - Channel pages — Videos / Shorts / About, with subscribe
 - Subscriptions feed on the home screen
 - Shorts in a TikTok-style vertical pager
+- Related videos and comments, side by side in tabs on the video page
+- Comments load in batches, with replies expandable inline
 
 **Playback**
 - Quality selection up to 1080p, on iOS 6 included
+- Playback speed from 0.5x to 2x
 - Captions / subtitles
 - Background audio with lock-screen controls and artwork
 - Persistent mini player bar that survives navigation
@@ -145,8 +148,11 @@ These are real, current, and mostly not fixable from inside the app:
   up to 1080p30 High L4.1. Anything above that will stutter or refuse to play regardless
   of what the quality menu offers.
 - **No sign-in.** By design — but it also means no personal recommendations, no
-  server-side subscriptions, no liking or commenting. Your subscriptions are local only.
-- **No comments section.**
+  server-side subscriptions, and no liking or posting. Comments are read-only; your
+  subscriptions are local only.
+- **Playback speed only applies at 360p on iOS 6.** Above 360p the video is served to
+  AVPlayer as HLS, and the iOS 6 player honours only 1x for HLS. iOS 7 and later are
+  unaffected.
 - **Some videos cannot be downloaded or cast.** Downloading and Chromecast both need a
   single self-contained file. When YouTube serves a video only as separate video/audio
   tracks, streaming still works but those two features are unavailable for it.

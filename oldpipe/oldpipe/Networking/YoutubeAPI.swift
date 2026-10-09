@@ -318,23 +318,27 @@ class YoutubeAPI {
 
     // Related ("Up next") videos for a watch page. WEB client returns the related panel
     // under twoColumnWatchNextResults.secondaryResults as lockupViewModel items.
-    static func getRelated(videoId: String, priority: Bool = false, completion: @escaping ([Video]) -> Void) {
+    // The same watch-page response also carries the continuation token for the comment
+    // section, so it is handed back here: opening a video gets the token for free and the
+    // Comments tab then costs exactly one request per batch instead of two.
+    // completion: (related videos, comments continuation token or "")
+    static func getRelated(videoId: String, priority: Bool = false, completion: @escaping ([Video], String) -> Void) {
         let payload = body(client: webClient, extra: ["videoId": videoId])
-        guard let jsonStr = toJSON(payload) else { completion([]); return }
+        guard let jsonStr = toJSON(payload) else { completion([], ""); return }
         let url = "\(baseURL)/next?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: webUserAgent, timeout: 30, priority: priority) { data in
-            guard let data = data else { completion([]); return }
+            guard let data = data else { completion([], ""); return }
             (priority ? interactiveParseQueue : parseQueue).async {
-                let results = parseRelated(data, excludeId: videoId)
-                DispatchQueue.main.async { completion(results) }
+                let result = parseRelated(data, excludeId: videoId)
+                DispatchQueue.main.async { completion(result.0, result.1) }
             }
         }
     }
 
-    private static func parseRelated(_ data: Data, excludeId: String) -> [Video] {
+    private static func parseRelated(_ data: Data, excludeId: String) -> ([Video], String) {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            return []
+            return ([], "")
         }
         captureVisitorData(root)
         // The related panel lives under the secondaryResults column; walking just that
@@ -345,7 +349,152 @@ class YoutubeAPI {
         seen.insert(excludeId)   // never list the video we're already watching
         var results: [Video] = []
         collectVideoItems(secondary, fallbackChannelId: "", fallbackChannelName: "", seen: &seen, into: &results)
-        return results
+        return (results, findCommentsToken(root))
+    }
+
+    // MARK: - Comments (Next endpoint)
+
+    // One batch of comments (20 per page from YouTube). The same call serves both the
+    // top-level list and a single thread's replies — a reply token is just another
+    // continuation into the same endpoint and comes back in the same shape.
+    // completion: (comments, token for the NEXT batch or "")
+    static func getComments(token: String, priority: Bool = false, completion: @escaping ([Comment], String) -> Void) {
+        let payload = body(client: webClient, extra: ["continuation": token])
+        guard let jsonStr = toJSON(payload) else { completion([], ""); return }
+        let url = "\(baseURL)/next?prettyPrint=false"
+        CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
+                             userAgent: webUserAgent, timeout: 30, priority: priority) { data in
+            guard let data = data else { completion([], ""); return }
+            (priority ? interactiveParseQueue : parseQueue).async {
+                let result = parseComments(data)
+                DispatchQueue.main.async { completion(result.0, result.1) }
+            }
+        }
+    }
+
+    // Comments come back split in two: the text/author/counts as flat keyed entities under
+    // frameworkUpdates, and the display order (plus each thread's reply token) under
+    // onResponseReceivedEndpoints. Mutation order is NOT display order, so the renderer
+    // list drives the result and the entities are only looked up by key.
+    private static func parseComments(_ data: Data) -> ([Comment], String) {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            return ([], "")
+        }
+        captureVisitorData(root)
+
+        var payloads: [String: [String: Any]] = [:]
+        if let muts = arr(dict(dict(root["frameworkUpdates"])?["entityBatchUpdate"])?["mutations"]) {
+            for m in muts {
+                guard let p = dict(dict(m["payload"])?["commentEntityPayload"]),
+                      let k = str(p["key"]), !k.isEmpty else { continue }
+                payloads[k] = p
+            }
+        }
+        guard !payloads.isEmpty else { return ([], "") }
+
+        var order: [(key: String, replies: String, pinned: Bool)] = []
+        var nextToken = ""
+        walkCommentItems(root["onResponseReceivedEndpoints"] ?? root, order: &order, nextToken: &nextToken)
+
+        var out: [Comment] = []
+        for o in order {
+            guard let p = payloads[o.key] else { continue }
+            out.append(makeComment(p, repliesToken: o.replies, pinned: o.pinned))
+        }
+        return (out, nextToken)
+    }
+
+    private static func makeComment(_ p: [String: Any], repliesToken: String, pinned: Bool) -> Comment {
+        let props = dict(p["properties"])
+        let author = dict(p["author"])
+        let toolbar = dict(p["toolbar"])
+        return Comment(
+            id: str(props?["commentId"]) ?? (str(p["key"]) ?? ""),
+            author: str(author?["displayName"]) ?? "",
+            // Already plain text on the WEB entity shape — no runs to assemble.
+            text: str(dict(props?["content"])?["content"]) ?? "",
+            published: str(props?["publishedTime"]) ?? "",
+            likeCount: countField(str(toolbar?["likeCountNotliked"])),
+            replyCount: countField(str(toolbar?["replyCount"])),
+            isCreator: (author?["isCreator"] as? NSNumber)?.boolValue ?? false,
+            isPinned: pinned,
+            repliesToken: repliesToken
+        )
+    }
+
+    // Toolbar counts are display strings, and "none" is spelled as a single SPACE — not ""
+    // and not "0" — so they have to be trimmed before any is-it-empty test.
+    private static func countField(_ raw: String?) -> String {
+        let t = (raw ?? "").trimmingCharacters(in: .whitespaces)
+        return t == "0" ? "" : t
+    }
+
+    // Collect comment view-models in render order. A thread is consumed whole (and never
+    // recursed into) so that its replies' own continuation token can't be mistaken for the
+    // next-page token of the list we are reading.
+    private static func walkCommentItems(_ node: Any?,
+                                         order: inout [(key: String, replies: String, pinned: Bool)],
+                                         nextToken: inout String) {
+        if let a = node as? [Any] {
+            for v in a { walkCommentItems(v, order: &order, nextToken: &nextToken) }
+            return
+        }
+        guard let d = node as? [String: Any] else { return }
+
+        if let thread = dict(d["commentThreadRenderer"]) {
+            if let vm = commentViewModel(thread["commentViewModel"]), let k = str(vm["commentKey"]) {
+                order.append((k, firstContinuationToken(thread["replies"]) ?? "", vm["pinnedText"] != nil))
+            }
+            return
+        }
+        if let vm = commentViewModel(d["commentViewModel"]), let k = str(vm["commentKey"]) {
+            order.append((k, "", vm["pinnedText"] != nil))
+            return
+        }
+        if let cir = dict(d["continuationItemRenderer"]) {
+            if let t = firstContinuationToken(cir) { nextToken = t }
+            return
+        }
+        for (_, v) in d { walkCommentItems(v, order: &order, nextToken: &nextToken) }
+    }
+
+    // The view-model is sometimes wrapped in a second `commentViewModel` level — return
+    // whichever dict actually holds `commentKey`.
+    private static func commentViewModel(_ node: Any?) -> [String: Any]? {
+        guard let d = dict(node) else { return nil }
+        if d["commentKey"] != nil { return d }
+        return dict(d["commentViewModel"])
+    }
+
+    private static func firstContinuationToken(_ node: Any?) -> String? {
+        if let a = node as? [Any] {
+            for v in a { if let t = firstContinuationToken(v) { return t } }
+            return nil
+        }
+        guard let d = node as? [String: Any] else { return nil }
+        if let cmd = dict(d["continuationCommand"]), let t = str(cmd["token"]), !t.isEmpty { return t }
+        for (_, v) in d { if let t = firstContinuationToken(v) { return t } }
+        return nil
+    }
+
+    // The watch page ships the comment list collapsed behind a continuation token, held by
+    // the item section tagged "comment-item-section".
+    private static func findCommentsToken(_ root: [String: Any]) -> String {
+        guard let section = findCommentSection(root) else { return "" }
+        return firstContinuationToken(section) ?? ""
+    }
+
+    private static func findCommentSection(_ node: Any?) -> [String: Any]? {
+        if let a = node as? [Any] {
+            for v in a { if let r = findCommentSection(v) { return r } }
+            return nil
+        }
+        guard let d = node as? [String: Any] else { return nil }
+        if let s = dict(d["itemSectionRenderer"]), str(s["sectionIdentifier"]) == "comment-item-section" {
+            return s
+        }
+        for (_, v) in d { if let r = findCommentSection(v) { return r } }
+        return nil
     }
 
     // Fetch a visitor identity token via a lightweight WEB search call.
