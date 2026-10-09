@@ -45,13 +45,19 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // video-only streams backing the last-shown sheet (index-aligned with its buttons).
     private var hdBtn: UIButton?
     private var pendingHLSStreams: [VideoStream] = []
-    // Whether the last quality sheet listed qualities at all (it may be captions-only),
-    // and the index of its "Captions: ..." row (-1 when the video has no caption tracks).
-    private var qualitySheetHasQuality = false
-    // Whether that sheet's row 0 was the direct muxed "360p" entry — absent when the player
-    // response has no muxed format, in which case the rows map 1:1 onto pendingHLSStreams.
+    // Whether the quality sheet's row 0 was the direct muxed "360p" entry — absent when the
+    // player response has no muxed format, in which case the rows map 1:1 onto pendingHLSStreams.
     private var qualitySheetMuxedRow = false
+    // Row indices in the top-level sheet. Each row opens a submenu; quality and captions are
+    // dropped when the video has none, so the indices have to be captured as the sheet is
+    // built rather than assumed. -1 = row absent.
+    private var qualitySheetIndex = -1
     private var captionsSheetIndex = -1
+    private var speedSheetIndex = -1
+    // What the top-level sheet reports next to "Quality:". Tracks the user's pick (or the
+    // automatic one) rather than being derived, because the playing stream is owned by the
+    // singleton and a downloaded copy has no itag at all. Reset per video.
+    private var activeQualityLabel = "Auto"
 
     // Captions. The track list arrives with the streams (same player response); cues are
     // fetched only when the user picks a track. Rendered into captionPlate/captionLabel by
@@ -289,6 +295,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         descriptionText = ""
         descExpanded = false
         relatedVideos = []
+        activeQualityLabel = "Auto"   // the next video picks its own tier
         resetCaptions()   // the new video has its own track list (refetched by loadStreams)
 
         let w = UIScreen.main.bounds.width
@@ -954,28 +961,44 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 startCasting(to: castDevices[buttonIndex])
             }
         } else if actionSheet.tag == 4 {
-            // Quality sheet: [360p?, pendingHLSStreams...] (only when qualitySheetHasQuality),
-            // then the captions row, then Cancel.
+            // Playback menu: each row opens a submenu. Present it only after this sheet has
+            // finished dismissing — showing one from inside the delegate fights the dismissal
+            // animation on iOS 6.
             guard buttonIndex != actionSheet.cancelButtonIndex else { return }
-            if buttonIndex == captionsSheetIndex {
-                // Present the second sheet only after this one has finished dismissing —
-                // showing it from inside the delegate fights the dismissal animation on iOS 6.
-                let t = Timer(timeInterval: 0.35, target: BlockTarget { [weak self] in
-                    self?.showCaptionSheet()
-                }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
-                RunLoop.main.add(t, forMode: .common)
-            } else if qualitySheetHasQuality {
-                if qualitySheetMuxedRow, buttonIndex == 0 {
-                    playTapped()   // the default 360p path (offline copy / direct / proxied)
-                } else {
-                    let idx = qualitySheetMuxedRow ? buttonIndex - 1 : buttonIndex
-                    if idx >= 0, idx < pendingHLSStreams.count { playHLS(pendingHLSStreams[idx]) }
-                }
-            }
+            let next: () -> Void
+            if buttonIndex == qualitySheetIndex { next = { [weak self] in self?.showQualitySheet() } }
+            else if buttonIndex == captionsSheetIndex { next = { [weak self] in self?.showCaptionSheet() } }
+            else if buttonIndex == speedSheetIndex { next = { [weak self] in self?.showSpeedSheet() } }
+            else { return }
+            let t = Timer(timeInterval: 0.35, target: BlockTarget(next),
+                          selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+            RunLoop.main.add(t, forMode: .common)
         } else if actionSheet.tag == 5 {
             // Captions sheet: button 0 = Off, then captionTracks in order, then Cancel.
             guard buttonIndex != actionSheet.cancelButtonIndex else { return }
             selectCaption(buttonIndex - 1)
+        } else if actionSheet.tag == 6 {
+            // Speed sheet: speedOptions in order, then Cancel.
+            guard buttonIndex != actionSheet.cancelButtonIndex else { return }
+            guard buttonIndex >= 0, buttonIndex < VideoPlayerVC.speedOptions.count else { return }
+            if !sp.setPlaybackRate(VideoPlayerVC.speedOptions[buttonIndex].rate) {
+                let alert = UIAlertView()
+                alert.title = "Speed"
+                alert.message = "This stream only plays at normal speed. Switch to 360p for speed control."
+                alert.addButton(withTitle: "OK")
+                alert.cancelButtonIndex = 0
+                alert.show()
+            }
+        } else if actionSheet.tag == 7 {
+            // Quality sheet: [360p?, pendingHLSStreams...], then Cancel.
+            guard buttonIndex != actionSheet.cancelButtonIndex else { return }
+            if qualitySheetMuxedRow, buttonIndex == 0 {
+                activeQualityLabel = "360p"
+                playTapped()   // the default 360p path (offline copy / direct / proxied)
+            } else {
+                let idx = qualitySheetMuxedRow ? buttonIndex - 1 : buttonIndex
+                if idx >= 0, idx < pendingHLSStreams.count { playHLS(pendingHLSStreams[idx]) }
+            }
         }
     }
 
@@ -1557,42 +1580,101 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         return nil
     }
 
-    // The "hd" button opens the quality sheet, which also hosts the captions entry (the
-    // control bar has no room for a separate CC button at 320pt). Either half can be empty:
-    // a video with no HLS tiers still gets a captions row, and vice versa.
+    // The "hd" button opens the playback menu: one row per setting, each opening its own
+    // submenu (the control bar has no room for separate CC/speed buttons at 320pt, and
+    // listing every quality, caption track and speed in one sheet was far too long).
+    // Each row shows its current value, so the menu doubles as a status readout.
     @objc private func hdTapped() {
-        let opts = hlsQualityOptions()
-        guard !opts.isEmpty || !captionTracks.isEmpty else {
+        // Nothing resolved yet means the quality and captions rows can't be populated at all,
+        // and the menu would be a lone speed row with no explanation of what's missing.
+        guard !streams.isEmpty || !captionTracks.isEmpty else {
             let alert = UIAlertView()
-            alert.title = "Quality"
-            alert.message = streams.isEmpty ? "Still loading streams..."
-                                            : "No higher qualities available for this video."
+            alert.title = "Playback"
+            alert.message = "Still loading streams..."
             alert.addButton(withTitle: "OK")
             alert.cancelButtonIndex = 0
             alert.show()
             return
         }
-        pendingHLSStreams = opts
-        qualitySheetHasQuality = !opts.isEmpty
-        // Row 0 is the direct muxed 360p only when such a format exists; otherwise every row
-        // maps straight onto pendingHLSStreams (whose first entry is then the 360p tier).
-        qualitySheetMuxedRow = preferredStream() != nil
+        qualitySheetIndex = -1
         captionsSheetIndex = -1
+        speedSheetIndex = -1
         let sheet = UIActionSheet()
         sheet.delegate = self
-        sheet.title = qualitySheetHasQuality ? "Quality" : "Captions"
-        if qualitySheetHasQuality {
-            if qualitySheetMuxedRow { sheet.addButton(withTitle: "360p") }
-            for s in opts { sheet.addButton(withTitle: s.quality.isEmpty ? "itag \(s.itag)" : s.quality) }
+        sheet.title = "Playback"
+        if !hlsQualityOptions().isEmpty || preferredStream() != nil {
+            qualitySheetIndex = sheet.addButton(withTitle: "Quality: \(activeQualityLabel)")
         }
         if !captionTracks.isEmpty {
             captionsSheetIndex = sheet.addButton(withTitle: "Captions: \(currentCaptionLabel())")
         }
+        speedSheetIndex = sheet.addButton(withTitle: "Speed: \(currentSpeedLabel())")
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 4
         // Host in the fullscreen overlay when it's up — a sheet shown in `view` would be
         // buried (and untappable) behind the overlay.
+        sheet.show(in: fsOverlay ?? view)
+    }
+
+    // MARK: - Quality
+
+    // Second-level sheet: the direct muxed 360p (when the response has one) followed by the
+    // transmuxable tiers, current pick check-marked.
+    private func showQualitySheet() {
+        let opts = hlsQualityOptions()
+        pendingHLSStreams = opts
+        // Row 0 is the direct muxed 360p only when such a format exists; otherwise every row
+        // maps straight onto pendingHLSStreams (whose first entry is then the 360p tier).
+        qualitySheetMuxedRow = preferredStream() != nil
+        guard !opts.isEmpty || qualitySheetMuxedRow else { return }
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Quality"
+        if qualitySheetMuxedRow { sheet.addButton(withTitle: mark("360p")) }
+        for s in opts { sheet.addButton(withTitle: mark(qualityLabel(s))) }
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 7
+        sheet.show(in: fsOverlay ?? view)
+    }
+
+    private func qualityLabel(_ s: VideoStream) -> String {
+        return s.quality.isEmpty ? "itag \(s.itag)" : s.quality
+    }
+
+    // Check-mark prefix for the row matching the current selection.
+    private func mark(_ label: String) -> String {
+        return (label == activeQualityLabel ? "\u{2713} " : "") + label
+    }
+
+    // MARK: - Playback speed
+
+    // The rate lives on the player singleton, so it survives this VC being popped, keeps
+    // applying from the mini bar, and carries over to the next video in a playlist. The
+    // sheet only reports it. Labels are fixed strings rather than formatted numbers: the
+    // 5.1.5 runtime renders Double->Int conversions inside string interpolation as "?".
+    private static let speedOptions: [(label: String, rate: Float)] = [
+        ("0.5x", 0.5), ("0.75x", 0.75), ("Normal", 1.0), ("1.25x", 1.25), ("1.5x", 1.5), ("2x", 2.0)
+    ]
+
+    private func currentSpeedLabel() -> String {
+        let r = sp.playbackRate
+        return VideoPlayerVC.speedOptions.first(where: { $0.rate == r })?.label ?? "Normal"
+    }
+
+    // Second-level sheet, same shape as the captions one: current pick check-marked.
+    private func showSpeedSheet() {
+        let current = sp.playbackRate
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Speed"
+        for o in VideoPlayerVC.speedOptions {
+            sheet.addButton(withTitle: (o.rate == current ? "\u{2713} " : "") + o.label)
+        }
+        let cancelIdx = sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = cancelIdx
+        sheet.tag = 6
         sheet.show(in: fsOverlay ?? view)
     }
 
@@ -1750,6 +1832,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             statusLabel?.isHidden = false
             return
         }
+        activeQualityLabel = qualityLabel(vStream)
         playBtn?.isHidden = true
         statusLabel?.text = "Loading stream..."
         statusLabel?.isHidden = false
@@ -1803,6 +1886,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
 
+        activeQualityLabel = "360p"
         playBtn?.isHidden = true
         statusLabel?.isHidden = false
         showSpinner()

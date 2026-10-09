@@ -167,13 +167,66 @@ class VideoPlayer {
             if let v = currentVideo { HistoryManager.record(v) }
         }
         wantsPlayback = true
-        p.play()
+        p.rate = playbackRate
         updateNowPlayingInfo()
     }
 
-    func play() { wantsPlayback = true; player?.play(); updateNowPlayingInfo() }
+    func play() { wantsPlayback = true; player?.rate = playbackRate; updateNowPlayingInfo() }
     func pause() { wantsPlayback = false; player?.pause(); saveResume(); updateNowPlayingInfo() }
     func togglePlayPause() { if isPlaying { pause() } else { play() } }
+
+    // MARK: - Playback speed
+    // Setting a non-zero rate is what starts playback, so `play()` is really "rate = 1.0" —
+    // which means every start (resume, remote control, post-recovery reload) would silently
+    // reset the chosen speed. Hence the speed lives here and is re-applied at each start
+    // rather than being set once on the AVPlayer.
+    //
+    // Pitch correction is deliberately left alone: AVPlayerItem defaults to the spectral
+    // (pitch-preserving) algorithm on iOS 7+, and `audioTimePitchAlgorithm` does not exist at
+    // all on iOS 6 — both the selector and its constants are iOS 7 symbols, so referencing
+    // them would risk a bind failure on the oldest target for no gain.
+    //
+    // The speed is intentionally sticky across videos (including queue auto-advance) for the
+    // rest of the session, and not persisted to disk.
+    private(set) var playbackRate: Float = 1.0
+
+    // Not every item can be played off-speed: AVPlayer on iOS 6 only does 1.0 for HLS, which
+    // is how the transmuxed HD qualities are served, so speed works at 360p (progressive MP4)
+    // and is refused above it. Ask the item instead of hardcoding that rule — a build running
+    // on a newer OS, or a locally downloaded file, answers for itself.
+    // Before the item is ready these flags are not meaningful yet, so assume it is allowed.
+    func supportsRate(_ rate: Float) -> Bool {
+        guard let it = item, it.status == .readyToPlay else { return true }
+        if rate > 1.0 { return it.canPlayFastForward }
+        if rate < 1.0 { return it.canPlaySlowForward }
+        return true
+    }
+
+    @discardableResult
+    func setPlaybackRate(_ rate: Float) -> Bool {
+        guard supportsRate(rate) else {
+            DebugLog.log("VideoPlayer", "rate \(rate) unsupported by item (hls=\(lastLoadWasHLS))")
+            return false
+        }
+        playbackRate = rate
+        // Only push it to the player when something is actually running — assigning a rate to
+        // a paused player would start playback behind the user's back.
+        if isPlaying { player?.rate = rate }
+        updateNowPlayingInfo()
+        return true
+    }
+
+    // An item may also accept the assignment and then quietly revert to 1.0, in which case
+    // the flags above lied and only the running player can tell us. Checked once per tick so
+    // the stored speed keeps matching what is actually being played (and the player sheet
+    // stops claiming a speed that isn't in effect).
+    private func reconcileRate() {
+        guard playbackRate != 1.0, wantsPlayback, let p = player else { return }
+        guard p.rate > 0, abs(p.rate - playbackRate) > 0.01 else { return }
+        DebugLog.log("VideoPlayer", "rate \(playbackRate) reverted by player to \(p.rate) (hls=\(lastLoadWasHLS))")
+        playbackRate = 1.0
+        updateNowPlayingInfo()
+    }
 
     func seek(toFraction f: Double) {
         guard let it = item else { return }
@@ -285,7 +338,10 @@ class VideoPlayer {
         if dur > 0, cur >= dur - 2 { stalledTicks = 0; return false }
         // Compare on absolute movement so a backwards seek counts as progress too —
         // otherwise rewinding would look like a stall until playback caught up again.
-        let moved = lastTickSeconds < 0 || abs(cur - lastTickSeconds) > 0.25
+        // Scaled by the playback speed: at 0.5x a healthy second of playback only advances
+        // the clock half a second, which a fixed 0.25s floor would read as a stall.
+        let threshold = 0.25 * Double(min(playbackRate, 1.0))
+        let moved = lastTickSeconds < 0 || abs(cur - lastTickSeconds) > threshold
         lastTickSeconds = cur
         if moved {
             stalledTicks = 0
@@ -462,6 +518,7 @@ class VideoPlayer {
     private func tick() {
         if checkPlaybackAlive() { return }
         guard item?.status == .readyToPlay else { return }
+        reconcileRate()
         refreshNowPlayingElapsed()
         saveResumeThrottled()
     }
