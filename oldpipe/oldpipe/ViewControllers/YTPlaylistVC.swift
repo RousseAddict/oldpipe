@@ -63,7 +63,7 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
         tableView.delegate = self
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tableView.tableFooterView = UIView()
-        tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
+        tableView.registerCell(VideoRowCell.self, VideoRowCell.reuseId)
         // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
         // portrait-locked in the pbxproj so autoresizing never triggers there.
         tableView.autoresizingMask = iPadFlexWidthHeight
@@ -164,7 +164,7 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
+        let cell = tableView.dequeueCell(VideoRowCell.self, VideoRowCell.reuseId, for: indexPath)
         cell.configure(with: videos[indexPath.row])
         return cell
     }

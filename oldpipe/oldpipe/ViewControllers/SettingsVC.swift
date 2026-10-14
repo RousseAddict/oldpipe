@@ -120,7 +120,14 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         toggleLabel.textColor = .white
         toggleLabel.font = UIFont.systemFont(ofSize: 16)
         toggleLabel.adjustsFontSizeToFitWidth = true
+        #if IOS5_TARGET
+        // minimumScaleFactor is iOS 6; its iOS 2 predecessor is an absolute size.
+        // Swift hides minimumFontSize outright (pre-iOS-7 deprecations are marked
+        // unavailable), so it has to be reached through KVC.
+        toggleLabel.setValue(12.8, forKey: "minimumFontSize")   // 16pt * 0.8
+        #else
         toggleLabel.minimumScaleFactor = 0.8
+        #endif
         toggleLabel.text = "Enable Shorts on Home Screen"
         toggleLabel.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(toggleLabel)
@@ -250,7 +257,14 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         debugToggleLabel.textColor = .white
         debugToggleLabel.font = UIFont.systemFont(ofSize: 16)
         debugToggleLabel.adjustsFontSizeToFitWidth = true
+        #if IOS5_TARGET
+        // minimumScaleFactor is iOS 6; its iOS 2 predecessor is an absolute size.
+        // Swift hides minimumFontSize outright (pre-iOS-7 deprecations are marked
+        // unavailable), so it has to be reached through KVC.
+        debugToggleLabel.setValue(12.8, forKey: "minimumFontSize")   // 16pt * 0.8
+        #else
         debugToggleLabel.minimumScaleFactor = 0.8
+        #endif
         debugToggleLabel.text = "Enable Debug Logging"
         debugToggleLabel.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(debugToggleLabel)

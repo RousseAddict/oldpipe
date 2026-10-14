@@ -21,7 +21,17 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     private var tableView: UITableView!
     private var statusLabel: UILabel!
+    #if !IOS5_TARGET
     private var refreshControl: UIRefreshControl?
+    #endif
+
+    // UIRefreshControl is iOS 6+, so the iOS 5 build simply has no pull-to-refresh
+    // and this is a no-op; every other target forwards to the control.
+    private func endPullToRefresh() {
+        #if !IOS5_TARGET
+        refreshControl?.endRefreshing()
+        #endif
+    }
 
     // MARK: - Shorts-on-Home (optional, gated by AppSettings.shortsOnHome)
     // When the Settings toggle is on, a Videos/Shorts tab bar sits above the feed and a
@@ -194,7 +204,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         tableView.separatorColor = UIColor(white: 0.2, alpha: 1)
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
+        tableView.registerCell(VideoRowCell.self, VideoRowCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tableView.tableFooterView = UIView()   // no empty separator rows while loading/empty
         // iPad rotates natively; the flexible masks (here + on the status label, loading bar
@@ -203,11 +213,14 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
-        // Pull-to-refresh (UIRefreshControl is iOS 6+; add as a subview of the plain table).
+        // Pull-to-refresh (UIRefreshControl is iOS 6+; add as a subview of the plain
+        // table). The iOS 5 build goes without it — the feed still reloads on appear.
+        #if !IOS5_TARGET
         let rc = UIRefreshControl()
         rc.addTarget(self, action: #selector(handleRefresh), for: .valueChanged)
         tableView.addSubview(rc)
         refreshControl = rc
+        #endif
 
         statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 80))
         statusLabel.backgroundColor = .clear
@@ -265,7 +278,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         st.separatorStyle = .none
         st.dataSource = self
         st.delegate = self
-        st.register(ShortGridCell.self, forCellReuseIdentifier: ShortGridCell.reuseId)
+        st.registerCell(ShortGridCell.self, ShortGridCell.reuseId)
         st.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         st.tableFooterView = UIView()
         st.autoresizingMask = iPadFlexWidthHeight
@@ -741,7 +754,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     @objc private func handleRefresh() {
         let subs = feedChannels()
         if subs.isEmpty || isLoading {
-            refreshControl?.endRefreshing()
+            endPullToRefresh()
             return
         }
         builtChannelIds = Set(subs.map { $0.id })
@@ -799,7 +812,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private func finishFeed() {
         isLoading = false
         stopLoadingBar()
-        refreshControl?.endRefreshing()
+        endPullToRefresh()
         reloadTimer?.invalidate()
         reloadTimer = nil
         rebuildFromCache()
@@ -867,7 +880,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         if tableView === shortsTable {
-            let cell = tableView.dequeueReusableCell(withIdentifier: ShortGridCell.reuseId, for: indexPath) as! ShortGridCell
+            let cell = tableView.dequeueCell(ShortGridCell.self, ShortGridCell.reuseId, for: indexPath)
             let i0 = indexPath.row * 2
             let i1 = i0 + 1
             cell.configureLeft(shorts[i0]) { [weak self] in self?.openShort(at: i0) }
@@ -878,7 +891,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             }
             return cell
         }
-        let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
+        let cell = tableView.dequeueCell(VideoRowCell.self, VideoRowCell.reuseId, for: indexPath)
         cell.configure(with: videos[indexPath.row])
         return cell
     }
@@ -971,7 +984,7 @@ private class ShortGridCell: UITableViewCell {
     private let left = ShortCardView()
     private let right = ShortCardView()
 
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    required override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
         selectionStyle = .none
