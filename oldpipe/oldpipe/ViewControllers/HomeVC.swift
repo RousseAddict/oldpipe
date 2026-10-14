@@ -171,6 +171,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        CrashLog.mark("HomeVC: viewDidLoad")
         view.backgroundColor = bg
         if let gid = groupId {
             // A group feed is pushed, so the nav back button takes the Menu button's place.
@@ -186,12 +187,15 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        CrashLog.mark("HomeVC: viewDidAppear didSetupUI=\(didSetupUI)")
         if !didSetupUI {
             didSetupUI = true
             setupUI()
         }
+        CrashLog.mark("HomeVC: setupUI done")
         applyShortsTabVisibility()   // reflects the current Settings toggle (may have changed)
         refreshFeedIfNeeded()
+        CrashLog.mark("HomeVC: viewDidAppear done")
     }
 
     private func setupUI() {
@@ -765,6 +769,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     // is cached per-channel and triggers a coalesced re-render, so videos appear as they
     // arrive rather than all at once when the slowest channel finishes.
     private func loadFeed(channels toFetch: [Channel], isRefresh: Bool = false) {
+        CrashLog.mark("HomeVC: loadFeed n=\(toFetch.count)")
         guard !toFetch.isEmpty else { return }
         isLoading = true
         startLoadingBar()
@@ -821,6 +826,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     // Merge every subscribed channel's cached videos, de-dupe, and sort newest-first.
     // Reads the cache dict once (not per channel) to stay cheap on the iPhone 4S.
     private func rebuildFromCache() {
+        CrashLog.mark("HomeVC: rebuildFromCache")
         let subs = feedChannels()
         let map = UserDefaults.standard.dictionary(forKey: HomeVC.channelCacheKey) ?? [:]
         var merged: [Video] = []
