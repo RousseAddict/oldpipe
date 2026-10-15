@@ -38,6 +38,7 @@ echo "[1/3] libS5.dylib (compiler-rt atomics + __mulodi4 for libswiftCore)"
 # -fno-builtin: the names are clang builtins, and the definitions carry asm()
 # labels to emit the real symbols.
 clang $COMMON -fno-builtin \
+  -I ../oldpipe/oldpipe/Networking \
   -install_name @loader_path/libS5.dylib \
   -compatibility_version 1.0.0 -current_version 1.0.0 \
   -Wl,-reexport-lSystem \

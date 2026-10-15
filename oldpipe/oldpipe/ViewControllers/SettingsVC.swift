@@ -300,7 +300,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         crashHint.font = UIFont.systemFont(ofSize: 11)
         crashHint.numberOfLines = 2
         crashHint.autoresizingMask = iPadFlexWidth
-        crashHint.text = "Crash log is always on. If the app won't start, copy the file(s) named oldpipe-crash-*.log from the app's Documents folder."
+        crashHint.text = "Crash log is always on. If the app won't start, copy the file(s) named oldpipe-launch*.log from the app's Documents folder."
         scrollView.addSubview(crashHint)
         y += 34 + 6
 

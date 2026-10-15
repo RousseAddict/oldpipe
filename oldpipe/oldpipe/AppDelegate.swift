@@ -115,6 +115,15 @@ enum AppSettings {
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
+
+    // Checkpoint 3. UIApplicationMain builds the delegate before calling any of its
+    // methods, so reaching here means the app image, the Swift runtime and
+    // UIApplicationMain itself are all alive — narrowing the gap that marker 4 closes.
+    override init() {
+        super.init()
+        CrashLog.mark("3. AppDelegate.init: UIApplicationMain reached delegate creation")
+    }
+
     var window: UIWindow?
     private var miniBar: MiniPlayerBar?
 

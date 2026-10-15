@@ -125,4 +125,28 @@ int64_t ios5_mulodi4(int64_t a, int64_t b, int *overflow) {
     return result;
 }
 
+
+/*
+ * Second checkpoint: the app image's own initialiser.
+ *
+ * Reaching here means every dependent dylib loaded, bound AND ran its
+ * initialisers without dying — the Swift runtime's included. If marker 1 is in
+ * the log and this one is not, the fault is in that interval.
+ */
+#include "ios5_launchlog.h"
+
+__attribute__((constructor))
+static void ios5_app_image_init(void) {
+    const char *home;
+    ios5_log_resolve();
+    ios5_log_arm();     /* re-arm against this image; idempotent */
+    ios5_log("2. app image constructor: all dylib initialisers completed\n");
+    home = getenv("HOME");
+    if (home) {         /* record the container so the log can be found again */
+        ios5_log("   container: ");
+        ios5_log(home);
+        ios5_log("\n");
+    }
+}
+
 #endif /* IOS5_TARGET */

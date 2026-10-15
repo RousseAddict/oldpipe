@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <libkern/OSAtomic.h>
+#include "ios5_launchlog.h"
 
 // Address-hashed lock pool. The generic (non-inlined) compiler-rt atomics are always
 // allowed to be lock-based; correctness only requires that every access to a given
@@ -89,4 +90,23 @@ long long s5_mulodi4(long long a, long long b, int *overflow) {
         if (abs_a > MIN / -abs_b) *overflow = 1;
     }
     return result;
+}
+
+
+/*
+ * The first code of ours that can run at all.
+ *
+ * libS5 is a dependency of libswiftCore, and dyld runs initialisers
+ * dependencies-first, so this constructor precedes the Swift runtime's own
+ * initialisers and the app image's. That makes it the right place to rotate the
+ * log and to arm the signal handlers: everything after this point is covered,
+ * including the Swift runtime initialisation that CrashLog could never see.
+ */
+__attribute__((constructor))
+static void s5_launchlog_boot(void) {
+    ios5_log_resolve();
+    ios5_log_rotate();
+    ios5_log_arm();
+    ios5_log("=== oldpipe launch ===\n");
+    ios5_log("1. libS5 constructor: dyld loaded and bound every image\n");
 }
