@@ -43,21 +43,41 @@
 static char ios5_log_path[1024];
 static int  ios5_log_ready;
 
+/* Probes a candidate path by actually opening it. O_CREAT creates the FILE but
+   never the DIRECTORY, so a missing Documents/ fails here silently — which is
+   precisely how an earlier build managed to produce no log at all. */
+static int ios5_log_try(const char *base, const char *rel) {
+    int fd;
+    if (strlen(base) + strlen(rel) >= sizeof(ios5_log_path)) return 0;
+    strlcpy(ios5_log_path, base, sizeof(ios5_log_path));
+    strlcat(ios5_log_path, rel, sizeof(ios5_log_path));
+    fd = open(ios5_log_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) return 0;
+    close(fd);
+    return 1;
+}
+
 __attribute__((unused))
 static void ios5_log_resolve(void) {
     /* HOME is the sandbox container; dyld has the environment set up by the time
        any initialiser runs, so this is safe at the earliest possible moment. */
     const char *home = getenv("HOME");
-    if (!home) { ios5_log_ready = 0; return; }
-    if (strlen(home) + sizeof(IOS5_LOG_REL) >= sizeof(ios5_log_path)) return;
-    strlcpy(ios5_log_path, home, sizeof(ios5_log_path));
-    strlcat(ios5_log_path, IOS5_LOG_REL, sizeof(ios5_log_path));
-    ios5_log_ready = 1;
+    ios5_log_ready = 0;
+    if (!home) return;
+    /* Documents/ first (visible over USB file sharing), container root second —
+       that one always exists, including when running as root from a shell. */
+    if (ios5_log_try(home, IOS5_LOG_REL))      { ios5_log_ready = 1; return; }
+    if (ios5_log_try(home, "/oldpipe-launch.log")) { ios5_log_ready = 1; return; }
 }
 
 __attribute__((unused))
 static void ios5_log_write(const char *msg, size_t n) {
     int fd;
+    /* Mirror to stderr unconditionally. Launching the binary from an SSH shell is
+       how this bug is actually being chased, and there stderr is the whole point:
+       it needs no container, no sandbox and no file browser. On device it costs
+       nothing and may be picked up by the console log. */
+    (void)write(2, msg, n);
     if (!ios5_log_ready) return;
     fd = open(ios5_log_path, O_WRONLY | O_APPEND | O_CREAT, 0644);
     if (fd < 0) return;
@@ -102,6 +122,10 @@ static void ios5_log_signal(int sig) {
         while (n > 0 && k < (int)sizeof(tmp)) { tmp[k++] = (char)('0' + n % 10); n /= 10; }
         while (k > 0) digits[i++] = tmp[--k];
     }
+
+    (void)write(2, pre, sizeof(pre) - 1);
+    (void)write(2, digits, (size_t)i);
+    (void)write(2, post, sizeof(post) - 1);
 
     if (ios5_log_ready) {
         int fd = open(ios5_log_path, O_WRONLY | O_APPEND | O_CREAT, 0644);

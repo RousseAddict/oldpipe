@@ -300,7 +300,7 @@ class VideoPlayer {
         currentVideo = nil
         artwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-        try? AVAudioSession.sharedInstance().setActive(false)
+        VideoPlayer.setSessionActive(false)
     }
 
     // Abandon a load that never became ready (stream fallback path). Unlike stop() there is
@@ -521,7 +521,36 @@ class VideoPlayer {
         updateNowPlayingInfo()
     }
 
-    func reactivateSession() { try? AVAudioSession.sharedInstance().setActive(true) }
+    func reactivateSession() { VideoPlayer.setSessionActive(true) }
+
+    // MARK: - Audio session activation (iOS 5 selector split)
+
+    // `AVAudioSession.setActive(_:)` LOOKS like the old iOS 3 API, but the iOS 15.2 SDK
+    // declares a single method with a defaulted argument:
+    //
+    //     func setActive(_ active: Bool, options: SetActiveOptions = []) throws
+    //
+    // so it compiles to setActive:withOptions:error: — which is **iOS 6.0**. iOS 5 only
+    // has setActive:error:, so the call is an unrecognized selector there. That raises an
+    // NSException, NOT a Swift error, which means the `try?` around it catches nothing and
+    // the process aborts. It is the same default-argument trap as DispatchQueue.global()
+    // in CLAUDE.md, and it is invisible on iOS 6+ because the selector exists there.
+    //
+    // zirk-a's build, which runs on iOS 5, emits setActive:error: — that is the difference.
+    private static func setSessionActive(_ active: Bool) {
+        let session = AVAudioSession.sharedInstance()
+        #if IOS5_TARGET
+        // Reach the iOS 3-era selector through the runtime: the SDK no longer exposes it.
+        let sel = NSSelectorFromString("setActive:error:")
+        guard session.responds(to: sel) else { return }
+        typealias SetActiveFn = @convention(c)
+            (AnyObject, Selector, ObjCBool, UnsafeMutableRawPointer?) -> ObjCBool
+        let fn = unsafeBitCast(session.method(for: sel), to: SetActiveFn.self)
+        _ = fn(session, sel, ObjCBool(active), nil)
+        #else
+        try? session.setActive(active)
+        #endif
+    }
 
     // MARK: - Audio session
 
@@ -530,7 +559,7 @@ class VideoPlayer {
     private func configureAudioSession() {
         let s = AVAudioSession.sharedInstance()
         try? s.setCategory(.playback)
-        try? s.setActive(true)
+        VideoPlayer.setSessionActive(true)
     }
 
     // MARK: - Ticker (now-playing + resume persistence, independent of any VC)
