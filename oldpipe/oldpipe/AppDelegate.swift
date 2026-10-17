@@ -133,11 +133,26 @@ enum AppSettings {
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
+
+    // Checkpoint 3. UIApplicationMain builds the delegate before calling any of its
+    // methods, so reaching here means the app image, the Swift runtime and
+    // UIApplicationMain itself are all alive — narrowing the gap that marker 4 closes.
+    override init() {
+        super.init()
+        CrashLog.mark("3. AppDelegate.init: UIApplicationMain reached delegate creation")
+    }
+
     var window: UIWindow?
     private var miniBar: MiniPlayerBar?
 
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        // FIRST statement in the app's own code. If the log file is missing or empty after a
+        // crash, the process died before this line — i.e. in dyld, the entry stub or Swift
+        // runtime init — which narrows the search as sharply as any breadcrumb could.
+        CrashLog.install()
+
+        CrashLog.mark("nav: building HomeVC")
         let nav = UINavigationController(rootViewController: HomeVC())
         nav.navigationBar.barStyle = .black
         nav.navigationBar.tintColor = Theme.accent // YouTube red
@@ -154,6 +169,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         nav.topViewController?.extendedLayoutIncludesOpaqueBars = false
         #endif
 
+        CrashLog.mark("window: creating")
         let win = PlayerWindow(frame: UIScreen.main.bounds)
         win.backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
         win.rootViewController = nav
@@ -162,6 +178,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         // Persistent mini player bar at the bottom of the window. It polls
         // VideoPlayer.shared and reopens the full player on tap.
+        CrashLog.mark("miniBar: creating")
         let barH = MiniPlayerBar.barHeight
         let bar = MiniPlayerBar(frame: CGRect(x: 0, y: win.bounds.height - barH,
                                               width: win.bounds.width, height: barH))
@@ -179,6 +196,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
         // Required for lock-screen / headset transport controls (routed via PlayerWindow).
         UIApplication.shared.beginReceivingRemoteControlEvents()
+        CrashLog.mark("didFinishLaunching: OK")
         return true
     }
 

@@ -81,7 +81,7 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         tableView.separatorColor = UIColor(white: 0.2, alpha: 1)
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.register(ChannelCell.self, forCellReuseIdentifier: ChannelCell.reuseId)
+        tableView.registerCell(ChannelCell.self, ChannelCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tableView.tableFooterView = UIView()   // hide separators on empty rows (iOS 6)
         // Membership editing happens in edit mode, so rows must stay tappable there.
@@ -293,7 +293,7 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: ChannelCell.reuseId, for: indexPath) as! ChannelCell
+        let cell = tableView.dequeueCell(ChannelCell.self, ChannelCell.reuseId, for: indexPath)
         let channel = rows[indexPath.row]
         cell.configure(with: channel)
         cell.accessoryType = isEditingMembership
@@ -516,7 +516,7 @@ private class ChannelCell: UITableViewCell {
     private let nameLbl = UILabel()
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    required override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = bg
 

@@ -62,7 +62,7 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
         searchBar.autoresizingMask = iPadFlexWidth
         view.addSubview(searchBar)
 
-        tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
+        tableView.registerCell(VideoRowCell.self, VideoRowCell.reuseId)
         tableView.frame = CGRect(x: 0, y: 44, width: w, height: h - navH - 44)
         // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
         // portrait-locked in the pbxproj so autoresizing never triggers there.
@@ -111,7 +111,7 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
+        let cell = tableView.dequeueCell(VideoRowCell.self, VideoRowCell.reuseId, for: indexPath)
         cell.configure(with: results[indexPath.row])
         return cell
     }

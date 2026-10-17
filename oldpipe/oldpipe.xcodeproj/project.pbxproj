@@ -45,6 +45,7 @@
 		BB000001000000000000BC26 /* ChannelGroupManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB26 /* ChannelGroupManager.swift */; };
 		BB000001000000000000BC27 /* YTPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB27 /* YTPlaylist.swift */; };
 		BB000001000000000000BC2A /* Comment.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2A /* Comment.swift */; };
+		BB000001000000000000BC2E /* CrashLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2E /* CrashLog.swift */; };
 		BB000001000000000000BC29 /* YTPlaylistVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB29 /* YTPlaylistVC.swift */; };
 		BB000001000000000000BC1E /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1E /* CastSession.swift */; };
 		BB000001000000000000BC1F /* StreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1F /* StreamResolver.swift */; };
@@ -80,6 +81,8 @@
 		BB000001000000000000BC11 /* VideoRowCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB11 /* VideoRowCell.swift */; };
 		BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB13 /* MiniPlayerBar.swift */; };
 		BB000001000000000000BC2B /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2B /* Theme.swift */; };
+		BB000001000000000000BC2C /* TableViewCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2C /* TableViewCompat.swift */; };
+		BB000001000000000000BC2D /* ios5_start.S in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2D /* ios5_start.S */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -141,6 +144,7 @@
 		BB000001000000000000BB26 /* ChannelGroupManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelGroupManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB27 /* YTPlaylist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YTPlaylist.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2A /* Comment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Comment.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB2E /* CrashLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashLog.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB29 /* YTPlaylistVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YTPlaylistVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1E /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1F /* StreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamResolver.swift; sourceTree = "<group>"; };
@@ -176,6 +180,8 @@
 		BB000001000000000000BB11 /* VideoRowCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRowCell.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB13 /* MiniPlayerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerBar.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2B /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB2C /* TableViewCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableViewCompat.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB2D /* ios5_start.S */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = ios5_start.S; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -294,6 +300,7 @@
 				BB000001000000000000BB03 /* curl_bridge.c */,
 				BB000001000000000000BB04 /* atomic_stubs.c */,
 				BB000001000000000000BB05 /* atomic_stubs.S */,
+				BB000001000000000000BB2D /* ios5_start.S */,
 			);
 			name = Networking;
 			path = Networking;
@@ -315,6 +322,7 @@
 				BB000001000000000000BB26 /* ChannelGroupManager.swift */,
 				BB000001000000000000BB27 /* YTPlaylist.swift */,
 				BB000001000000000000BB2A /* Comment.swift */,
+				BB000001000000000000BB2E /* CrashLog.swift */,
 				BB000001000000000000BB12 /* VideoPlayer.swift */,
 			);
 			name = Models;
@@ -328,6 +336,7 @@
 				BB000001000000000000BB11 /* VideoRowCell.swift */,
 				BB000001000000000000BB13 /* MiniPlayerBar.swift */,
 				BB000001000000000000BB2B /* Theme.swift */,
+				BB000001000000000000BB2C /* TableViewCompat.swift */,
 			);
 			name = Views;
 			path = Views;
@@ -514,6 +523,7 @@
 				BB000001000000000000BC26 /* ChannelGroupManager.swift in Sources */,
 				BB000001000000000000BC27 /* YTPlaylist.swift in Sources */,
 				BB000001000000000000BC2A /* Comment.swift in Sources */,
+				BB000001000000000000BC2E /* CrashLog.swift in Sources */,
 				BB000001000000000000BC29 /* YTPlaylistVC.swift in Sources */,
 				BB000001000000000000BC1E /* CastSession.swift in Sources */,
 				BB000001000000000000BC1F /* StreamResolver.swift in Sources */,
@@ -549,6 +559,8 @@
 				BB000001000000000000BC11 /* VideoRowCell.swift in Sources */,
 				BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */,
 				BB000001000000000000BC2B /* Theme.swift in Sources */,
+				BB000001000000000000BC2C /* TableViewCompat.swift in Sources */,
+				BB000001000000000000BC2D /* ios5_start.S in Sources */,
 				A34362D62FD764210064ADE1 /* ViewController.swift in Sources */,
 				A34362FF2FD764260064ADE1 /* AppDelegate.swift in Sources */,
 			);

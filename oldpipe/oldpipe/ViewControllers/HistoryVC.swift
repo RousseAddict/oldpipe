@@ -45,7 +45,7 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
         tableView.separatorColor = UIColor(white: 0.2, alpha: 1)
         tableView.dataSource = self
         tableView.delegate = self
-        tableView.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
+        tableView.registerCell(VideoRowCell.self, VideoRowCell.reuseId)
         tableView.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tableView.tableFooterView = UIView()   // hide separators on empty rows (iOS 6)
         // iPad rotates natively; these masks reflow the layout in landscape. iPhone is
@@ -123,7 +123,7 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
+        let cell = tableView.dequeueCell(VideoRowCell.self, VideoRowCell.reuseId, for: indexPath)
         let video = videos[indexPath.row]
         cell.configure(with: video)
         cell.playedFraction = playedFrac[video.id] ?? 0
