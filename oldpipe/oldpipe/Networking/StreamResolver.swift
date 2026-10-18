@@ -55,7 +55,11 @@ struct ResolvedStream {
 // currently-playing iOS-6 stream. `.local` = a completed download; `.remote` = a raw
 // googlevideo URL not yet proxy-wrapped.
 enum PreparedStream {
-    case local(URL)
+    // A completed download, carried as the VIDEO ID rather than a URL: an HLS bundle's URL is a
+    // StreamProxy route, and registering one bumps the proxy generation — which would abort the
+    // currently-playing stream at prepare time, the exact thing this split exists to avoid.
+    // finalize() builds it at the moment of the switch.
+    case localDownload(String)
     // Carries the FULL streams list (not just the picked URL) so finalize can apply the
     // Settings > Default Video Quality preference at the moment of playback — deciding at
     // prepare time would be equally valid, but keeping the raw list defers the HLS-vs-360p
@@ -138,8 +142,9 @@ final class StreamResolver {
     // argument is nil when nothing playable could be resolved.
     static func resolve(_ video: Video, preferredItag: Int? = nil,
                         completion: @escaping (ResolvedStream?) -> Void) {
-        if DownloadManager.isDownloaded(video.id) {
-            let url = URL(fileURLWithPath: DownloadManager.filePath(for: video.id))
+        // A progressive download is a plain file; an HLS bundle goes back through StreamProxy.
+        // Both are local (no network, no reconnect watchdog) — see DownloadManager.playbackURL.
+        if DownloadManager.isDownloaded(video.id), let url = DownloadManager.playbackURL(for: video.id) {
             DebugLog.log("StreamResolver", "resolve id=\(video.id) -> local download")
             completion(ResolvedStream(url: url, isLocal: true))
             return
@@ -195,8 +200,7 @@ final class StreamResolver {
     // playable.
     static func prepare(_ video: Video, completion: @escaping (PreparedStream?) -> Void) {
         if DownloadManager.isDownloaded(video.id) {
-            let url = URL(fileURLWithPath: DownloadManager.filePath(for: video.id))
-            completion(.local(url))
+            completion(.localDownload(video.id))
             return
         }
         YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _, _ in
@@ -214,7 +218,8 @@ final class StreamResolver {
     // the correct moment — the actual switch). Returns nil if the URL can't be built.
     static func finalize(_ prepared: PreparedStream) -> ResolvedStream? {
         switch prepared {
-        case .local(let url):
+        case .localDownload(let videoId):
+            guard let url = DownloadManager.playbackURL(for: videoId) else { return nil }
             return ResolvedStream(url: url, isLocal: true)
         case .remote(let streams):
             if let vStream = defaultQualityStream(streams), let r = hlsResolvedStream(vStream, streams) {

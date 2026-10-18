@@ -62,6 +62,29 @@ enum AppSettings {
         }
     }
 
+    private static let defaultDownloadQualityKey = "default_download_quality"
+
+    // Which tier the download modal preselects. "auto" (the default) picks the muxed 360p
+    // stream — the smallest file and the only one that needs no transmuxing. "480"/"720"/"1080"
+    // preselect that HLS tier, stepping DOWN when the video doesn't publish it, exactly like
+    // defaultQuality does for playback. String-backed for the same 5.1.5 `as? Int` reason.
+    static var defaultDownloadQuality: String {
+        get { UserDefaults.standard.string(forKey: defaultDownloadQualityKey) ?? "auto" }
+        set {
+            UserDefaults.standard.set(newValue, forKey: defaultDownloadQualityKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+
+    static func defaultDownloadQualityLabel() -> String {
+        switch defaultDownloadQuality {
+        case "480": return "480p"
+        case "720": return "720p"
+        case "1080": return "1080p"
+        default: return "Auto (360p)"
+        }
+    }
+
     private static let defaultFpsKey = "default_fps"
 
     // "30" (the default) or "60": which variant to take when a video publishes BOTH at the

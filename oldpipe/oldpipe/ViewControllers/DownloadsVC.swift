@@ -7,6 +7,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
 
     private var videos: [Video] = []
     private var sizeText: [String: String] = [:]   // precomputed per CLAUDE.md (no per-cell file I/O)
+    private var qualityText: [String: String] = [:]  // ditto — a UserDefaults scan per cell would be worse
     private var incomplete: Set<String> = []       // ids of partial (unfinished) downloads
     private var playedFrac: [String: CGFloat] = [:] // resume-position / duration, for the progress bar
     private var didSetupUI = false
@@ -91,10 +92,12 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
     private func reload() {
         videos = DownloadManager.all()
         sizeText.removeAll()
+        qualityText.removeAll()
         incomplete.removeAll()
         playedFrac.removeAll()
         for v in videos {
             sizeText[v.id] = DownloadManager.fileSizeText(for: v.id)
+            qualityText[v.id] = DownloadManager.qualityLabel(for: v.id)
             if !DownloadManager.isComplete(v.id) { incomplete.insert(v.id) }
             if DownloadManager.isWatched(v.id) {
                 playedFrac[v.id] = 1   // fully played → full bar (resume position is cleared)
@@ -145,7 +148,10 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         } else if isPartial {
             status = "Incomplete" + (sz.isEmpty ? "" : " (\(sz))")
         } else {
-            status = sz
+            // "720p • 48.2 MB" — the quality an entry was saved at is otherwise invisible now
+            // that a download is no longer always 360p.
+            let q = qualityText[video.id] ?? ""
+            status = [q, sz].filter { !$0.isEmpty }.joined(separator: " \u{2022} ")
         }
         cell.detailTextLabel?.textColor = (isDownloading || isPartial)
             ? UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)   // amber for in-progress / partial

@@ -764,7 +764,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     private func updateDownloadButton() {
         if DownloadManager.isDownloaded(video.id) {
-            downloadBtn?.setTitle("Downloaded \u{2713}", for: .normal)
+            // Name the quality it was saved at, so a 360p copy is visibly not the 1080p one.
+            let q = DownloadManager.qualityLabel(for: video.id)
+            downloadBtn?.setTitle(q.isEmpty ? "Downloaded \u{2713}" : "Downloaded \(q) \u{2713}",
+                                  for: .normal)
             downloadBtn?.isEnabled = false
             downloadBtn?.backgroundColor = UIColor(red: 0.15, green: 0.4, blue: 0.15, alpha: 1)
         } else {
@@ -2614,12 +2617,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // MARK: - Playback
 
     @objc private func playTapped() {
-        // Offline copy takes priority.
+        // Offline copy takes priority. A progressive download plays off disk; an HLS bundle
+        // is served back through StreamProxy (AVPlayer won't open a file:// playlist) — still
+        // local either way, so isLocal: true and no reconnect watchdog.
         if DownloadManager.isDownloaded(video.id) {
-            playBtn?.isHidden = true
-            statusLabel?.isHidden = true
-            startPlayback(url: URL(fileURLWithPath: DownloadManager.filePath(for: video.id)), isLocal: true)
-            return
+            if let offline = DownloadManager.playbackURL(for: video.id) {
+                playBtn?.isHidden = true
+                statusLabel?.isHidden = true
+                startPlayback(url: offline, isLocal: true)
+                return
+            }
+            DebugLog.log("Player", "id=\(video.id) offline copy unplayable — falling back to stream")
         }
 
         // Retry after a hard failure: fetch a fresh player response first, then come back
@@ -2698,19 +2706,122 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
+    // MARK: - Download
+
+    // One downloadable tier: either the muxed progressive stream (copied byte-for-byte) or a
+    // video-only H.264 tier that OfflineDownloader transmuxes against the DASH audio track.
+    private struct DownloadChoice {
+        let label: String           // "720p"
+        let stream: VideoStream
+        let isProgressive: Bool
+        let estimatedBytes: Int64
+    }
+
+    // Everything this video can be saved as, ascending. The progressive stream comes first
+    // because it is the cheapest and the only one that lands as a plain .mp4; the HLS tiers
+    // follow in StreamTiers order. Empty = nothing downloadable (streams not loaded yet, or an
+    // adaptive-only response with no audio track to mux against).
+    private func downloadChoices() -> [DownloadChoice] {
+        var out: [DownloadChoice] = []
+        if let p = preferredStream() {
+            out.append(DownloadChoice(label: qualityLabel(p), stream: p, isProgressive: true,
+                                      estimatedBytes: p.contentLength))
+        }
+        if let audio = audioStreamForHLS() {
+            for s in hlsQualityOptions() {
+                // A transmuxed TS carries the video + audio payload plus MPEG-TS framing
+                // (188-byte packets, PES headers, PAT/PMT) — about 5% over the DASH pair.
+                let raw = s.contentLength + audio.contentLength
+                let est = raw > 0 ? Int64(Double(raw) * 1.05) : 0
+                out.append(DownloadChoice(label: qualityLabel(s), stream: s, isProgressive: false,
+                                          estimatedBytes: est))
+            }
+        }
+        return out
+    }
+
     @objc private func downloadTapped() {
         guard !DownloadManager.isDownloaded(video.id) else { return }
-        // Downloads store a single self-contained file, so they need a muxed stream — the
-        // adaptive-only IOS fallback response has none to offer.
-        guard let preferred = preferredStream() else {
+        let choices = downloadChoices()
+        guard !choices.isEmpty else {
             statusLabel?.text = streams.isEmpty ? "Still loading streams..."
-                                               : "This video can't be downloaded (no muxed stream)"
+                                               : "This video can't be downloaded (no usable stream)"
             statusLabel?.isHidden = false
             return
         }
+
+        // Preselect the Settings default, stepping down to the best tier at or below it —
+        // same intent as defaultQualityStream, but over the download list (which also holds
+        // the progressive stream, and must always offer SOMETHING to preselect).
+        let already = DownloadManager.qualityLabel(for: video.id)
+        var preselect = choices.count - 1
+        let pref = AppSettings.defaultDownloadQuality
+        if pref == "auto" {
+            preselect = 0                                    // smallest: the progressive tier
+        } else if let order = StreamTiers.qualityOrder.firstIndex(of: pref) {
+            outer: for key in StreamTiers.qualityOrder[order...] {
+                for itag in StreamTiers.itags(forQuality: key) {
+                    if let i = choices.firstIndex(where: { $0.stream.itag == itag }) {
+                        preselect = i
+                        break outer
+                    }
+                }
+            }
+        }
+
+        let rows = choices.map { c -> DownloadOptionRow in
+            let detail = c.estimatedBytes > 0
+                ? String(format: "~%.0f MB", Double(c.estimatedBytes) / (1024.0 * 1024.0))
+                : (c.isProgressive ? "muxed" : "transmuxed")
+            return DownloadOptionRow(title: c.label, detail: detail,
+                                     mark: c.label == already ? "\u{2713}" : "",
+                                     enabled: true, tag: 0)
+        }
+
+        let section = DownloadOptionSection(title: "Quality", rows: rows,
+                                            initialSelection: preselect)
+        DownloadOptionsView.present(in: view, title: "Download", sections: [section],
+                                    confirmTitle: "Download") { [weak self] picked in
+            guard let self = self, let idx = picked.first,
+                  idx >= 0, idx < choices.count else { return }
+            self.beginDownload(choices[idx])
+        }
+    }
+
+    // Start the chosen download, warning first if the estimate doesn't fit on the device.
+    private func beginDownload(_ choice: DownloadChoice) {
+        let free = DownloadManager.freeDiskBytes()
+        // 50MB headroom so a download can't fill the volume to zero. free == 0 means the
+        // figure was unavailable — don't block on a number we couldn't read.
+        if free > 0, choice.estimatedBytes > 0, choice.estimatedBytes + 50 * 1024 * 1024 > free {
+            let alert = UIAlertView()
+            alert.title = "Not Enough Space"
+            alert.message = String(format: "%@ needs about %.0f MB but only %.0f MB is free.",
+                                   choice.label,
+                                   Double(choice.estimatedBytes) / (1024.0 * 1024.0),
+                                   Double(free) / (1024.0 * 1024.0))
+            alert.addButton(withTitle: "OK")
+            alert.cancelButtonIndex = 0
+            alert.show()
+            return
+        }
+
         downloadBtn?.isEnabled = false
         downloadBtn?.setTitle("Downloading...", for: .normal)
-        download(url: preferred.url)
+        statusLabel?.text = "Downloading \(choice.label)..."
+        statusLabel?.isHidden = false
+
+        if choice.isProgressive {
+            DownloadManager.startDownload(video, url: choice.stream.url, quality: choice.label)
+        } else if let audio = audioStreamForHLS() {
+            DownloadManager.startHLSDownload(video, videoStream: choice.stream,
+                                             audioStream: audio, quality: choice.label)
+        } else {
+            statusLabel?.text = "Download failed \u{2022} no audio track"
+            updateDownloadButton()
+            return
+        }
+        observeDownload()
     }
 
     // Load a URL into the singleton, attach the shared layer, and play once ready.
@@ -2803,14 +2914,6 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         objc_setAssociatedObject(self, &timerKey, timer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-    }
-
-    // Hand the transfer to DownloadManager (which owns the completion), then poll for UI.
-    // Because the manager — not this VC — holds the curl completion, the download keeps
-    // running and registers as complete even after this VC is popped.
-    private func download(url: String) {
-        DownloadManager.startDownload(video, url: url)
-        observeDownload()
     }
 
     // VC-owned poll timer that mirrors the manager-owned download's state into the UI.

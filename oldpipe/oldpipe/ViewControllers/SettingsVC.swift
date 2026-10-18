@@ -18,6 +18,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var copyBtn: UIButton?
     private var qualityBtn: UIButton?
     private var fpsBtn: UIButton?
+    private var downloadQualityBtn: UIButton?
     private var captionSizeBtn: UIButton?
     private var copyDebugBtn: UIButton?
     private var didSetupUI = false
@@ -143,6 +144,15 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         fBtn.addTarget(self, action: #selector(fpsTapped), for: .touchUpInside)
         scrollView.addSubview(fBtn)
         fpsBtn = fBtn
+        y += 44 + 12
+
+        y = addSubtitle("Quality preselected in the download screen. Auto saves the small muxed 360p file; higher tiers are transmuxed on the device as they download.",
+                        at: y, width: contentW, pad: pad)
+
+        let dqBtn = makeButton("Download Quality: \(AppSettings.defaultDownloadQualityLabel())", at: y, width: contentW, pad: pad, accent: false)
+        dqBtn.addTarget(self, action: #selector(downloadQualityTapped), for: .touchUpInside)
+        scrollView.addSubview(dqBtn)
+        downloadQualityBtn = dqBtn
         y += 44 + 12
 
         y = addSubtitle("Size of the closed-caption text during playback. Auto scales it with the size of the video on screen.",
@@ -323,6 +333,22 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         sheet.show(in: view)
     }
 
+    // Tag 13 — the tags here are a separate space from VideoPlayerVC's (10 = playback quality,
+    // 11 = caption size, 12 = frame rate, 13 = download quality).
+    @objc private func downloadQualityTapped() {
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.tag = 13
+        sheet.title = "Download Quality"
+        sheet.addButton(withTitle: "Auto (360p)")
+        sheet.addButton(withTitle: "480p")
+        sheet.addButton(withTitle: "720p")
+        sheet.addButton(withTitle: "1080p")
+        sheet.addButton(withTitle: "Cancel")
+        sheet.cancelButtonIndex = 4
+        sheet.show(in: view)
+    }
+
     @objc private func captionSizeTapped() {
         let sheet = UIActionSheet()
         sheet.delegate = self
@@ -344,6 +370,13 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
             guard buttonIndex >= 0, buttonIndex < values.count else { return }
             AppSettings.defaultFps = values[buttonIndex]
             fpsBtn?.setTitle("Frame Rate: \(AppSettings.defaultFpsLabel())", for: .normal)
+            return
+        }
+        if actionSheet.tag == 13 {
+            let values = ["auto", "480", "720", "1080"]
+            guard buttonIndex >= 0, buttonIndex < values.count else { return }
+            AppSettings.defaultDownloadQuality = values[buttonIndex]
+            downloadQualityBtn?.setTitle("Download Quality: \(AppSettings.defaultDownloadQualityLabel())", for: .normal)
             return
         }
         if actionSheet.tag == 11 {

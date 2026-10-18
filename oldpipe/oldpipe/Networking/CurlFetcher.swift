@@ -32,6 +32,35 @@ private class CurlDownloadBox {
     var progressHandler: ((Float) -> Void)?
 }
 
+// MARK: - Ranged GET
+
+// Accumulator for one bounded ranged GET. `shouldAbort` is polled from the libcurl progress
+// callback (off the main thread) so a caller can kill a mid-flight transfer: StreamProxy uses
+// it for its superseded-generation check, OfflineDownloader for user cancellation.
+final class CurlRangeCtx {
+    var data = Data()
+    var aborted = false
+    let shouldAbort: () -> Bool
+    init(shouldAbort: @escaping () -> Bool) { self.shouldAbort = shouldAbort }
+}
+
+private let curlRangeWriteCallback: @convention(c) (UnsafeRawPointer?, Int, Int, UnsafeMutableRawPointer?) -> Int = { ptr, size, nmemb, userdata in
+    let bytes = size * nmemb
+    guard let ptr = ptr, let userdata = userdata else { return 0 }
+    let ctx = Unmanaged<CurlRangeCtx>.fromOpaque(userdata).takeUnretainedValue()
+    if ctx.aborted { return 0 }
+    ctx.data.append(Data(bytes: ptr, count: bytes))
+    return bytes
+}
+
+private let curlRangeProgressCallback: @convention(c) (UnsafeMutableRawPointer?, Int64, Int64, Int64, Int64) -> Int32 = { clientp, _, _, _, _ in
+    guard let clientp = clientp else { return 0 }
+    let ctx = Unmanaged<CurlRangeCtx>.fromOpaque(clientp).takeUnretainedValue()
+    if ctx.aborted { return 1 }
+    if ctx.shouldAbort() { ctx.aborted = true; return 1 }
+    return 0
+}
+
 // MARK: - CurlFetcher
 
 class CurlFetcher {
@@ -81,6 +110,50 @@ class CurlFetcher {
     // no new feed transfer starts until the stream is flowing. Calls MUST be balanced 1:1.
     static func pauseFeed() { feedTurnstile.wait() }
     static func resumeFeed() { feedTurnstile.signal() }
+
+    // googlevideo rejects a generic UA; every CDN transfer (proxy, transmux, offline download)
+    // presents the same android client string the player response was minted for.
+    static let googlevideoUserAgent = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"
+
+    // SYNCHRONOUS bounded ranged GET against the googlevideo CDN — the one primitive both the
+    // live transmux path (StreamProxy.fetchRange) and the offline downloader need. Callers are
+    // already on a background thread (a proxy connection thread, or OfflineDownloader's serial
+    // queue), so blocking here is the point.
+    //
+    // Pauses the feed lane for the duration — same anti-concurrent-TLS rule as the proxy's
+    // streaming path — but unlike a stream these transfers are short and bounded, so the
+    // pause/resume brackets the whole call.
+    //
+    // Requires the EXACT ranged byte count: a 200 (server ignored the range) or a truncated
+    // body would silently corrupt fragment offsets downstream. Returns nil on network error,
+    // non-206, abort, or any short/over-long body.
+    static func rangeFetch(url: String, start: Int64, end: Int64, timeout: Int = 60,
+                           shouldAbort: @escaping () -> Bool = { false }) -> Data? {
+        guard end >= start else { return nil }
+        _ = curlGlobalInit
+        let ctx = CurlRangeCtx(shouldAbort: shouldAbort)
+        let ctxPtr = Unmanaged.passUnretained(ctx).toOpaque()
+
+        guard let h = curl_bridge_init() else { return nil }
+        defer { curl_bridge_cleanup(h) }
+        url.withCString { curl_bridge_set_url(h, $0) }
+        curl_bridge_set_ssl_noverify(h)
+        curl_bridge_set_follow_redirects(h)
+        curl_bridge_set_timeout(h, CLong(timeout))
+        googlevideoUserAgent.withCString { curl_bridge_set_useragent(h, $0) }
+        "Range: bytes=\(start)-\(end)".withCString { curl_bridge_add_header(h, $0) }
+        curl_bridge_set_write_fn(h, curlRangeWriteCallback, ctxPtr)
+        curl_bridge_set_progress_fn(h, curlRangeProgressCallback, ctxPtr)
+
+        pauseFeed()
+        defer { resumeFeed() }
+
+        let rc = curl_bridge_perform(h)
+        let code = curl_bridge_response_code(h)
+        let want = end - start + 1
+        guard rc == 0, code == 206, !ctx.aborted, Int64(ctx.data.count) == want else { return nil }
+        return ctx.data
+    }
 
     // Submit background work. highPriority runs on the dedicated serial highQueue (its own thread)
     // and CLOSES the feed turnstile for its duration so no new feed transfer competes for TLS.
