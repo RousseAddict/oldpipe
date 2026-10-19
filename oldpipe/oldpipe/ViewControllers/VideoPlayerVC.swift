@@ -327,11 +327,18 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.layer.removeFromSuperlayer()
     }
 
+    // An audio-only download has no video track, so hiding the thumbnail would leave a black
+    // rectangle for the whole track. Keep the artwork up instead — it doubles as the "this is
+    // audio" cue. Every site that reveals live playback goes through this.
+    private func hideThumbForPlayback() {
+        thumbView?.isHidden = !DownloadManager.isAudioOnly(video.id)
+    }
+
     // Reattach onto already-running playback (from mini bar / returning to the VC).
     private func showActivePlayback() {
         playBtn?.isHidden = true
         statusLabel?.isHidden = true
-        thumbView?.isHidden = true
+        hideThumbForPlayback()
         attachLayer()
         sp.setArtwork(thumbView?.image)
         showControls()
@@ -2711,9 +2718,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // One downloadable tier: either the muxed progressive stream (copied byte-for-byte) or a
     // video-only H.264 tier that OfflineDownloader transmuxes against the DASH audio track.
     private struct DownloadChoice {
-        let label: String           // "720p"
+        let label: String           // "720p", "Audio only"
         let stream: VideoStream
         let isProgressive: Bool
+        let isAudioOnly: Bool
         let estimatedBytes: Int64
     }
 
@@ -2725,7 +2733,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         var out: [DownloadChoice] = []
         if let p = preferredStream() {
             out.append(DownloadChoice(label: qualityLabel(p), stream: p, isProgressive: true,
-                                      estimatedBytes: p.contentLength))
+                                      isAudioOnly: false, estimatedBytes: p.contentLength))
         }
         if let audio = audioStreamForHLS() {
             for s in hlsQualityOptions() {
@@ -2734,10 +2742,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 let raw = s.contentLength + audio.contentLength
                 let est = raw > 0 ? Int64(Double(raw) * 1.05) : 0
                 out.append(DownloadChoice(label: qualityLabel(s), stream: s, isProgressive: false,
-                                          estimatedBytes: est))
+                                          isAudioOnly: false, estimatedBytes: est))
             }
         }
         return out
+    }
+
+    // The audio-only choice, when this video publishes a transmuxable audio track. Listed in
+    // its own Format section rather than among the qualities: it is a different KIND of
+    // download, and mixing it into a resolution ladder reads as "audio is a quality below 360p".
+    private func audioDownloadChoice() -> DownloadChoice? {
+        guard let audio = audioStreamForHLS() else { return nil }
+        let est = audio.contentLength > 0 ? Int64(Double(audio.contentLength) * 1.05) : 0
+        return DownloadChoice(label: "Audio only", stream: audio, isProgressive: false,
+                              isAudioOnly: true, estimatedBytes: est)
     }
 
     @objc private func downloadTapped() {
@@ -2769,21 +2787,40 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             }
         }
 
-        let rows = choices.map { c -> DownloadOptionRow in
+        // Two groups, ONE choice: video tiers, then audio-only. Audio is a different kind of
+        // download, not a rung below 360p, so it gets its own heading.
+        let audioChoice = audioDownloadChoice()
+        let alreadyAudio = DownloadManager.isAudioOnly(video.id)
+
+        func row(_ c: DownloadChoice, downloaded: Bool) -> DownloadOptionRow {
             let detail = c.estimatedBytes > 0
                 ? String(format: "~%.0f MB", Double(c.estimatedBytes) / (1024.0 * 1024.0))
                 : (c.isProgressive ? "muxed" : "transmuxed")
             return DownloadOptionRow(title: c.label, detail: detail,
-                                     mark: c.label == already ? "\u{2713}" : "",
+                                     mark: downloaded ? "\u{2713}" : "",
                                      enabled: true, tag: 0)
         }
 
-        let section = DownloadOptionSection(title: "Quality", rows: rows,
-                                            initialSelection: preselect)
-        DownloadOptionsView.present(in: view, title: "Download", sections: [section],
-                                    confirmTitle: "Download") { [weak self] picked in
-            guard let self = self, let idx = picked.first,
-                  idx >= 0, idx < choices.count else { return }
+        var sections = [DownloadOptionSection(
+            title: "Video",
+            rows: choices.map { row($0, downloaded: !alreadyAudio && $0.label == already) },
+            initialSelection: audioChoice != nil && alreadyAudio ? -1 : preselect)]
+        if let a = audioChoice {
+            sections.append(DownloadOptionSection(
+                title: "Audio",
+                rows: [row(a, downloaded: alreadyAudio)],
+                initialSelection: alreadyAudio ? 0 : -1))
+        }
+
+        DownloadOptionsView.present(in: view, title: "Download", sections: sections,
+                                    confirmTitle: "Download", exclusive: true) { [weak self] picked in
+            guard let self = self else { return }
+            // Exclusive: exactly one section carries a non-negative row index.
+            if picked.count > 1, picked[1] >= 0, let a = audioChoice {
+                self.beginDownload(a)
+                return
+            }
+            guard let idx = picked.first, idx >= 0, idx < choices.count else { return }
             self.beginDownload(choices[idx])
         }
     }
@@ -2811,7 +2848,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         statusLabel?.text = "Downloading \(choice.label)..."
         statusLabel?.isHidden = false
 
-        if choice.isProgressive {
+        if choice.isAudioOnly {
+            DownloadManager.startAudioDownload(video, audioStream: choice.stream, quality: choice.label)
+        } else if choice.isProgressive {
             DownloadManager.startDownload(video, url: choice.stream.url, quality: choice.label)
         } else if let audio = audioStreamForHLS() {
             DownloadManager.startHLSDownload(video, videoStream: choice.stream,
@@ -2834,7 +2873,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             guard let self = self else { return }
             DebugLog.log("Player", "startPlayback ready id=\(self.video.id)")
             self.hideSpinner()
-            self.thumbView?.isHidden = true
+            self.hideThumbForPlayback()
             self.statusLabel?.isHidden = true
             self.sp.applyResumeAndPlay()
             self.showControls()
@@ -2868,7 +2907,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             guard let self = self else { return }
             DebugLog.log("Player", "tryStream ready id=\(self.video.id)")
             self.hideSpinner()
-            self.thumbView?.isHidden = true
+            self.hideThumbForPlayback()
             self.statusLabel?.isHidden = true
             self.sp.applyResumeAndPlay()
             self.showControls()

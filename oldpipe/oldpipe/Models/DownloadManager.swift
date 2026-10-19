@@ -94,10 +94,20 @@ class DownloadManager {
         return (entry["dl_quality"] as? String) ?? ""
     }
 
+    // True when this download holds AUDIO ONLY. Stored rather than inferred, because an
+    // audio-only bundle is byte-shaped exactly like a video one. The player uses it to keep the
+    // thumbnail on screen instead of showing an empty black video area.
+    // NSNumber-boxed: a direct `as? Bool` returns nil on the 5.1.5 runtime.
+    static func isAudioOnly(_ videoId: String) -> Bool {
+        guard let entry = rawList().first(where: { ($0["id"] as? String) == videoId }) else { return false }
+        return ((entry["dl_audio"] as? NSNumber)?.boolValue) ?? false
+    }
+
     // `quality` nil = keep whatever the existing entry recorded. That is what lets register()
     // flip the complete flag at the end of a download without wiping the quality that
     // startHLSDownload stored when it began.
-    private static func store(_ video: Video, complete: Bool, quality: String? = nil) {
+    private static func store(_ video: Video, complete: Bool, quality: String? = nil,
+                              audioOnly: Bool? = nil) {
         var list = rawList()
         let existing = list.first { ($0["id"] as? String) == video.id }
         list.removeAll { ($0["id"] as? String) == video.id }
@@ -107,6 +117,11 @@ class DownloadManager {
             dict["dl_quality"] = q
         } else if let q = existing?["dl_quality"] as? String {
             dict["dl_quality"] = q
+        }
+        if let a = audioOnly {
+            dict["dl_audio"] = a
+        } else if let a = existing?["dl_audio"] {
+            dict["dl_audio"] = a
         }
         list.insert(dict, at: 0)
         UserDefaults.standard.set(list, forKey: defaultsKey)
@@ -172,7 +187,7 @@ class DownloadManager {
         if inFlight[video.id] != nil { return }
         let path = filePath(for: video.id)
         removeFiles(video.id)             // drop an HLS bundle left by a previous quality
-        store(video, complete: false, quality: quality)  // visible (Incomplete) while in progress
+        store(video, complete: false, quality: quality, audioOnly: false)  // visible (Incomplete) while in progress
         inFlight[video.id] = 0
         CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
             inFlight[video.id] = p
@@ -197,14 +212,33 @@ class DownloadManager {
         } else {
             try? FileManager.default.removeItem(atPath: filePath(for: video.id))
         }
-        store(video, complete: false, quality: quality)
+        store(video, complete: false, quality: quality, audioOnly: false)
         inFlight[video.id] = 0
         OfflineDownloader.start(video: video, videoStream: videoStream, audioStream: audioStream,
                                 progress: { p in
             inFlight[video.id] = p
         }) { success in
             inFlight[video.id] = nil
-            if success { store(video, complete: true, quality: quality) }
+            if success { store(video, complete: true, quality: quality, audioOnly: false) }
+        }
+    }
+
+    // Audio-only download (itag 140). Same bundle shape as a video download — the entry's
+    // dl_audio flag is what tells playback to keep the artwork on screen.
+    static func startAudioDownload(_ video: Video, audioStream: VideoStream, quality: String) {
+        if inFlight[video.id] != nil { return }
+        // Any previous download of this video held different content (video, or another
+        // bitrate), so its segments must not be reused by the resume check.
+        if qualityLabel(for: video.id) != quality || !isAudioOnly(video.id) {
+            removeFiles(video.id)
+        }
+        store(video, complete: false, quality: quality, audioOnly: true)
+        inFlight[video.id] = 0
+        OfflineDownloader.startAudio(video: video, audioStream: audioStream, progress: { p in
+            inFlight[video.id] = p
+        }) { success in
+            inFlight[video.id] = nil
+            if success { store(video, complete: true, quality: quality, audioOnly: true) }
         }
     }
 

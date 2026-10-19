@@ -420,11 +420,17 @@ private final class TSWriter {
         psi(0, table: table)
     }
 
-    func writePMT() {
+    // audioOnly omits the H.264 stream and moves the PCR onto the audio PID — a PMT that
+    // declares a video stream no segment ever carries makes AVPlayer wait for video forever.
+    // Defaulted so the existing video call site is unchanged.
+    func writePMT(audioOnly: Bool = false) {
+        let pcrPID = audioOnly ? audioPID : videoPID
         var t = Data([0x02, 0xB0, 0x00 /* len patched below */, 0x00, 0x01, 0xC1, 0x00, 0x00,
-                      UInt8(0xE0 | (videoPID >> 8)), UInt8(videoPID & 0xFF), 0xF0, 0x00])
-        // streams: H.264 on videoPID, ADTS AAC on audioPID
-        t.append(contentsOf: [0x1B, UInt8(0xE0 | (videoPID >> 8)), UInt8(videoPID & 0xFF), 0xF0, 0x00])
+                      UInt8(0xE0 | (pcrPID >> 8)), UInt8(pcrPID & 0xFF), 0xF0, 0x00])
+        // streams: H.264 on videoPID (video only), ADTS AAC on audioPID
+        if !audioOnly {
+            t.append(contentsOf: [0x1B, UInt8(0xE0 | (videoPID >> 8)), UInt8(videoPID & 0xFF), 0xF0, 0x00])
+        }
         t.append(contentsOf: [0x0F, UInt8(0xE0 | (audioPID >> 8)), UInt8(audioPID & 0xFF), 0xF0, 0x00])
         let sectionLen = t.count - 3 + 4  // after length field, + CRC
         t[t.startIndex + 2] = UInt8(sectionLen & 0xFF)
@@ -531,12 +537,18 @@ private final class TSWriter {
 // HLSTransmuxer.parse and passed back into playlist/range/mux calls. Immutable → safe to
 // share across StreamProxy's concurrent connection threads without locking.
 struct HLSStreamInfo {
-    fileprivate let vInit: VideoInitInfo
+    // nil for an AUDIO-ONLY stream (a music / background download). There is no video track to
+    // mux, and the audio fragments segment the stream on their own — which is actually the
+    // simpler case: the windowing below exists only to align audio onto VIDEO boundaries.
+    fileprivate let vInit: VideoInitInfo?
     fileprivate let aInit: AudioInitInfo
-    fileprivate let vSidx: Sidx
+    fileprivate let vSidx: Sidx?
     fileprivate let aSidx: Sidx
 
-    var segmentCount: Int { return vSidx.entries.count }
+    // The track that defines segment boundaries: video when there is one, else audio.
+    fileprivate var drivingSidx: Sidx { return vSidx ?? aSidx }
+    var isAudioOnly: Bool { return vSidx == nil }
+    var segmentCount: Int { return drivingSidx.entries.count }
 }
 
 final class HLSTransmuxer {
@@ -555,9 +567,22 @@ final class HLSTransmuxer {
         return HLSStreamInfo(vInit: vInit, aInit: aInit, vSidx: vSidx, aSidx: aSidx)
     }
 
-    // VOD playlist: one segment per video DASH fragment; ENDLIST → AVPlayer seeks natively.
+    // Audio-only counterpart: parse just the audio stream's head. One HLS segment per audio
+    // DASH fragment, no video track in the PMT. Used by audio-only downloads (itag 140), which
+    // cannot simply copy the fMP4 to disk — iOS 6 AVPlayer cannot play fragmented MP4 at all.
+    static func parseAudioOnly(audioHead: Data) -> HLSStreamInfo? {
+        guard let aInit = parseAudioInit(audioHead) else { return nil }
+        guard let aBox = mp4Boxes(in: audioHead).first(where: { $0.type == "sidx" }),
+              let aSidx = parseSidx(aBox, boxEndFileOffset: Int64(aBox.fileOffset + aBox.fullSize))
+        else { return nil }
+        return HLSStreamInfo(vInit: nil, aInit: aInit, vSidx: nil, aSidx: aSidx)
+    }
+
+    // VOD playlist: one segment per fragment of the driving track; ENDLIST → AVPlayer seeks
+    // natively (and reports an exact duration, which the scrubber and the premature-EOF
+    // watchdog both depend on).
     static func playlist(_ info: HLSStreamInfo) -> String {
-        let sidx = info.vSidx
+        let sidx = info.drivingSidx
         var m3u8 = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n"
         // Integer ceil — Double.rounded(.up) + Int(Double) interpolation renders "?" on the
         // 5.1.5 runtime shipped for iOS 6 (broken playlist → AVError -11800). Int64 math is safe.
@@ -578,14 +603,19 @@ final class HLSTransmuxer {
 
     // Absolute byte range of the video DASH fragment backing segment `seg`.
     static func videoRange(_ info: HLSStreamInfo, seg: Int) -> (start: Int64, end: Int64)? {
-        guard seg >= 0, seg < info.vSidx.entries.count else { return nil }
-        let e = info.vSidx.entries[seg]
+        guard let vSidx = info.vSidx, seg >= 0, seg < vSidx.entries.count else { return nil }
+        let e = vSidx.entries[seg]
         return (e.offset, e.offset + Int64(e.size) - 1)
     }
 
     // Absolute byte range covering every audio fragment overlapping segment `seg`'s time window.
+    // Audio-only: a segment IS one audio fragment, so there is no window to straddle.
     static func audioRange(_ info: HLSStreamInfo, seg: Int) -> (start: Int64, end: Int64)? {
-        guard seg >= 0, seg < info.vSidx.entries.count else { return nil }
+        guard seg >= 0, seg < info.segmentCount else { return nil }
+        if info.isAudioOnly {
+            let e = info.aSidx.entries[seg]
+            return (e.offset, e.offset + Int64(e.size) - 1)
+        }
         let (a0, a1) = audioWindow(info, seg: seg)
         var first = -1, last = -1
         for (i, st) in info.aSidx.startTimes.enumerated() {
@@ -600,8 +630,9 @@ final class HLSTransmuxer {
 
     // Transmux one segment: video fragment blob + audio blob (the ranges above) -> MPEG-TS.
     static func muxSegment(_ info: HLSStreamInfo, seg: Int, videoBlob: Data, audioBlob: Data) -> Data? {
-        guard seg >= 0, seg < info.vSidx.entries.count else { return nil }
-        guard let vSamples = parseFragments(videoBlob, defaults: info.vInit.defaults), !vSamples.isEmpty else { return nil }
+        guard let vInit = info.vInit, let vSidx = info.vSidx else { return nil }
+        guard seg >= 0, seg < vSidx.entries.count else { return nil }
+        guard let vSamples = parseFragments(videoBlob, defaults: vInit.defaults), !vSamples.isEmpty else { return nil }
         guard let aSamplesAll = parseFragments(audioBlob, defaults: info.aInit.defaults) else { return nil }
         // Trim audio to the video window — the fetched audio fragments straddle the segment
         // boundary; without the trim, boundary samples would be duplicated across segments.
@@ -617,11 +648,11 @@ final class HLSTransmuxer {
         // monotonic muxing; big A/V gaps stall AVPlayer's demuxer buffers.
         struct Item { let dts90: Int64; let write: (TSWriter) -> Void }
         var items: [Item] = []
-        let vts = info.vSidx.timescale
+        let vts = vSidx.timescale
         for s in vSamples {
             let dts90 = s.dts * 90000 / vts + ptsOffset
             let pts90 = (s.dts + s.ctsOffset) * 90000 / vts + ptsOffset
-            let es = annexB(s, nalLengthSize: info.vInit.nalLengthSize, sps: info.vInit.sps, pps: info.vInit.pps)
+            let es = annexB(s, nalLengthSize: vInit.nalLengthSize, sps: vInit.sps, pps: vInit.pps)
             let sync = s.isSync
             items.append(Item(dts90: dts90) { tw in
                 tw.writePES(pid: tw.videoPID, streamId: 0xE0, pts: pts90, dts: dts90, payload: es,
@@ -644,12 +675,40 @@ final class HLSTransmuxer {
         return w.out
     }
 
+    // Transmux one AUDIO-ONLY segment: one audio fragment -> MPEG-TS with a single AAC stream.
+    // Simpler than the A/V case — a segment is exactly one fragment, so there is no straddling
+    // window to trim and no interleaving to do. The first access unit carries the PCR and the
+    // random-access flag so each segment is independently seekable.
+    static func muxAudioSegment(_ info: HLSStreamInfo, seg: Int, audioBlob: Data) -> Data? {
+        guard info.isAudioOnly, seg >= 0, seg < info.aSidx.entries.count else { return nil }
+        guard let aSamples = parseFragments(audioBlob, defaults: info.aInit.defaults),
+              !aSamples.isEmpty else { return nil }
+
+        let w = TSWriter()
+        w.writePAT()
+        w.writePMT(audioOnly: true)
+
+        let ats = info.aSidx.timescale
+        var isFirst = true
+        for s in aSamples {
+            let pts90 = s.dts * 90000 / ats + ptsOffset
+            let es = adtsFrame(s.data, profile: info.aInit.aacProfile,
+                               freqIndex: info.aInit.freqIndex, channels: info.aInit.channelConfig)
+            w.writePES(pid: w.audioPID, streamId: 0xC0, pts: pts90, dts: nil, payload: es,
+                       randomAccess: isFirst, pcr: isFirst ? pts90 - 9000 : nil)
+            isFirst = false
+        }
+        guard w.ok else { return nil }
+        return w.out
+    }
+
     // Segment `seg`'s time window converted to the AUDIO track's timescale.
     private static func audioWindow(_ info: HLSStreamInfo, seg: Int) -> (Int64, Int64) {
-        let t0 = info.vSidx.startTimes[seg]
-        let t1 = t0 + info.vSidx.entries[seg].duration
-        let a0 = t0 * info.aSidx.timescale / info.vSidx.timescale
-        let a1 = t1 * info.aSidx.timescale / info.vSidx.timescale
+        guard let vSidx = info.vSidx else { return (0, 0) }   // audio-only never reaches here
+        let t0 = vSidx.startTimes[seg]
+        let t1 = t0 + vSidx.entries[seg].duration
+        let a0 = t0 * info.aSidx.timescale / vSidx.timescale
+        let a1 = t1 * info.aSidx.timescale / vSidx.timescale
         return (a0, a1)
     }
 }

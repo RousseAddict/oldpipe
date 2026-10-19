@@ -27,7 +27,7 @@ struct DownloadOptionRow {
 struct DownloadOptionSection {
     let title: String
     let rows: [DownloadOptionRow]
-    // Row index selected when the modal opens.
+    // Row index selected when the modal opens, or -1 for none.
     let initialSelection: Int
 }
 
@@ -64,6 +64,11 @@ final class DownloadOptionsView: UIView {
 
     private let sections: [DownloadOptionSection]
     private var selection: [Int]
+    // true = ONE choice across the whole modal (the sections are just groups: "Video" tiers vs
+    // "Audio only"). false = each section is an independent control. Download is exclusive;
+    // a later toggle-shaped section (captions) would want false, which is why this is a flag
+    // and not baked into the layout.
+    private let exclusive: Bool
     private let confirmTitle: String
     private var onConfirm: (([Int]) -> Void)?
 
@@ -91,10 +96,11 @@ final class DownloadOptionsView: UIView {
     // portrait-locked iOS 6/7 builds compile the mask to [] exactly as every other view does.
     @discardableResult
     static func present(in host: UIView, title: String, sections: [DownloadOptionSection],
-                        confirmTitle: String,
+                        confirmTitle: String, exclusive: Bool = false,
                         onConfirm: @escaping ([Int]) -> Void) -> DownloadOptionsView {
         let v = DownloadOptionsView(frame: host.bounds, title: title, sections: sections,
-                                    confirmTitle: confirmTitle, onConfirm: onConfirm)
+                                    confirmTitle: confirmTitle, exclusive: exclusive,
+                                    onConfirm: onConfirm)
         v.autoresizingMask = iPadFlexWidthHeight
         v.alpha = 0
         host.addSubview(v)
@@ -109,9 +115,11 @@ final class DownloadOptionsView: UIView {
     }
 
     private init(frame: CGRect, title: String, sections: [DownloadOptionSection],
-                 confirmTitle: String, onConfirm: @escaping ([Int]) -> Void) {
+                 confirmTitle: String, exclusive: Bool,
+                 onConfirm: @escaping ([Int]) -> Void) {
         self.sections = sections
         self.selection = sections.map { $0.initialSelection }
+        self.exclusive = exclusive
         self.confirmTitle = confirmTitle
         self.onConfirm = onConfirm
         super.init(frame: frame)
@@ -299,6 +307,9 @@ final class DownloadOptionsView: UIView {
         let idx = sender.tag
         guard idx >= 0, idx < rowIndexPaths.count else { return }
         let path = rowIndexPaths[idx]
+        if exclusive {
+            for i in selection.indices { selection[i] = -1 }
+        }
         selection[path.section] = path.row
         refreshSelectionMarks()
     }

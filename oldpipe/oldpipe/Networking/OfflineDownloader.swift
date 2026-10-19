@@ -57,6 +57,23 @@ final class OfflineDownloader {
         }
     }
 
+    // Audio-only download (itag 140): the same walk with no video track. The result is still an
+    // HLS bundle rather than a copied .m4a, because the DASH audio stream is FRAGMENTED MP4 and
+    // iOS 6 AVPlayer cannot play fMP4 at all — and because a playlist gives an exact duration,
+    // which a raw ADTS .aac would not (the scrubber and the premature-EOF watchdog need it).
+    static func startAudio(video: Video, audioStream: VideoStream,
+                           progress: @escaping (Float) -> Void,
+                           completion: @escaping (Bool) -> Void) {
+        clearCancel(video.id)
+        queue.async {
+            let ok = runAudio(video: video, aStream: audioStream, progress: progress)
+            DispatchQueue.main.async {
+                clearCancel(video.id)
+                completion(ok)
+            }
+        }
+    }
+
     // Stop a download. The in-flight ranged GET aborts within ~1s (libcurl progress callback)
     // and the segment loop exits at the next boundary; the completion still fires, with false.
     // Segments already written stay on disk so a later retry resumes from there.
@@ -176,7 +193,116 @@ final class OfflineDownloader {
         return true
     }
 
+    // Audio-only twin of run(). One segment per audio fragment, so there is no video range to
+    // fetch and no window to trim — see HLSTransmuxer.muxAudioSegment.
+    private static func runAudio(video: Video, aStream: VideoStream,
+                                 progress: @escaping (Float) -> Void) -> Bool {
+        let dir = DownloadManager.bundleDir(for: video.id)
+        guard ensureDir(dir) else {
+            DebugLog.log("Offline", "id=\(video.id) FAILED — cannot create \(dir)")
+            return false
+        }
+
+        var aURL = aStream.url
+        var parsed = audioHead(aURL, end: aStream.indexEnd, videoId: video.id)
+        if parsed == nil, let a = refreshAudio(video.id, aItag: aStream.itag) {
+            aURL = a.url
+            parsed = audioHead(aURL, end: a.indexEnd, videoId: video.id)
+        }
+        guard let info = parsed else {
+            DebugLog.log("Offline", "id=\(video.id) FAILED — could not parse audio head")
+            return false
+        }
+
+        let total = info.segmentCount
+        guard total > 0 else {
+            DebugLog.log("Offline", "id=\(video.id) FAILED — audio sidx has no segments")
+            return false
+        }
+
+        let m3u8 = HLSTransmuxer.playlist(info)
+        guard write(Data(m3u8.utf8), to: (dir as NSString).appendingPathComponent("index.m3u8")) else {
+            DebugLog.log("Offline", "id=\(video.id) FAILED — cannot write audio playlist")
+            return false
+        }
+
+        DebugLog.log("Offline", "id=\(video.id) start AUDIO itag=\(aStream.itag) segments=\(total)")
+
+        var refreshesLeft = maxRefreshes
+        var seg = 0
+        var done = 0
+        while seg < total {
+            if isCancelled(video.id) {
+                DebugLog.log("Offline", "id=\(video.id) audio cancelled at seg \(seg)/\(total)")
+                return false
+            }
+
+            let segPath = (dir as NSString).appendingPathComponent("seg\(seg).ts")
+            if fileSize(segPath) > 0 {
+                seg += 1; done += 1
+                report(done, total, progress)
+                continue
+            }
+
+            guard let ar = HLSTransmuxer.audioRange(info, seg: seg) else {
+                DebugLog.log("Offline", "id=\(video.id) FAILED — no audio range for seg \(seg)")
+                return false
+            }
+            guard let blob = CurlFetcher.rangeFetch(url: aURL, start: ar.start, end: ar.end,
+                                                    shouldAbort: { isCancelled(video.id) }) else {
+                if isCancelled(video.id) { return false }
+                guard refreshesLeft > 0, let a = refreshAudio(video.id, aItag: aStream.itag) else {
+                    DebugLog.log("Offline", "id=\(video.id) FAILED — audio seg \(seg) unfetchable")
+                    return false
+                }
+                refreshesLeft -= 1
+                aURL = a.url
+                DebugLog.log("Offline", "id=\(video.id) refreshed audio url at seg \(seg) (\(refreshesLeft) left)")
+                continue
+            }
+
+            guard let ts = HLSTransmuxer.muxAudioSegment(info, seg: seg, audioBlob: blob) else {
+                DebugLog.log("Offline", "id=\(video.id) FAILED — audio mux failed on seg \(seg)")
+                return false
+            }
+            guard write(ts, to: segPath) else {
+                DebugLog.log("Offline", "id=\(video.id) FAILED — cannot write audio seg \(seg) (disk full?)")
+                return false
+            }
+
+            seg += 1; done += 1
+            report(done, total, progress)
+        }
+
+        DebugLog.log("Offline", "id=\(video.id) AUDIO COMPLETE \(total) segments")
+        return true
+    }
+
     // MARK: - Helpers
+
+    private static func audioHead(_ aURL: String, end: Int64, videoId: String) -> HLSStreamInfo? {
+        guard end > 0,
+              let head = CurlFetcher.rangeFetch(url: aURL, start: 0, end: end,
+                                                shouldAbort: { isCancelled(videoId) })
+        else { return nil }
+        return HLSTransmuxer.parseAudioOnly(audioHead: head)
+    }
+
+    // Same contract as refresh(), for the single-stream case.
+    private static func refreshAudio(_ videoId: String, aItag: Int) -> VideoStream? {
+        let box = RefreshBox()
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            YoutubeAPI.getStreams(videoId: videoId) { streams, _, _, _, _ in
+                if let a = streams.first(where: { $0.itag == aItag && $0.indexEnd > 0 }) {
+                    box.set((a, a))
+                }
+                sem.signal()
+            }
+        }
+        guard sem.wait(timeout: DispatchTime.now() + 90) == .success else { return nil }
+        return box.get()?.v
+    }
 
     private static func heads(vURL: String, aURL: String, vEnd: Int64, aEnd: Int64,
                               videoId: String) -> HLSStreamInfo? {
