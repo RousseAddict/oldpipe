@@ -62,26 +62,22 @@ enum AppSettings {
         }
     }
 
-    private static let defaultDownloadQualityKey = "default_download_quality"
+    private static let lastDownloadChoiceKey = "last_download_choice"
 
-    // Which tier the download modal preselects. "auto" (the default) picks the muxed 360p
-    // stream — the smallest file and the only one that needs no transmuxing. "480"/"720"/"1080"
-    // preselect that HLS tier, stepping DOWN when the video doesn't publish it, exactly like
-    // defaultQuality does for playback. String-backed for the same 5.1.5 `as? Int` reason.
-    static var defaultDownloadQuality: String {
-        get { UserDefaults.standard.string(forKey: defaultDownloadQualityKey) ?? "auto" }
+    // The row label the download modal last confirmed ("720p60", "Audio only", ...). This
+    // REPLACED a Download Quality setting: the modal shows every option with its size, so a
+    // second place to express the same preference was redundant — and remembering the actual
+    // choice beats a stored preference, since it needs no maintenance and covers "I only ever
+    // download audio" without a dedicated option. Empty = nothing picked yet.
+    //
+    // A LABEL rather than an itag, so it survives a video that publishes a different ladder:
+    // the modal matches it exactly first, then falls back to the closest tier at or below that
+    // resolution. String-backed like every other key (the 5.1.5 `as? Int` gotcha).
+    static var lastDownloadChoice: String {
+        get { UserDefaults.standard.string(forKey: lastDownloadChoiceKey) ?? "" }
         set {
-            UserDefaults.standard.set(newValue, forKey: defaultDownloadQualityKey)
+            UserDefaults.standard.set(newValue, forKey: lastDownloadChoiceKey)
             UserDefaults.standard.synchronize()
-        }
-    }
-
-    static func defaultDownloadQualityLabel() -> String {
-        switch defaultDownloadQuality {
-        case "480": return "480p"
-        case "720": return "720p"
-        case "1080": return "1080p"
-        default: return "Auto (360p)"
         }
     }
 

@@ -1,11 +1,17 @@
 import UIKit
 
 // MARK: - SettingsVC
-// Export / import the user's config (subscriptions + playlists) as plain JSON text.
+// One scrolling form: Preferences, Export, Import, Cache, Reset All, Debug.
+//
+// Export / import carry the user's config (subscriptions + playlists) as plain JSON text.
 // iOS 6 has no usable file-sharing / document infrastructure, so transport is the
 // system pasteboard: Export builds a pretty-printed JSON blob into a read-only text
 // view (+ Copy button); Import parses pasted JSON and MERGES it into existing data
 // (subscriptions de-duplicated by channel id, playlists upserted by playlist id).
+//
+// Rows are built by addPreferenceRow / addSwitchRow / addHeader / addSubtitle, which each
+// take `y` as inout and advance it — the form is laid out by manual running offset, so a
+// row that forgets to advance silently stacks on top of the next one.
 
 class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDelegate, UIActionSheetDelegate {
 
@@ -18,7 +24,6 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var copyBtn: UIButton?
     private var qualityBtn: UIButton?
     private var fpsBtn: UIButton?
-    private var downloadQualityBtn: UIButton?
     private var captionSizeBtn: UIButton?
     private var copyDebugBtn: UIButton?
     private var didSetupUI = false
@@ -98,71 +103,30 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
         // ── Preferences ────────────────────────────────────────────────────────────
         y = addHeader("Preferences", at: y, width: contentW, pad: pad)
-        y = addSubtitle("Show a Shorts tab on the Home screen with short videos from your subscribed channels.",
-                        at: y, width: contentW, pad: pad)
 
-        let rowH: CGFloat = 44
-        // Create the switch FIRST so we can size the label to stop before it. On iOS 6 a
-        // UISwitch is ~79pt wide (wider than the ~51pt of later OSes), so a fixed 60pt gutter
-        // let the (long) label text run under the switch. Anchor the switch right, then give
-        // the label exactly the space to its left.
-        let sw = UISwitch()
-        let swW = max(sw.bounds.width, 51)
-        sw.frame = CGRect(x: w - pad - swW, y: y + (rowH - sw.bounds.height) / 2,
-                          width: swW, height: sw.bounds.height)
-        sw.onTintColor = Theme.accent
-        sw.isOn = AppSettings.shortsOnHome
-        // Right-anchored so it stays pinned to the trailing edge when the iPad form widens.
-        sw.autoresizingMask = iPadFlexLeft
-        sw.addTarget(self, action: #selector(shortsSwitchChanged(_:)), for: .valueChanged)
-        scrollView.addSubview(sw)
+        addSwitchRow(subtitle: "Show a Shorts tab on the Home screen with short videos from your subscribed channels.",
+                     label: "Enable Shorts on Home Screen",
+                     isOn: AppSettings.shortsOnHome,
+                     action: #selector(shortsSwitchChanged(_:)),
+                     at: &y, screenWidth: w, width: contentW, pad: pad)
 
-        let toggleLabel = UILabel(frame: CGRect(x: pad, y: y, width: sw.frame.origin.x - pad - 10, height: rowH))
-        toggleLabel.backgroundColor = .clear
-        toggleLabel.textColor = .white
-        toggleLabel.font = UIFont.systemFont(ofSize: 16)
-        toggleLabel.adjustsFontSizeToFitWidth = true
-        toggleLabel.minimumScaleFactor = 0.8
-        toggleLabel.text = "Enable Shorts on Home Screen"
-        toggleLabel.autoresizingMask = iPadFlexWidth
-        scrollView.addSubview(toggleLabel)
-        y += rowH + 12
+        qualityBtn = addPreferenceRow(
+            subtitle: "Automatically use this quality for playback instead of picking each time (falls back to a lower tier if the exact quality isn't available for a video).",
+            title: "Default Quality: \(AppSettings.defaultQualityLabel())",
+            action: #selector(qualityTapped), at: &y, width: contentW, pad: pad)
 
-        y = addSubtitle("Automatically use this quality for playback instead of picking each time (falls back to a lower tier if the exact quality isn't available for a video).",
-                        at: y, width: contentW, pad: pad)
+        fpsBtn = addPreferenceRow(
+            subtitle: "Which version to play when a video offers the same quality at both frame rates. Videos published only at 60 fps still play at 60 fps.",
+            title: "Frame Rate: \(AppSettings.defaultFpsLabel())",
+            action: #selector(fpsTapped), at: &y, width: contentW, pad: pad)
 
-        let qBtn = makeButton("Default Quality: \(AppSettings.defaultQualityLabel())", at: y, width: contentW, pad: pad, accent: false)
-        qBtn.addTarget(self, action: #selector(qualityTapped), for: .touchUpInside)
-        scrollView.addSubview(qBtn)
-        qualityBtn = qBtn
-        y += 44 + 12
-
-        y = addSubtitle("Which version to play when a video offers the same quality at both frame rates. Videos published only at 60 fps still play at 60 fps.",
-                        at: y, width: contentW, pad: pad)
-
-        let fBtn = makeButton("Frame Rate: \(AppSettings.defaultFpsLabel())", at: y, width: contentW, pad: pad, accent: false)
-        fBtn.addTarget(self, action: #selector(fpsTapped), for: .touchUpInside)
-        scrollView.addSubview(fBtn)
-        fpsBtn = fBtn
-        y += 44 + 12
-
-        y = addSubtitle("Quality preselected in the download screen. Auto saves the small muxed 360p file; higher tiers are transmuxed on the device as they download.",
-                        at: y, width: contentW, pad: pad)
-
-        let dqBtn = makeButton("Download Quality: \(AppSettings.defaultDownloadQualityLabel())", at: y, width: contentW, pad: pad, accent: false)
-        dqBtn.addTarget(self, action: #selector(downloadQualityTapped), for: .touchUpInside)
-        scrollView.addSubview(dqBtn)
-        downloadQualityBtn = dqBtn
-        y += 44 + 12
-
-        y = addSubtitle("Size of the closed-caption text during playback. Auto scales it with the size of the video on screen.",
-                        at: y, width: contentW, pad: pad)
-
-        let cBtn = makeButton("Caption Size: \(AppSettings.captionSizeLabel())", at: y, width: contentW, pad: pad, accent: false)
-        cBtn.addTarget(self, action: #selector(captionSizeTapped), for: .touchUpInside)
-        scrollView.addSubview(cBtn)
-        captionSizeBtn = cBtn
-        y += 44 + 12
+        // NOTE: there is deliberately NO download-quality row. The download modal lists every
+        // option with its size and remembers what was picked last, so a stored preference here
+        // would be a second, worse way to say the same thing.
+        captionSizeBtn = addPreferenceRow(
+            subtitle: "Size of the closed-caption text during playback. Auto scales it with the size of the video on screen.",
+            title: "Caption Size: \(AppSettings.captionSizeLabel())",
+            action: #selector(captionSizeTapped), at: &y, width: contentW, pad: pad)
 
         y += 16
 
@@ -252,29 +216,12 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
         // ── Debug ──────────────────────────────────────────────────────────────────
         y = addHeader("Debug", at: y, width: contentW, pad: pad)
-        y = addSubtitle("Records a breadcrumb trail through video playback to help diagnose \"video won't play\" reports. Off by default, no cost when disabled.",
-                        at: y, width: contentW, pad: pad)
 
-        let debugSw = UISwitch()
-        let debugSwW = max(debugSw.bounds.width, 51)
-        debugSw.frame = CGRect(x: w - pad - debugSwW, y: y + (rowH - debugSw.bounds.height) / 2,
-                          width: debugSwW, height: debugSw.bounds.height)
-        debugSw.onTintColor = Theme.accent
-        debugSw.isOn = AppSettings.debugLoggingEnabled
-        debugSw.autoresizingMask = iPadFlexLeft
-        debugSw.addTarget(self, action: #selector(debugSwitchChanged(_:)), for: .valueChanged)
-        scrollView.addSubview(debugSw)
-
-        let debugToggleLabel = UILabel(frame: CGRect(x: pad, y: y, width: debugSw.frame.origin.x - pad - 10, height: rowH))
-        debugToggleLabel.backgroundColor = .clear
-        debugToggleLabel.textColor = .white
-        debugToggleLabel.font = UIFont.systemFont(ofSize: 16)
-        debugToggleLabel.adjustsFontSizeToFitWidth = true
-        debugToggleLabel.minimumScaleFactor = 0.8
-        debugToggleLabel.text = "Enable Debug Logging"
-        debugToggleLabel.autoresizingMask = iPadFlexWidth
-        scrollView.addSubview(debugToggleLabel)
-        y += rowH + 12
+        addSwitchRow(subtitle: "Records a breadcrumb trail through video playback to help diagnose \"video won't play\" reports. Off by default, no cost when disabled.",
+                     label: "Enable Debug Logging",
+                     isOn: AppSettings.debugLoggingEnabled,
+                     action: #selector(debugSwitchChanged(_:)),
+                     at: &y, screenWidth: w, width: contentW, pad: pad)
 
         debugCountLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 20))
         debugCountLabel.backgroundColor = .clear
@@ -305,92 +252,65 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         AppSettings.shortsOnHome = sender.isOn
     }
 
-    // Empty-init + addButton (NOT the variadic otherButtonTitles: convenience init, which
-    // crashes on the 5.1.5 runtime).
-    @objc private func qualityTapped() {
+    // Sheet tags are a space of their own here (VideoPlayerVC uses 1-7 for its own sheets):
+    // 10 = playback quality, 11 = caption size, 12 = frame rate. 13 was the download quality
+    // sheet, removed with that setting — free to reuse.
+    //
+    // Empty init + addButton, NOT the variadic otherButtonTitles: convenience init, which
+    // crashes on the 5.1.5 runtime.
+    private func showChoiceSheet(tag: Int, title: String, options: [String]) {
         let sheet = UIActionSheet()
         sheet.delegate = self
-        sheet.tag = 10
-        sheet.title = "Default Video Quality"
-        sheet.addButton(withTitle: "Auto (360p)")
-        sheet.addButton(withTitle: "480p")
-        sheet.addButton(withTitle: "720p")
-        sheet.addButton(withTitle: "1080p")
+        sheet.tag = tag
+        sheet.title = title
+        for o in options { sheet.addButton(withTitle: o) }
         sheet.addButton(withTitle: "Cancel")
-        sheet.cancelButtonIndex = 4
+        sheet.cancelButtonIndex = options.count
         sheet.show(in: view)
+    }
+
+    @objc private func qualityTapped() {
+        showChoiceSheet(tag: 10, title: "Default Video Quality",
+                        options: ["Auto (360p)", "480p", "720p", "1080p"])
     }
 
     @objc private func fpsTapped() {
-        let sheet = UIActionSheet()
-        sheet.delegate = self
-        sheet.tag = 12
-        sheet.title = "Frame Rate"
-        sheet.addButton(withTitle: "30 fps")
-        sheet.addButton(withTitle: "60 fps")
-        sheet.addButton(withTitle: "Cancel")
-        sheet.cancelButtonIndex = 2
-        sheet.show(in: view)
-    }
-
-    // Tag 13 — the tags here are a separate space from VideoPlayerVC's (10 = playback quality,
-    // 11 = caption size, 12 = frame rate, 13 = download quality).
-    @objc private func downloadQualityTapped() {
-        let sheet = UIActionSheet()
-        sheet.delegate = self
-        sheet.tag = 13
-        sheet.title = "Download Quality"
-        sheet.addButton(withTitle: "Auto (360p)")
-        sheet.addButton(withTitle: "480p")
-        sheet.addButton(withTitle: "720p")
-        sheet.addButton(withTitle: "1080p")
-        sheet.addButton(withTitle: "Cancel")
-        sheet.cancelButtonIndex = 4
-        sheet.show(in: view)
+        showChoiceSheet(tag: 12, title: "Frame Rate", options: ["30 fps", "60 fps"])
     }
 
     @objc private func captionSizeTapped() {
-        let sheet = UIActionSheet()
-        sheet.delegate = self
-        sheet.tag = 11
-        sheet.title = "Caption Size"
-        sheet.addButton(withTitle: "Auto")
-        sheet.addButton(withTitle: "Small")
-        sheet.addButton(withTitle: "Medium")
-        sheet.addButton(withTitle: "Large")
-        sheet.addButton(withTitle: "Extra Large")
-        sheet.addButton(withTitle: "Cancel")
-        sheet.cancelButtonIndex = 5
-        sheet.show(in: view)
+        showChoiceSheet(tag: 11, title: "Caption Size",
+                        options: ["Auto", "Small", "Medium", "Large", "Extra Large"])
     }
 
+    // The sheets all have the same shape: an index-aligned value list, then store + retitle.
+    // The Cancel button sits one past the end of `values`, so an out-of-range index — Cancel,
+    // or a dismissal — falls through apply() and changes nothing.
     func actionSheet(_ actionSheet: UIActionSheet, clickedButtonAt buttonIndex: Int) {
-        if actionSheet.tag == 12 {
-            let values = ["30", "60"]
-            guard buttonIndex >= 0, buttonIndex < values.count else { return }
-            AppSettings.defaultFps = values[buttonIndex]
-            fpsBtn?.setTitle("Frame Rate: \(AppSettings.defaultFpsLabel())", for: .normal)
-            return
+        switch actionSheet.tag {
+        case 10:
+            apply(["auto", "480", "720", "1080"], buttonIndex) {
+                AppSettings.defaultQuality = $0
+                self.qualityBtn?.setTitle("Default Quality: \(AppSettings.defaultQualityLabel())", for: .normal)
+            }
+        case 11:
+            apply(["auto", "small", "medium", "large", "xlarge"], buttonIndex) {
+                AppSettings.captionSize = $0
+                self.captionSizeBtn?.setTitle("Caption Size: \(AppSettings.captionSizeLabel())", for: .normal)
+            }
+        case 12:
+            apply(["30", "60"], buttonIndex) {
+                AppSettings.defaultFps = $0
+                self.fpsBtn?.setTitle("Frame Rate: \(AppSettings.defaultFpsLabel())", for: .normal)
+            }
+        default:
+            break
         }
-        if actionSheet.tag == 13 {
-            let values = ["auto", "480", "720", "1080"]
-            guard buttonIndex >= 0, buttonIndex < values.count else { return }
-            AppSettings.defaultDownloadQuality = values[buttonIndex]
-            downloadQualityBtn?.setTitle("Download Quality: \(AppSettings.defaultDownloadQualityLabel())", for: .normal)
-            return
-        }
-        if actionSheet.tag == 11 {
-            let values = ["auto", "small", "medium", "large", "xlarge"]
-            guard buttonIndex >= 0, buttonIndex < values.count else { return }
-            AppSettings.captionSize = values[buttonIndex]
-            captionSizeBtn?.setTitle("Caption Size: \(AppSettings.captionSizeLabel())", for: .normal)
-            return
-        }
-        guard actionSheet.tag == 10 else { return }
-        let values = ["auto", "480", "720", "1080"]
-        guard buttonIndex >= 0, buttonIndex < values.count else { return }
-        AppSettings.defaultQuality = values[buttonIndex]
-        qualityBtn?.setTitle("Default Quality: \(AppSettings.defaultQualityLabel())", for: .normal)
+    }
+
+    private func apply(_ values: [String], _ index: Int, _ set: (String) -> Void) {
+        guard index >= 0, index < values.count else { return }
+        set(values[index])
     }
 
     // MARK: - Debug
@@ -430,6 +350,51 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     }
 
     // MARK: - Layout helpers
+
+    // One preference row: explanatory subtitle + a button that opens its choice sheet. Returns
+    // the button so the caller can keep it and retitle it after a pick.
+    @discardableResult
+    private func addPreferenceRow(subtitle: String, title: String, action: Selector,
+                                  at y: inout CGFloat, width: CGFloat, pad: CGFloat) -> UIButton {
+        y = addSubtitle(subtitle, at: y, width: width, pad: pad)
+        let b = makeButton(title, at: y, width: width, pad: pad, accent: false)
+        b.addTarget(self, action: action, for: .touchUpInside)
+        scrollView.addSubview(b)
+        y += 44 + 12
+        return b
+    }
+
+    // One switch row: subtitle, then a right-anchored UISwitch with its label filling the space
+    // to the left. The switch is built FIRST on purpose — on iOS 6 a UISwitch is ~79pt wide
+    // (vs ~51pt on later OSes), so sizing the label against a fixed gutter let long text run
+    // underneath it. Right-anchored so it stays pinned when the iPad form widens.
+    private func addSwitchRow(subtitle: String, label text: String, isOn: Bool, action: Selector,
+                              at y: inout CGFloat, screenWidth w: CGFloat,
+                              width: CGFloat, pad: CGFloat) {
+        y = addSubtitle(subtitle, at: y, width: width, pad: pad)
+        let rowH: CGFloat = 44
+
+        let sw = UISwitch()
+        let swW = max(sw.bounds.width, 51)
+        sw.frame = CGRect(x: w - pad - swW, y: y + (rowH - sw.bounds.height) / 2,
+                          width: swW, height: sw.bounds.height)
+        sw.onTintColor = Theme.accent
+        sw.isOn = isOn
+        sw.autoresizingMask = iPadFlexLeft
+        sw.addTarget(self, action: action, for: .valueChanged)
+        scrollView.addSubview(sw)
+
+        let l = UILabel(frame: CGRect(x: pad, y: y, width: sw.frame.origin.x - pad - 10, height: rowH))
+        l.backgroundColor = .clear
+        l.textColor = .white
+        l.font = UIFont.systemFont(ofSize: 16)
+        l.adjustsFontSizeToFitWidth = true
+        l.minimumScaleFactor = 0.8
+        l.text = text
+        l.autoresizingMask = iPadFlexWidth
+        scrollView.addSubview(l)
+        y += rowH + 12
+    }
 
     private func addHeader(_ text: String, at y: CGFloat, width: CGFloat, pad: CGFloat) -> CGFloat {
         let l = UILabel(frame: CGRect(x: pad, y: y, width: width, height: 26))

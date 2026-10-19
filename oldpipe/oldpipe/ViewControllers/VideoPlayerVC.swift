@@ -2758,6 +2758,39 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                               isAudioOnly: true, estimatedBytes: est)
     }
 
+    // Which row opens selected: whatever was confirmed last time. An exact label match first,
+    // so "Audio only" and "720p60" both come back as themselves; otherwise the closest tier at
+    // or BELOW that resolution, so a 1080p habit lands on 720p for a video that has no 1080p
+    // instead of dropping all the way to 360p. Nothing remembered yet = the first (smallest,
+    // muxed) row, which is also the cheapest thing to download by accident.
+    private func preselection(_ choices: [DownloadChoice],
+                              audio: DownloadChoice?) -> (section: Int, row: Int) {
+        let last = AppSettings.lastDownloadChoice
+        guard !last.isEmpty else { return (0, 0) }
+        if let a = audio, a.label == last { return (1, 0) }
+        if let i = choices.firstIndex(where: { $0.label == last }) { return (0, i) }
+
+        let wanted = VideoPlayerVC.resolutionHeight(last)
+        guard wanted > 0 else { return (0, 0) }
+        var bestRow = 0
+        var bestHeight = -1
+        for (i, c) in choices.enumerated() {
+            let h = VideoPlayerVC.resolutionHeight(c.label)
+            if h <= wanted, h > bestHeight { bestHeight = h; bestRow = i }
+        }
+        return (0, bestRow)
+    }
+
+    // Leading digits of a quality label ("720p60" -> 720). 0 when it has none ("Audio only").
+    private static func resolutionHeight(_ label: String) -> Int {
+        var digits = ""
+        for ch in label {
+            guard ch >= "0", ch <= "9" else { break }
+            digits.append(ch)
+        }
+        return Int(digits) ?? 0
+    }
+
     @objc private func downloadTapped() {
         guard !DownloadManager.isDownloaded(video.id) else { return }
         let choices = downloadChoices()
@@ -2768,24 +2801,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
 
-        // Preselect the Settings default, stepping down to the best tier at or below it —
-        // same intent as defaultQualityStream, but over the download list (which also holds
-        // the progressive stream, and must always offer SOMETHING to preselect).
         let already = DownloadManager.qualityLabel(for: video.id)
-        var preselect = choices.count - 1
-        let pref = AppSettings.defaultDownloadQuality
-        if pref == "auto" {
-            preselect = 0                                    // smallest: the progressive tier
-        } else if let order = StreamTiers.qualityOrder.firstIndex(of: pref) {
-            outer: for key in StreamTiers.qualityOrder[order...] {
-                for itag in StreamTiers.itags(forQuality: key) {
-                    if let i = choices.firstIndex(where: { $0.stream.itag == itag }) {
-                        preselect = i
-                        break outer
-                    }
-                }
-            }
-        }
 
         // Two groups, ONE choice: video tiers, then audio-only. Audio is a different kind of
         // download, not a rung below 360p, so it gets its own heading.
@@ -2801,15 +2817,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                                      enabled: true, tag: 0)
         }
 
+        let pick = preselection(choices, audio: audioChoice)
         var sections = [DownloadOptionSection(
             title: "Video",
             rows: choices.map { row($0, downloaded: !alreadyAudio && $0.label == already) },
-            initialSelection: audioChoice != nil && alreadyAudio ? -1 : preselect)]
+            initialSelection: pick.section == 0 ? pick.row : -1)]
         if let a = audioChoice {
             sections.append(DownloadOptionSection(
                 title: "Audio",
                 rows: [row(a, downloaded: alreadyAudio)],
-                initialSelection: alreadyAudio ? 0 : -1))
+                initialSelection: pick.section == 1 ? 0 : -1))
         }
 
         DownloadOptionsView.present(in: view, title: "Download", sections: sections,
@@ -2827,6 +2844,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Start the chosen download, warning first if the estimate doesn't fit on the device.
     private func beginDownload(_ choice: DownloadChoice) {
+        // Remembered BEFORE the space check: the user expressed the preference by confirming,
+        // whether or not this particular download then fits.
+        AppSettings.lastDownloadChoice = choice.label
         let free = DownloadManager.freeDiskBytes()
         // 50MB headroom so a download can't fill the volume to zero. free == 0 means the
         // figure was unavailable — don't block on a number we couldn't read.
