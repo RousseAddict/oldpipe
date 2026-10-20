@@ -2630,14 +2630,39 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // MARK: - Playback
 
+    // True from a tap until the start it triggered actually begins — see playTapped.
+    private var startPending = false
+
+    // Show that the tap registered BEFORE doing anything expensive. Starting playback holds the
+    // main thread for 1-10s on iOS 6 (VideoPlayer.load — audio session + replaceCurrentItem),
+    // and UIKit only draws once the run loop turns, so hiding > and starting the spinner in the
+    // same pass never reached the screen: the viewer saw nothing and tapped again. So > fades
+    // out first and the start runs in the fade's completion, by which time the spinner is on
+    // screen — and keeps turning through the stall, since Core Animation renders out of
+    // process. The fade also takes > out of play: an animating view ignores touches.
     @objc private func playTapped() {
+        guard !startPending else { return }
+        startPending = true
+        statusLabel?.text = "Loading..."
+        statusLabel?.isHidden = false
+        showSpinner()
+        let btn = playBtn
+        UIView.animate(withDuration: 0.15, animations: { btn?.alpha = 0 }, completion: { [weak self] _ in
+            btn?.isHidden = true
+            btn?.alpha = 1
+            guard let self = self else { return }
+            self.startPending = false
+            self.startPlay()
+        })
+    }
+
+    private func startPlay() {
         // Offline copy takes priority. A progressive download plays off disk; an HLS bundle
         // is served back through StreamProxy (AVPlayer won't open a file:// playlist) — still
         // local either way, so isLocal: true and no reconnect watchdog.
         if DownloadManager.isDownloaded(video.id) {
             if let offline = DownloadManager.playbackURL(for: video.id) {
                 playBtn?.isHidden = true
-                statusLabel?.isHidden = true
                 startPlayback(url: offline, isLocal: true)
                 return
             }
@@ -2652,7 +2677,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             statusLabel?.text = "Reloading stream..."
             statusLabel?.isHidden = false
             showSpinner()
-            loadStreams(updateStatus: false) { [weak self] in self?.playTapped() }
+            loadStreams(updateStatus: false) { [weak self] in self?.startPlay() }
             return
         }
 
@@ -2960,7 +2985,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }, onFail: { [weak self] timedOut in
             guard let self = self else { return }
             let itemError = self.sp.currentItemError?.localizedDescription ?? "none"
-            DebugLog.log("Player", "startPlayback FAILED id=\(self.video.id) timedOut=\(timedOut) itemError=\(itemError)")
+            DebugLog.log("Player", "startPlayback FAILED id=\(self.video.id) timedOut=\(timedOut) itemError=\(itemError) \(self.sp.failureDiagnostics)")
             self.hideSpinner()
             self.statusLabel?.text = "Playback failed \u{2022} tap > to retry"
             self.statusLabel?.isHidden = false
@@ -2996,7 +3021,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             // The AVPlayerItem error, when present, is the single most useful clue for
             // "video won't play" since AVPlayer failures otherwise surface nowhere in the UI.
             let itemError = self.sp.currentItemError?.localizedDescription ?? "none"
-            DebugLog.log("Player", "tryStream FAILED id=\(self.video.id) url=\(urlStr) timedOut=\(timedOut) itemError=\(itemError)")
+            DebugLog.log("Player", "tryStream FAILED id=\(self.video.id) url=\(urlStr) timedOut=\(timedOut) itemError=\(itemError) \(self.sp.failureDiagnostics)")
             // Tear the never-ready item down: a timed-out (not failed) item keeps AVPlayer
             // fetching in the background, and its non-nil item makes isActive() true.
             self.sp.abandonLoad()

@@ -29,6 +29,7 @@ class VideoPlayer {
     private var ticker: Timer?
     private var endObserver: NSObjectProtocol?   // AVPlayerItemDidPlayToEndTime for the current item
     private var lastLoadWasHLS = false           // content type of the last load() — see type-switch note in load()
+    private var needsFreshPlayer = false         // an item failed on the current AVPlayer — see dead-player note in load()
 
     // MARK: - Playback watchdog
     // A streamed video can die mid-playback: googlevideo drops the transfer, or the network
@@ -117,16 +118,31 @@ class VideoPlayer {
         // Must be read before currentVideo is reassigned below. A recovery reloads the SAME
         // video (quality is kept — that is the point); anything else is a new video.
         let isSameVideo = (currentVideo?.id == video.id)
+        // load() can hold the main thread for seconds on iOS 6 (see VideoPlayerVC.playTapped);
+        // these timings say which step does it.
+        let t0 = CFAbsoluteTimeGetCurrent()
         configureAudioSession()
+        let tAudio = CFAbsoluteTimeGetCurrent()
         // iOS 6 AVPlayer cannot replaceCurrentItem across content types (progressive MP4
         // <-> HLS): the new HLS item probes the playlist then fails with bare -11800
         // without ever requesting a segment. Recreate the player on a type switch.
         let isHLS = url.absoluteString.hasSuffix(".m3u8")
-        if player != nil && isHLS != lastLoadWasHLS {
+        // A failed AVPlayer is dead for good on iOS 6: every item handed to it afterwards fails
+        // within ~250ms with bare -11800 — local files included — until the app is killed. Its
+        // own status does not reliably say so, so an item that failed on it counts too.
+        // Recreating is cheap, and harmless when it was the item that was bad.
+        let playerFailed = player?.status == .failed
+        let itemFailed = item?.status == .failed
+        let playerDead = playerFailed || itemFailed || needsFreshPlayer
+        if player != nil && (isHLS != lastLoadWasHLS || playerDead) {
+            if playerDead {
+                DebugLog.log("VideoPlayer", "rebuilding AVPlayer playerFailed=\(playerFailed) itemFailed=\(itemFailed) flagged=\(needsFreshPlayer)")
+            }
             player?.pause()
             player?.replaceCurrentItem(with: nil)
             player = nil
         }
+        needsFreshPlayer = false
         lastLoadWasHLS = isHLS
         if player == nil {
             let p = AVPlayer()
@@ -134,9 +150,13 @@ class VideoPlayer {
             layer.player = p
             layer.videoGravity = AVLayerVideoGravity.resizeAspect
         }
+        let tPlayer = CFAbsoluteTimeGetCurrent()
         let newItem = AVPlayerItem(url: url)
+        let tItem = CFAbsoluteTimeGetCurrent()
         item = newItem
         player?.replaceCurrentItem(with: newItem)
+        let tReplace = CFAbsoluteTimeGetCurrent()
+        DebugLog.log("VideoPlayer", "load timings ms audioSession=\(Int((tAudio - t0) * 1000)) player=\(Int((tPlayer - tAudio) * 1000)) item=\(Int((tItem - tPlayer) * 1000)) replace=\(Int((tReplace - tItem) * 1000))")
         // Close the proxy stream when this item plays to the end (see handlePlaybackEnded).
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs) }
         endObserver = NotificationCenter.default.addObserver(
@@ -174,6 +194,29 @@ class VideoPlayer {
     // The AVPlayerItem's error, when status == .failed. AVPlayerItem failures otherwise surface
     // nowhere in the UI (silent on iOS 6) — this is what DebugLog call sites report.
     var currentItemError: Error? { return item?.error }
+
+    // Everything AVFoundation will say about a failure, for DebugLog. localizedDescription
+    // alone ("Cannot Complete Action") is the same string for every -11800, so it cannot tell
+    // a dead player from a bad stream; the statuses, codes, underlying error and the item's
+    // error log can.
+    var failureDiagnostics: String {
+        var parts = ["playerStatus=\(player.map { String($0.status.rawValue) } ?? "nil")",
+                     "itemStatus=\(item.map { String($0.status.rawValue) } ?? "nil")",
+                     "playerError=\(VideoPlayer.describe(player?.error))",
+                     "itemError=\(VideoPlayer.describe(item?.error))"]
+        if let ev = item?.errorLog()?.events.last {
+            parts.append("errorLog=[\(ev.errorDomain) \(ev.errorStatusCode) \(ev.errorComment ?? "")]")
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private static func describe(_ error: Error?) -> String {
+        guard let e = error as NSError? else { return "none" }
+        var s = "\(e.domain)/\(e.code)"
+        if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError { s += " underlying=\(u.domain)/\(u.code)" }
+        if let r = e.localizedFailureReason { s += " reason=\"\(r)\"" }
+        return s
+    }
 
     // True when the current video's display size is taller than wide (e.g. a Short).
     // Uses the asset track's naturalSize + preferredTransform — iOS 4+ safe, unlike
@@ -369,6 +412,8 @@ class VideoPlayer {
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         StreamProxy.shared.closeCurrentStream()   // abort in-flight proxy/HLS transfers promptly
+        // The failed item is dropped right here, so load() could no longer see it — remember.
+        if item?.status == .failed || player?.status == .failed { needsFreshPlayer = true }
         item = nil
         currentVideo = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
