@@ -115,6 +115,17 @@ class CurlFetcher {
     // presents the same android client string the player response was minted for.
     static let googlevideoUserAgent = "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"
 
+    // SYNCHRONOUS plain GET. Same contract and audience as rangeFetch below: the caller is
+    // already on a background queue (OfflineDownloader's), so blocking is the point. Used to
+    // pull caption transcripts at download time, where the async lanes would mean threading a
+    // completion chain through the middle of the segment loop.
+    static func getSync(url: String, timeout: Int = 30) -> Data? {
+        _ = curlGlobalInit
+        pauseFeed()
+        defer { resumeFeed() }
+        return CurlFetcher().syncFetchData(url: url, timeout: timeout)
+    }
+
     // SYNCHRONOUS bounded ranged GET against the googlevideo CDN — the one primitive both the
     // live transmux path (StreamProxy.fetchRange) and the offline downloader need. Callers are
     // already on a background thread (a proxy connection thread, or OfflineDownloader's serial

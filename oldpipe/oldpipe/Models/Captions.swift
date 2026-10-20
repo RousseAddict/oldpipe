@@ -32,9 +32,20 @@ enum Captions {
     // thread; the 4S runs out). Transcript parsing stays off the main thread.
     private static let parseQueue = DispatchQueue(label: "com.oldpipe.captions")
 
-    // Fetch + parse one track's transcript. Always user-initiated, so it takes the
-    // high-priority curl lane and preempts a background subscription-feed load.
-    static func load(_ track: CaptionTrack, completion: @escaping ([CaptionCue]) -> Void) {
+    // Fetch + parse one track's transcript. A downloaded video reads it off disk instead —
+    // its baseUrl expired hours ago, and the whole point of saving them was to not need it.
+    // Otherwise this is always user-initiated, so it takes the high-priority curl lane and
+    // preempts a background subscription-feed load.
+    static func load(_ track: CaptionTrack, videoId: String? = nil,
+                     completion: @escaping ([CaptionCue]) -> Void) {
+        if let id = videoId, hasOffline(id, key: track.key) {
+            parseQueue.async {
+                let cues = offlineCues(for: id, key: track.key) ?? []
+                DebugLog.log("Captions", "offline lang=\(track.languageCode) cues=\(cues.count)")
+                DispatchQueue.main.async { completion(cues) }
+            }
+            return
+        }
         CurlFetcher.fetchData(url: srv1URL(track.baseUrl), timeout: 20, priority: true) { data in
             guard let data = data, !data.isEmpty else {
                 DebugLog.log("Captions", "fetch FAILED lang=\(track.languageCode)")
@@ -113,6 +124,97 @@ enum Captions {
         }
         if found >= 0, t < cues[found].end { return found }
         return -1
+    }
+
+    // MARK: - Offline storage
+    //
+    // A caption baseUrl is signed and expires in roughly six hours, so a downloaded video's
+    // transcripts have to be fetched AT DOWNLOAD TIME and kept. They are stored as the raw
+    // srv1 bytes exactly as they arrive, so parseSRV1 — including its ASR overlap trim — works
+    // unchanged at playback and there is no second on-disk format to keep in step:
+    //
+    //   downloads/<id>/captions.json      index; carries the display name a filename cannot
+    //   downloads/<id>/captions/en.srv1   one file per track, named from CaptionTrack.key
+    //
+    // Size is why every chosen track is simply kept rather than re-fetched: measured live, a
+    // track is 0.4-5 KB against a 12-95 MB download.
+
+    private static func captionsDir(_ videoId: String) -> String {
+        return (DownloadManager.bundleDir(for: videoId) as NSString).appendingPathComponent("captions")
+    }
+
+    private static func indexPath(_ videoId: String) -> String {
+        return (DownloadManager.bundleDir(for: videoId) as NSString).appendingPathComponent("captions.json")
+    }
+
+    // CaptionTrack.key uses "|" to mark an ASR track ("en|asr"); "." reads better in a filename
+    // and cannot collide, since a languageCode never contains either.
+    private static func fileName(for key: String) -> String {
+        return key.replacingOccurrences(of: "|", with: ".") + ".srv1"
+    }
+
+    static func hasOffline(_ videoId: String, key: String) -> Bool {
+        return FileManager.default.fileExists(
+            atPath: (captionsDir(videoId) as NSString).appendingPathComponent(fileName(for: key)))
+    }
+
+    static func offlineCues(for videoId: String, key: String) -> [CaptionCue]? {
+        let path = (captionsDir(videoId) as NSString).appendingPathComponent(fileName(for: key))
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return parseSRV1(data)
+    }
+
+    // The tracks saved alongside a download, in the order they were listed when it ran.
+    // Empty for a video downloaded before captions were saved, or one with none — in both
+    // cases the player simply shows no CC row, exactly as it did before.
+    static func offlineTracks(for videoId: String) -> [CaptionTrack] {
+        guard let data = FileManager.default.contents(atPath: indexPath(videoId)),
+              let root = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [[String: Any]]
+        else { return [] }
+        var out: [CaptionTrack] = []
+        for e in root {
+            guard let lang = e["languageCode"] as? String else { continue }
+            // NSNumber-boxed: a direct `as? Bool` returns nil on the 5.1.5 runtime.
+            let asr = ((e["isASR"] as? NSNumber)?.boolValue) ?? false
+            let name = (e["name"] as? String) ?? lang
+            // baseUrl is deliberately empty — it is long dead, and load() reads from disk.
+            out.append(CaptionTrack(baseUrl: "", languageCode: lang, name: name, isASR: asr))
+        }
+        return out
+    }
+
+    // BLOCKING fetch + save of the chosen tracks. Caller must already be on a background
+    // queue (OfflineDownloader's). Returns how many landed; a track that fails is skipped
+    // rather than failing the download — a missing subtitle is not worth losing the video to.
+    // Written BEFORE the media transfer, because a multi-hour 1080p download would otherwise
+    // reach this with every baseUrl expired.
+    @discardableResult
+    static func saveOfflineSync(_ tracks: [CaptionTrack], for videoId: String,
+                                shouldAbort: () -> Bool = { false }) -> Int {
+        guard !tracks.isEmpty else { return 0 }
+        let dir = captionsDir(videoId)
+        if !FileManager.default.fileExists(atPath: dir) {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                     attributes: nil)
+        }
+        var index: [[String: Any]] = []
+        for t in tracks {
+            if shouldAbort() { break }
+            guard let data = CurlFetcher.getSync(url: srv1URL(t.baseUrl), timeout: 20),
+                  !data.isEmpty else {
+                DebugLog.log("Captions", "save FAILED id=\(videoId) lang=\(t.languageCode)")
+                continue
+            }
+            let path = (dir as NSString).appendingPathComponent(fileName(for: t.key))
+            guard (data as NSData).write(toFile: path, atomically: true) else { continue }
+            index.append(["languageCode": t.languageCode, "name": t.name, "isASR": t.isASR])
+        }
+        guard !index.isEmpty else { return 0 }
+        if let data = try? JSONSerialization.data(withJSONObject: index, options: []) {
+            _ = (data as NSData).write(toFile: indexPath(videoId), atomically: true)
+        }
+        DebugLog.log("Captions", "saved id=\(videoId) tracks=\(index.count)")
+        return index.count
     }
 
     // MARK: - Helpers

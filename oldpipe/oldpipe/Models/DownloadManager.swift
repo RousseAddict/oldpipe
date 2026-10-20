@@ -183,10 +183,12 @@ class DownloadManager {
     // Owns the whole transfer + completion. Because the manager (not a VC) holds the
     // completion, the download still registers as complete after you navigate away.
     // No-op if this id is already downloading.
-    static func startDownload(_ video: Video, url: String, quality: String = "360p") {
+    static func startDownload(_ video: Video, url: String, quality: String = "360p",
+                              captions: [CaptionTrack] = []) {
         if inFlight[video.id] != nil { return }
         let path = filePath(for: video.id)
         removeFiles(video.id)             // drop an HLS bundle left by a previous quality
+        OfflineDownloader.saveCaptionsOnly(captions, for: video.id)
         store(video, complete: false, quality: quality, audioOnly: false)  // visible (Incomplete) while in progress
         inFlight[video.id] = 0
         CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
@@ -205,7 +207,7 @@ class DownloadManager {
     // another itag and would be silently reused by the resume check). Re-downloading at the
     // SAME quality deliberately keeps them: that is the resume path.
     static func startHLSDownload(_ video: Video, videoStream: VideoStream, audioStream: VideoStream,
-                                 quality: String) {
+                                 quality: String, captions: [CaptionTrack] = []) {
         if inFlight[video.id] != nil { return }
         if qualityLabel(for: video.id) != quality {
             removeFiles(video.id)
@@ -215,6 +217,7 @@ class DownloadManager {
         store(video, complete: false, quality: quality, audioOnly: false)
         inFlight[video.id] = 0
         OfflineDownloader.start(video: video, videoStream: videoStream, audioStream: audioStream,
+                                captions: captions,
                                 progress: { p in
             inFlight[video.id] = p
         }) { success in
@@ -225,7 +228,8 @@ class DownloadManager {
 
     // Audio-only download (itag 140). Same bundle shape as a video download — the entry's
     // dl_audio flag is what tells playback to keep the artwork on screen.
-    static func startAudioDownload(_ video: Video, audioStream: VideoStream, quality: String) {
+    static func startAudioDownload(_ video: Video, audioStream: VideoStream, quality: String,
+                                   captions: [CaptionTrack] = []) {
         if inFlight[video.id] != nil { return }
         // Any previous download of this video held different content (video, or another
         // bitrate), so its segments must not be reused by the resume check.
@@ -234,7 +238,8 @@ class DownloadManager {
         }
         store(video, complete: false, quality: quality, audioOnly: true)
         inFlight[video.id] = 0
-        OfflineDownloader.startAudio(video: video, audioStream: audioStream, progress: { p in
+        OfflineDownloader.startAudio(video: video, audioStream: audioStream, captions: captions,
+                                     progress: { p in
             inFlight[video.id] = p
         }) { success in
             inFlight[video.id] = nil

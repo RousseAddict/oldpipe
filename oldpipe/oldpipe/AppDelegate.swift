@@ -81,6 +81,23 @@ enum AppSettings {
         }
     }
 
+    private static let lastCaptionLanguagesKey = "last_caption_languages"
+
+    // CaptionTrack keys ticked in the download modal last time, comma-joined ("en,fr|asr").
+    // Same idea as lastDownloadChoice: remember the choice instead of asking for a setting.
+    // Keys rather than indices, because the track list differs from video to video — the modal
+    // re-ticks whichever of these the current video happens to offer.
+    static var lastCaptionLanguages: [String] {
+        get {
+            let raw = UserDefaults.standard.string(forKey: lastCaptionLanguagesKey) ?? ""
+            return raw.isEmpty ? [] : raw.components(separatedBy: ",")
+        }
+        set {
+            UserDefaults.standard.set(newValue.joined(separator: ","), forKey: lastCaptionLanguagesKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+
     private static let defaultFpsKey = "default_fps"
 
     // "30" (the default) or "60": which variant to take when a video publishes BOTH at the

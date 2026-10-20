@@ -45,10 +45,12 @@ final class OfflineDownloader {
     // `progress` (0..1) and `completion` both fire on the main thread. Already-downloaded
     // segments are skipped, so calling this again after a failure resumes.
     static func start(video: Video, videoStream: VideoStream, audioStream: VideoStream,
+                      captions: [CaptionTrack] = [],
                       progress: @escaping (Float) -> Void,
                       completion: @escaping (Bool) -> Void) {
         clearCancel(video.id)
         queue.async {
+            saveCaptions(captions, for: video.id)
             let ok = run(video: video, vStream: videoStream, aStream: audioStream, progress: progress)
             DispatchQueue.main.async {
                 clearCancel(video.id)
@@ -62,16 +64,33 @@ final class OfflineDownloader {
     // iOS 6 AVPlayer cannot play fMP4 at all — and because a playlist gives an exact duration,
     // which a raw ADTS .aac would not (the scrubber and the premature-EOF watchdog need it).
     static func startAudio(video: Video, audioStream: VideoStream,
+                           captions: [CaptionTrack] = [],
                            progress: @escaping (Float) -> Void,
                            completion: @escaping (Bool) -> Void) {
         clearCancel(video.id)
         queue.async {
+            saveCaptions(captions, for: video.id)
             let ok = runAudio(video: video, aStream: audioStream, progress: progress)
             DispatchQueue.main.async {
                 clearCancel(video.id)
                 completion(ok)
             }
         }
+    }
+
+    // Save captions for a download whose media transfer does NOT run on this queue (the
+    // progressive path hands its copy to CurlFetcher). Independent files, so it can run
+    // alongside rather than blocking the transfer.
+    static func saveCaptionsOnly(_ captions: [CaptionTrack], for videoId: String) {
+        guard !captions.isEmpty else { return }
+        queue.async { saveCaptions(captions, for: videoId) }
+    }
+
+    // Fetched FIRST, before any media: a 1080p download can run for hours, and every caption
+    // baseUrl is signed with a ~6h expiry. Failure here never fails the download.
+    private static func saveCaptions(_ captions: [CaptionTrack], for videoId: String) {
+        guard !captions.isEmpty else { return }
+        Captions.saveOfflineSync(captions, for: videoId, shouldAbort: { isCancelled(videoId) })
     }
 
     // Stop a download. The in-flight ranged GET aborts within ~1s (libcurl progress callback)

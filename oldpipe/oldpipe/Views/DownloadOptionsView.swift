@@ -24,11 +24,22 @@ struct DownloadOptionRow {
     let tag: Int
 }
 
+// How a section's rows behave. The modal mixes both: the download target is one choice spread
+// over two groups, while caption languages are independent ticks in the same sheet.
+enum DownloadOptionMode {
+    // Part of the modal-wide SINGLE choice: ticking a row here clears every other exclusive
+    // section too, so "720p" and "Audio only" cannot both be chosen.
+    case exclusive
+    // Independent — any number of rows may be ticked, and other sections are untouched.
+    case multi
+}
+
 struct DownloadOptionSection {
     let title: String
     let rows: [DownloadOptionRow]
-    // Row index selected when the modal opens, or -1 for none.
-    let initialSelection: Int
+    let mode: DownloadOptionMode
+    // Row indices ticked when the modal opens. Empty for none.
+    let initialSelection: [Int]
 }
 
 final class DownloadOptionsView: UIView {
@@ -63,14 +74,10 @@ final class DownloadOptionsView: UIView {
     // MARK: - State
 
     private let sections: [DownloadOptionSection]
-    private var selection: [Int]
-    // true = ONE choice across the whole modal (the sections are just groups: "Video" tiers vs
-    // "Audio only"). false = each section is an independent control. Download is exclusive;
-    // a later toggle-shaped section (captions) would want false, which is why this is a flag
-    // and not baked into the layout.
-    private let exclusive: Bool
+    // Ticked row indices per section. A Set because a .multi section can hold several.
+    private var selection: [Set<Int>]
     private let confirmTitle: String
-    private var onConfirm: (([Int]) -> Void)?
+    private var onConfirm: (([[Int]]) -> Void)?
 
     private let backdrop = UIButton(type: .custom)
     private let card = UIView()
@@ -96,11 +103,10 @@ final class DownloadOptionsView: UIView {
     // portrait-locked iOS 6/7 builds compile the mask to [] exactly as every other view does.
     @discardableResult
     static func present(in host: UIView, title: String, sections: [DownloadOptionSection],
-                        confirmTitle: String, exclusive: Bool = false,
-                        onConfirm: @escaping ([Int]) -> Void) -> DownloadOptionsView {
+                        confirmTitle: String,
+                        onConfirm: @escaping ([[Int]]) -> Void) -> DownloadOptionsView {
         let v = DownloadOptionsView(frame: host.bounds, title: title, sections: sections,
-                                    confirmTitle: confirmTitle, exclusive: exclusive,
-                                    onConfirm: onConfirm)
+                                    confirmTitle: confirmTitle, onConfirm: onConfirm)
         v.autoresizingMask = iPadFlexWidthHeight
         v.alpha = 0
         host.addSubview(v)
@@ -115,11 +121,10 @@ final class DownloadOptionsView: UIView {
     }
 
     private init(frame: CGRect, title: String, sections: [DownloadOptionSection],
-                 confirmTitle: String, exclusive: Bool,
-                 onConfirm: @escaping ([Int]) -> Void) {
+                 confirmTitle: String,
+                 onConfirm: @escaping ([[Int]]) -> Void) {
         self.sections = sections
-        self.selection = sections.map { $0.initialSelection }
-        self.exclusive = exclusive
+        self.selection = sections.map { Set($0.initialSelection) }
         self.confirmTitle = confirmTitle
         self.onConfirm = onConfirm
         super.init(frame: frame)
@@ -307,10 +312,20 @@ final class DownloadOptionsView: UIView {
         let idx = sender.tag
         guard idx >= 0, idx < rowIndexPaths.count else { return }
         let path = rowIndexPaths[idx]
-        if exclusive {
-            for i in selection.indices { selection[i] = -1 }
+        switch sections[path.section].mode {
+        case .exclusive:
+            // Clear every exclusive section, not just this one — the choice spans them.
+            for i in sections.indices where sections[i].mode == .exclusive {
+                selection[i].removeAll()
+            }
+            selection[path.section] = [path.row]
+        case .multi:
+            if selection[path.section].contains(path.row) {
+                selection[path.section].remove(path.row)
+            } else {
+                selection[path.section].insert(path.row)
+            }
         }
-        selection[path.section] = path.row
         refreshSelectionMarks()
     }
 
@@ -318,7 +333,7 @@ final class DownloadOptionsView: UIView {
     // (already downloaded / the Settings default) keeps showing it when it isn't selected.
     private func refreshSelectionMarks() {
         for (i, path) in rowIndexPaths.enumerated() {
-            let isSelected = (selection[path.section] == path.row)
+            let isSelected = selection[path.section].contains(path.row)
             let row = sections[path.section].rows[path.row]
             rowButtons[i].backgroundColor = isSelected
                 ? Theme.accent.withAlphaComponent(0.28)
@@ -330,7 +345,7 @@ final class DownloadOptionsView: UIView {
     // MARK: - Actions
 
     @objc private func confirmTapped() {
-        let picked = selection
+        let picked = selection.map { Array($0).sorted() }
         let handler = onConfirm
         onConfirm = nil                  // a double tap must not fire two downloads
         dismiss()

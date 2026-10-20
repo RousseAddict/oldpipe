@@ -2168,6 +2168,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 statusLabel?.text = "Downloaded \u{2022} tap > to play"
                 statusLabel?.isHidden = false
             }
+            // Captions saved with the download: the only way a downloaded video has any,
+            // since this path never reaches getStreams. Empty for one downloaded before
+            // captions were saved, which simply shows no CC row — as it always did.
+            captionTracks = Captions.offlineTracks(for: video.id)
+            restoreCaptionSelection()
             completion?()
             return
         }
@@ -2484,11 +2489,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let track = captionTracks[index]
         sp.activeCaptionKey = track.key
         sp.activeCaptionCues = []
-        Captions.load(track) { [weak self] cues in
+        Captions.load(track, videoId: video.id) { [weak self] cues in
             guard let self = self else { return }
             // A newer pick (or an auto-advance) may have landed while this was in flight.
+            // Compare the KEY, not baseUrl: offline tracks all carry an empty baseUrl, which
+            // would make every row look like the selected one.
             guard self.activeCaptionIndex >= 0, self.activeCaptionIndex < self.captionTracks.count,
-                  self.captionTracks[self.activeCaptionIndex].baseUrl == track.baseUrl else { return }
+                  self.captionTracks[self.activeCaptionIndex].key == track.key else { return }
             self.captionCues = cues
             self.sp.activeCaptionCues = cues
             if cues.isEmpty {
@@ -2821,29 +2828,79 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         var sections = [DownloadOptionSection(
             title: "Video",
             rows: choices.map { row($0, downloaded: !alreadyAudio && $0.label == already) },
-            initialSelection: pick.section == 0 ? pick.row : -1)]
+            mode: .exclusive,
+            initialSelection: pick.section == 0 ? [pick.row] : [])]
         if let a = audioChoice {
             sections.append(DownloadOptionSection(
                 title: "Audio",
                 rows: [row(a, downloaded: alreadyAudio)],
-                initialSelection: pick.section == 1 ? 0 : -1))
+                mode: .exclusive,
+                initialSelection: pick.section == 1 ? [0] : []))
+        }
+
+        // Captions: independent ticks, not part of the one-of above. Each track is 0.4-5 KB,
+        // so the choice is about how long the offline CC menu gets, not about bytes.
+        let capSection = captionTracks.count
+        if !captionTracks.isEmpty {
+            let ticked = captionPreselection()
+            sections.append(DownloadOptionSection(
+                title: "Captions (tick any)",
+                rows: captionTracks.map {
+                    DownloadOptionRow(title: $0.name, detail: $0.languageCode,
+                                      mark: "", enabled: true, tag: 0)
+                },
+                mode: .multi,
+                initialSelection: ticked))
         }
 
         DownloadOptionsView.present(in: view, title: "Download", sections: sections,
-                                    confirmTitle: "Download", exclusive: true) { [weak self] picked in
+                                    confirmTitle: "Download") { [weak self] picked in
             guard let self = self else { return }
-            // Exclusive: exactly one section carries a non-negative row index.
-            if picked.count > 1, picked[1] >= 0, let a = audioChoice {
-                self.beginDownload(a)
+
+            // Caption section is last when present; map its ticks back to tracks and remember
+            // the languages for next time.
+            var tracks: [CaptionTrack] = []
+            if capSection > 0, picked.count == sections.count, let rows = picked.last {
+                tracks = rows.compactMap { $0 >= 0 && $0 < self.captionTracks.count
+                    ? self.captionTracks[$0] : nil }
+                AppSettings.lastCaptionLanguages = tracks.map { $0.key }
+            }
+
+            // Exclusive: exactly one of the first two sections carries a row.
+            if picked.count > 1, let a = audioChoice, !picked[1].isEmpty {
+                self.beginDownload(a, captions: tracks)
                 return
             }
-            guard let idx = picked.first, idx >= 0, idx < choices.count else { return }
-            self.beginDownload(choices[idx])
+            guard let videoRows = picked.first, let idx = videoRows.first,
+                  idx >= 0, idx < choices.count else { return }
+            self.beginDownload(choices[idx], captions: tracks)
         }
     }
 
+    // Which caption rows open ticked: the languages ticked last time that this video also
+    // offers. Nothing remembered yet falls back to the device's own language, then to the
+    // first non-auto-generated track — the one a viewer is most likely to want.
+    private func captionPreselection() -> [Int] {
+        let remembered = AppSettings.lastCaptionLanguages
+        if !remembered.isEmpty {
+            let hits = captionTracks.enumerated()
+                .filter { remembered.contains($0.element.key) }
+                .map { $0.offset }
+            if !hits.isEmpty { return hits }
+        }
+        let deviceLang = String((Locale.preferredLanguages.first ?? "en").prefix(2))
+        if let i = captionTracks.firstIndex(where: { $0.languageCode.hasPrefix(deviceLang) && !$0.isASR }) {
+            return [i]
+        }
+        if let i = captionTracks.firstIndex(where: { $0.languageCode.hasPrefix(deviceLang) }) {
+            return [i]
+        }
+        if let i = captionTracks.firstIndex(where: { !$0.isASR }) { return [i] }
+        return captionTracks.isEmpty ? [] : [0]
+    }
+
     // Start the chosen download, warning first if the estimate doesn't fit on the device.
-    private func beginDownload(_ choice: DownloadChoice) {
+    private func beginDownload(_ choice: DownloadChoice, captions: [CaptionTrack] = []) {
         // Remembered BEFORE the space check: the user expressed the preference by confirming,
         // whether or not this particular download then fits.
         AppSettings.lastDownloadChoice = choice.label
@@ -2869,12 +2926,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         statusLabel?.isHidden = false
 
         if choice.isAudioOnly {
-            DownloadManager.startAudioDownload(video, audioStream: choice.stream, quality: choice.label)
+            DownloadManager.startAudioDownload(video, audioStream: choice.stream,
+                                               quality: choice.label, captions: captions)
         } else if choice.isProgressive {
-            DownloadManager.startDownload(video, url: choice.stream.url, quality: choice.label)
+            DownloadManager.startDownload(video, url: choice.stream.url,
+                                          quality: choice.label, captions: captions)
         } else if let audio = audioStreamForHLS() {
             DownloadManager.startHLSDownload(video, videoStream: choice.stream,
-                                             audioStream: audio, quality: choice.label)
+                                             audioStream: audio, quality: choice.label,
+                                             captions: captions)
         } else {
             statusLabel?.text = "Download failed \u{2022} no audio track"
             updateDownloadButton()
