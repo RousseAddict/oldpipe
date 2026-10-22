@@ -30,7 +30,7 @@ final class OfflineDownloader {
     // call spawns an OS thread each time — the 4S thread budget rule). Serial is also what we
     // want semantically: CurlFetcher.rangeFetch closes the feed turnstile for each transfer, so
     // two concurrent downloads would spend their time fighting over it. Extra requests queue.
-    private static let queue = DispatchQueue(label: "com.oldpipe.offline")
+    private static let queue = AppQueue(label: "com.oldpipe.offline")
 
     // How many times a stalled download may re-resolve its URLs before giving up (see refresh).
     private static let maxRefreshes = 3
@@ -52,7 +52,7 @@ final class OfflineDownloader {
         queue.async {
             saveCaptions(captions, for: video.id)
             let ok = run(video: video, vStream: videoStream, aStream: audioStream, progress: progress)
-            DispatchQueue.main.async {
+            AppQueue.main.async {
                 clearCancel(video.id)
                 completion(ok)
             }
@@ -71,7 +71,7 @@ final class OfflineDownloader {
         queue.async {
             saveCaptions(captions, for: video.id)
             let ok = runAudio(video: video, aStream: audioStream, progress: progress)
-            DispatchQueue.main.async {
+            AppQueue.main.async {
                 clearCancel(video.id)
                 completion(ok)
             }
@@ -310,8 +310,8 @@ final class OfflineDownloader {
     // Same contract as refresh(), for the single-stream case.
     private static func refreshAudio(_ videoId: String, aItag: Int) -> VideoStream? {
         let box = RefreshBox()
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
+        let sem = AppSemaphore(value: 0)
+        AppQueue.main.async {
             YoutubeAPI.getStreams(videoId: videoId) { streams, _, _, _, _ in
                 if let a = streams.first(where: { $0.itag == aItag && $0.indexEnd > 0 }) {
                     box.set((a, a))
@@ -319,7 +319,7 @@ final class OfflineDownloader {
                 sem.signal()
             }
         }
-        guard sem.wait(timeout: DispatchTime.now() + 90) == .success else { return nil }
+        guard sem.waitFor(seconds: 90) else { return nil }
         return box.get()?.v
     }
 
@@ -342,8 +342,8 @@ final class OfflineDownloader {
     // never runs on main: start() always hops to `queue` first.
     private static func refresh(_ videoId: String, vItag: Int, aItag: Int) -> (v: VideoStream, a: VideoStream)? {
         let box = RefreshBox()
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
+        let sem = AppSemaphore(value: 0)
+        AppQueue.main.async {
             YoutubeAPI.getStreams(videoId: videoId) { streams, _, _, _, _ in
                 if let v = streams.first(where: { $0.itag == vItag && $0.indexEnd > 0 }),
                    let a = streams.first(where: { $0.itag == aItag && $0.indexEnd > 0 }) {
@@ -354,13 +354,13 @@ final class OfflineDownloader {
         }
         // A timeout must not leave the completion writing into something we're reading, hence
         // the locked box rather than a captured var.
-        guard sem.wait(timeout: DispatchTime.now() + 90) == .success else { return nil }
+        guard sem.waitFor(seconds: 90) else { return nil }
         return box.get()
     }
 
     private static func report(_ done: Int, _ total: Int, _ progress: @escaping (Float) -> Void) {
         let p = Float(done) / Float(total)
-        DispatchQueue.main.async { progress(p) }
+        AppQueue.main.async { progress(p) }
     }
 
     private static func ensureDir(_ dir: String) -> Bool {

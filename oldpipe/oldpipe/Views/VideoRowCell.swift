@@ -24,7 +24,7 @@ class VideoRowCell: UITableViewCell {
     private let progressFill = UIView()
     var playedFraction: CGFloat = 0 { didSet { setNeedsLayout() } }
 
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    required override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 

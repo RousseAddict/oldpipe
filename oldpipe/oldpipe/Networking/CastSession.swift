@@ -219,7 +219,7 @@ final class CastSession: NSObject {
             report("player: \(playerState)")
         }
         let cur = mediaCurrentTime, dur = mediaDuration, playing = isPlayingRemote
-        DispatchQueue.main.async { [weak self] in self?.onProgress?(cur, dur, playing) }
+        AppQueue.main.async { [weak self] in self?.onProgress?(cur, dur, playing) }
     }
 
     // MARK: - Outbound builders
@@ -283,6 +283,6 @@ final class CastSession: NSObject {
     }
 
     private func report(_ text: String) {
-        DispatchQueue.main.async { [weak self] in self?.onState?(text) }
+        AppQueue.main.async { [weak self] in self?.onState?(text) }
     }
 }

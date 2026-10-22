@@ -9,3 +9,6 @@
 *.sw?
 .env
 
+
+# iOS 5 compat shims are build artifacts; rebuild with ios5-shims/build-shims.sh
+ios5-shims/lib/

@@ -45,6 +45,8 @@
 		BB000001000000000000BC26 /* ChannelGroupManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB26 /* ChannelGroupManager.swift */; };
 		BB000001000000000000BC27 /* YTPlaylist.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB27 /* YTPlaylist.swift */; };
 		BB000001000000000000BC2A /* Comment.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2A /* Comment.swift */; };
+		BB000001000000000000BC2E /* CrashLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2E /* CrashLog.swift */; };
+		BB000001000000000000BC32 /* LegacyDispatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB32 /* LegacyDispatch.swift */; };
 		BB000001000000000000BC29 /* YTPlaylistVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB29 /* YTPlaylistVC.swift */; };
 		BB000001000000000000BC1E /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1E /* CastSession.swift */; };
 		BB000001000000000000BC1F /* StreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1F /* StreamResolver.swift */; };
@@ -54,6 +56,7 @@
 		BB000001000000000000BC19 /* StreamProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB19 /* StreamProxy.swift */; };
 		BB000001000000000000BC03 /* curl_bridge.c in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB03 /* curl_bridge.c */; };
 		BB000001000000000000BC04 /* atomic_stubs.c in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB04 /* atomic_stubs.c */; settings = {COMPILER_FLAGS = "-fno-builtin"; }; };
+		BB000001000000000000BC31 /* ios5_dispatch.c in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB31 /* ios5_dispatch.c */; };
 		BB000001000000000000BC05 /* atomic_stubs.S in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB05 /* atomic_stubs.S */; };
 		BB000001000000000000BC06 /* Video.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB06 /* Video.swift */; };
 		BB000001000000000000BC23 /* Captions.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB23 /* Captions.swift */; };
@@ -80,6 +83,8 @@
 		BB000001000000000000BC11 /* VideoRowCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB11 /* VideoRowCell.swift */; };
 		BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB13 /* MiniPlayerBar.swift */; };
 		BB000001000000000000BC2B /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2B /* Theme.swift */; };
+		BB000001000000000000BC2C /* TableViewCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2C /* TableViewCompat.swift */; };
+		BB000001000000000000BC2D /* ios5_start.S in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2D /* ios5_start.S */; };
 		BB000001000000000000BC30 /* DownloadOptionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB30 /* DownloadOptionsView.swift */; };
 		BB000001000000000000BC2F /* OfflineDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2F /* OfflineDownloader.swift */; };
 /* End PBXBuildFile section */
@@ -143,6 +148,8 @@
 		BB000001000000000000BB26 /* ChannelGroupManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelGroupManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB27 /* YTPlaylist.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YTPlaylist.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2A /* Comment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Comment.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB2E /* CrashLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashLog.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB32 /* LegacyDispatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyDispatch.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB29 /* YTPlaylistVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YTPlaylistVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1E /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1F /* StreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamResolver.swift; sourceTree = "<group>"; };
@@ -152,6 +159,7 @@
 		BB000001000000000000BB19 /* StreamProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamProxy.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB03 /* curl_bridge.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = curl_bridge.c; sourceTree = "<group>"; };
 		BB000001000000000000BB04 /* atomic_stubs.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = atomic_stubs.c; sourceTree = "<group>"; };
+		BB000001000000000000BB31 /* ios5_dispatch.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = ios5_dispatch.c; sourceTree = "<group>"; };
 		BB000001000000000000BB05 /* atomic_stubs.S */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = atomic_stubs.S; sourceTree = "<group>"; };
 		BB000001000000000000BB06 /* Video.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Video.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB23 /* Captions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Captions.swift; sourceTree = "<group>"; };
@@ -178,6 +186,8 @@
 		BB000001000000000000BB11 /* VideoRowCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRowCell.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB13 /* MiniPlayerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerBar.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2B /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB2C /* TableViewCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableViewCompat.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB2D /* ios5_start.S */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = ios5_start.S; sourceTree = "<group>"; };
 		BB000001000000000000BB30 /* DownloadOptionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadOptionsView.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2F /* OfflineDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineDownloader.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -297,7 +307,9 @@
 				BB000001000000000000BB19 /* StreamProxy.swift */,
 				BB000001000000000000BB03 /* curl_bridge.c */,
 				BB000001000000000000BB04 /* atomic_stubs.c */,
+				BB000001000000000000BB31 /* ios5_dispatch.c */,
 				BB000001000000000000BB05 /* atomic_stubs.S */,
+				BB000001000000000000BB2D /* ios5_start.S */,
 				BB000001000000000000BB2F /* OfflineDownloader.swift */,
 			);
 			name = Networking;
@@ -320,6 +332,8 @@
 				BB000001000000000000BB26 /* ChannelGroupManager.swift */,
 				BB000001000000000000BB27 /* YTPlaylist.swift */,
 				BB000001000000000000BB2A /* Comment.swift */,
+				BB000001000000000000BB2E /* CrashLog.swift */,
+				BB000001000000000000BB32 /* LegacyDispatch.swift */,
 				BB000001000000000000BB12 /* VideoPlayer.swift */,
 			);
 			name = Models;
@@ -333,6 +347,7 @@
 				BB000001000000000000BB11 /* VideoRowCell.swift */,
 				BB000001000000000000BB13 /* MiniPlayerBar.swift */,
 				BB000001000000000000BB2B /* Theme.swift */,
+				BB000001000000000000BB2C /* TableViewCompat.swift */,
 				BB000001000000000000BB30 /* DownloadOptionsView.swift */,
 			);
 			name = Views;
@@ -520,6 +535,8 @@
 				BB000001000000000000BC26 /* ChannelGroupManager.swift in Sources */,
 				BB000001000000000000BC27 /* YTPlaylist.swift in Sources */,
 				BB000001000000000000BC2A /* Comment.swift in Sources */,
+				BB000001000000000000BC2E /* CrashLog.swift in Sources */,
+				BB000001000000000000BC32 /* LegacyDispatch.swift in Sources */,
 				BB000001000000000000BC29 /* YTPlaylistVC.swift in Sources */,
 				BB000001000000000000BC1E /* CastSession.swift in Sources */,
 				BB000001000000000000BC1F /* StreamResolver.swift in Sources */,
@@ -529,6 +546,7 @@
 				BB000001000000000000BC19 /* StreamProxy.swift in Sources */,
 				BB000001000000000000BC03 /* curl_bridge.c in Sources */,
 				BB000001000000000000BC04 /* atomic_stubs.c in Sources */,
+				BB000001000000000000BC31 /* ios5_dispatch.c in Sources */,
 				BB000001000000000000BC05 /* atomic_stubs.S in Sources */,
 				BB000001000000000000BC06 /* Video.swift in Sources */,
 				BB000001000000000000BC23 /* Captions.swift in Sources */,
@@ -555,6 +573,8 @@
 				BB000001000000000000BC11 /* VideoRowCell.swift in Sources */,
 				BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */,
 				BB000001000000000000BC2B /* Theme.swift in Sources */,
+				BB000001000000000000BC2C /* TableViewCompat.swift in Sources */,
+				BB000001000000000000BC2D /* ios5_start.S in Sources */,
 				A34362D62FD764210064ADE1 /* ViewController.swift in Sources */,
 				A34362FF2FD764260064ADE1 /* AppDelegate.swift in Sources */,
 				BB000001000000000000BC2F /* OfflineDownloader.swift in Sources */,

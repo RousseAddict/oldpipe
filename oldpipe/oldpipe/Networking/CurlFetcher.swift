@@ -22,7 +22,7 @@ private let curlProgressCallback: @convention(c) (UnsafeMutableRawPointer?, Int6
     guard let clientp = clientp, dltotal > 0 else { return 0 }
     let box = Unmanaged<CurlDownloadBox>.fromOpaque(clientp).takeUnretainedValue()
     let progress = Float(dlnow) / Float(dltotal)
-    DispatchQueue.main.async { box.progressHandler?(progress) }
+    AppQueue.main.async { box.progressHandler?(progress) }
     return 0
 }
 
@@ -69,23 +69,23 @@ class CurlFetcher {
     // Normal-lane concurrent worker queue (feed channel-browses + thumbnails) — lets independent
     // transfers run in parallel instead of one-at-a-time.
     // (No QoS — DispatchQoS is iOS 8+; this app targets iOS 6/7.)
-    private static let curlQueue = DispatchQueue(label: "com.oldpipe.curl", attributes: .concurrent)
+    private static let curlQueue = AppQueue(label: "com.oldpipe.curl", attributes: .concurrent)
     // Serial gate: holds back dispatch to curlQueue until a slot frees, so we never spawn
     // a worker thread per queued request (iPhone 4S has a hard thread/stack-memory budget).
-    private static let gateQueue = DispatchQueue(label: "com.oldpipe.curl.gate")
+    private static let gateQueue = AppQueue(label: "com.oldpipe.curl.gate")
     // Caps concurrent in-flight transfers on the feed lane. 2 (was 4): on the dual-core A5
     // (iPhone 4S), 4 simultaneous OpenSSL/TLS transfers saturate both cores with crypto and
     // starve an interactive player request (tapped during feed load) of CPU — making its TLS
     // handshake crawl. 2 still parallelises the feed meaningfully while leaving a core free so
     // the high-priority player request on highQueue completes promptly.
-    private static let curlLimit = DispatchSemaphore(value: 2)
+    private static let curlLimit = AppSemaphore(value: 2)
     // High-priority lane = a DEDICATED SERIAL queue. A serial queue owns its own private worker
     // thread, so an interactive request (tapping a video → player/stream fetch) gets a thread
     // immediately and is NOT subject to the concurrent pool's width-throttling — which is what
     // starved it before, when all 4 normal-lane threads were blocked in a synchronous
     // curl_bridge_perform on slow/timing-out feed sockets. Player requests are sequential
     // (bootstrap visitorData → player), so serializing the high lane is fine.
-    private static let highQueue = DispatchQueue(label: "com.oldpipe.curl.high")
+    private static let highQueue = AppQueue(label: "com.oldpipe.curl.high")
     // Feed turnstile (preemption). Closed by a high-priority request for its whole duration so the
     // feed lane starts NO new transfers while a player request is in flight. This is the real fix:
     // the shipped OpenSSL 3.4.x serializes concurrent TLS handshakes on internal global locks, so a
@@ -93,7 +93,7 @@ class CurlFetcher {
     // split. Pausing new feed work lets the player run against near-zero concurrent TLS. Value 1 =
     // open; a high request waits it to 0 (closed) and signals back to 1 when done. The highQueue is
     // serial, so begin/close and end/open are always balanced (only one high request runs at once).
-    private static let feedTurnstile = DispatchSemaphore(value: 1)
+    private static let feedTurnstile = AppSemaphore(value: 1)
     // dispatch_once via static let — runs exactly once even under concurrent first access
     // (Swift lazy-static init is thread-safe), so curl_global_init is never called concurrently.
     private static let curlGlobalInit: Bool = { curl_bridge_global_init(); return true }()
@@ -205,11 +205,11 @@ class CurlFetcher {
             // Cancelled while queued → skip the transfer entirely. submit() still signals
             // the slot after this closure returns, so the accounting stays balanced.
             if fetcher.isCancelled {
-                DispatchQueue.main.async { release(fetcher) }
+                AppQueue.main.async { release(fetcher) }
                 return
             }
             let data = fetcher.syncFetchData(url: url, timeout: timeout)
-            DispatchQueue.main.async {
+            AppQueue.main.async {
                 release(fetcher)
                 if fetcher.isCancelled { return }
                 completion(data)
@@ -248,7 +248,7 @@ class CurlFetcher {
         submit(highPriority: priority) {
             let data = fetcher.syncPostJSON(url: url, body: body, headers: headers,
                                             userAgent: userAgent, timeout: timeout)
-            DispatchQueue.main.async { release(fetcher); completion(data) }
+            AppQueue.main.async { release(fetcher); completion(data) }
         }
     }
 
@@ -261,7 +261,7 @@ class CurlFetcher {
         retain(fetcher)
         submit {
             let ok = fetcher.syncDownload(url: url, outputPath: outputPath, progress: progress)
-            DispatchQueue.main.async { release(fetcher); completion(ok) }
+            AppQueue.main.async { release(fetcher); completion(ok) }
         }
     }
 

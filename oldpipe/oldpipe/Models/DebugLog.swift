@@ -13,7 +13,7 @@ enum DebugLog {
 
     // Same static-serial-queue convention as CurlFetcher/AsyncImageView/VideoPlayer — never
     // spawn a queue per call; this one is created once and reused for every log() call site.
-    private static let queue = DispatchQueue(label: "com.oldpipe.debuglog")
+    private static let queue = AppQueue(label: "com.oldpipe.debuglog")
     private static var entries: [String] = []
     private static let cap = 300
 

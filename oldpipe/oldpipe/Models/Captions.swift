@@ -30,7 +30,7 @@ enum Captions {
 
     // Static serial queue — never create a DispatchQueue per call (each one spawns an OS
     // thread; the 4S runs out). Transcript parsing stays off the main thread.
-    private static let parseQueue = DispatchQueue(label: "com.oldpipe.captions")
+    private static let parseQueue = AppQueue(label: "com.oldpipe.captions")
 
     // Fetch + parse one track's transcript. A downloaded video reads it off disk instead —
     // its baseUrl expired hours ago, and the whole point of saving them was to not need it.
@@ -42,7 +42,7 @@ enum Captions {
             parseQueue.async {
                 let cues = offlineCues(for: id, key: track.key) ?? []
                 DebugLog.log("Captions", "offline lang=\(track.languageCode) cues=\(cues.count)")
-                DispatchQueue.main.async { completion(cues) }
+                AppQueue.main.async { completion(cues) }
             }
             return
         }
@@ -55,7 +55,7 @@ enum Captions {
             parseQueue.async {
                 let cues = parseSRV1(data)
                 DebugLog.log("Captions", "lang=\(track.languageCode) bytes=\(data.count) cues=\(cues.count)")
-                DispatchQueue.main.async { completion(cues) }
+                AppQueue.main.async { completion(cues) }
             }
         }
     }
