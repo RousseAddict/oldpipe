@@ -30,7 +30,7 @@ class AsyncImageView: UIImageView {
     }
 
     // MARK: - Decode queue (serial — UIGraphicsBeginImageContextWithOptions unsafe concurrent on iOS 6)
-    private static let decodeQueue = DispatchQueue(label: "com.oldpipe.imagedecode")
+    private static let decodeQueue = AppQueue(label: "com.oldpipe.imagedecode")
 
     // MARK: - In-flight registry
     // One pipeline per URL, shared by every view that asks for it (two cells showing the
@@ -127,10 +127,10 @@ class AsyncImageView: UIImageView {
             if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                let img = safeDecode(data) {
                 cache.setObject(img, forKey: url as NSString, cost: bitmapCost(img))
-                DispatchQueue.main.async { finish(req, url: url, image: img) }
+                AppQueue.main.async { finish(req, url: url, image: img) }
                 return
             }
-            DispatchQueue.main.async {
+            AppQueue.main.async {
                 // Cancelled while the disk read was queued → don't open a socket at all.
                 guard inflight[url] === req else { return }
                 req.token = CurlFetcher.fetchData(url: url, timeout: 15) { data in
@@ -144,7 +144,7 @@ class AsyncImageView: UIImageView {
                         // Every exit path lands here, including a decode failure —
                         // otherwise the URL stays stuck in `inflight` forever and later
                         // requests for it join a pipeline that will never complete.
-                        DispatchQueue.main.async { finish(req, url: url, image: img) }
+                        AppQueue.main.async { finish(req, url: url, image: img) }
                     }
                 }
             }

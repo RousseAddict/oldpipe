@@ -117,18 +117,18 @@ class YoutubeAPI {
     ]
 
     // Static parse queue (one reused thread) — never create DispatchQueue per call.
-    private static let parseQueue = DispatchQueue(label: "com.oldpipe.ytparse")
+    private static let parseQueue = AppQueue(label: "com.oldpipe.ytparse")
     // Dedicated parse lane for the player path. The feed parses many large channel-browse
     // responses on parseQueue (serial); routing the player's parse through its own queue
     // means stream resolution never waits behind a backed-up feed-parse queue — the real
     // cause of "tap a video while the feed loads → stuck on loading for 30-40s".
-    private static let playerParseQueue = DispatchQueue(label: "com.oldpipe.ytparse.player")
+    private static let playerParseQueue = AppQueue(label: "com.oldpipe.ytparse.player")
     // Dedicated parse lane for USER-INITIATED browse/search/related requests (priority:true).
     // Same reasoning as playerParseQueue: getting the bytes fast via the high-priority network
     // lane isn't enough — the parse must also skip the serial parseQueue that the background
     // feed jams with many large channel-browse parses. Without this, tapping a channel (or
     // searching) mid-feed-load returns bytes quickly but the PARSE waits 30-40s behind the feed.
-    private static let interactiveParseQueue = DispatchQueue(label: "com.oldpipe.ytparse.interactive")
+    private static let interactiveParseQueue = AppQueue(label: "com.oldpipe.ytparse.interactive")
 
     private static func body(client: [String: Any], extra: [String: Any]) -> [String: Any] {
         var b: [String: Any] = ["context": ["client": client]]
@@ -150,7 +150,7 @@ class YoutubeAPI {
             // Parse off main thread, on the interactive lane (search is always user-initiated).
             interactiveParseQueue.async {
                 let results = parseSearchResults(data)
-                DispatchQueue.main.async { completion(results) }
+                AppQueue.main.async { completion(results) }
             }
         }
     }
@@ -217,7 +217,7 @@ class YoutubeAPI {
             }
             playerParseQueue.async {
                 let (streams, video, desc, status, failure, captions) = parsePlayerResponse(data, videoId: videoId)
-                DispatchQueue.main.async {
+                AppQueue.main.async {
                     DebugLog.log("YoutubeAPI", "\(client.name) player id=\(videoId) status=\(status) streams=\(streams.count)")
                     completion(streams, video, desc, failure, captions)
                 }
@@ -240,7 +240,7 @@ class YoutubeAPI {
             guard let data = data else { completion([], nil, nil); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseChannelResponse(data, channelId: channelId)
-                DispatchQueue.main.async { completion(result.0, result.1, result.2) }
+                AppQueue.main.async { completion(result.0, result.1, result.2) }
             }
         }
     }
@@ -256,7 +256,7 @@ class YoutubeAPI {
             guard let data = data else { completion([], nil); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseChannelResponse(data, channelId: channelId)
-                DispatchQueue.main.async { completion(result.0, result.2) }
+                AppQueue.main.async { completion(result.0, result.2) }
             }
         }
     }
@@ -275,7 +275,7 @@ class YoutubeAPI {
             guard let data = data else { completion([]); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parsePlaylistsResponse(data)
-                DispatchQueue.main.async { completion(result) }
+                AppQueue.main.async { completion(result) }
             }
         }
     }
@@ -293,7 +293,7 @@ class YoutubeAPI {
             guard let data = data else { completion([], nil); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parsePlaylistVideos(data)
-                DispatchQueue.main.async { completion(result.0, result.1) }
+                AppQueue.main.async { completion(result.0, result.1) }
             }
         }
     }
@@ -309,7 +309,7 @@ class YoutubeAPI {
             guard let data = data else { completion([], nil); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseContinuation(data, channelName: channelName)
-                DispatchQueue.main.async { completion(result.0, result.1) }
+                AppQueue.main.async { completion(result.0, result.1) }
             }
         }
     }
@@ -333,7 +333,7 @@ class YoutubeAPI {
             guard let data = data else { completion([], nil, []); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseRelated(data, excludeId: videoId)
-                DispatchQueue.main.async { completion(result.0, result.1, result.2) }
+                AppQueue.main.async { completion(result.0, result.1, result.2) }
             }
         }
     }
@@ -402,7 +402,7 @@ class YoutubeAPI {
             guard let data = data else { completion([], nil); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseComments(data)
-                DispatchQueue.main.async { completion(result.0, result.1) }
+                AppQueue.main.async { completion(result.0, result.1) }
             }
         }
     }

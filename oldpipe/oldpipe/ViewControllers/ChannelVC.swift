@@ -192,7 +192,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
         // Playlists table
         playlistsTable = makeTable(frame: contentFrame)
-        playlistsTable.register(YTPlaylistRowCell.self, forCellReuseIdentifier: YTPlaylistRowCell.reuseId)
+        playlistsTable.registerCell(YTPlaylistRowCell.self, YTPlaylistRowCell.reuseId)
         playlistsTable.isHidden = true
         view.addSubview(playlistsTable)
         playlistsStatus = makeStatus(width: w)
@@ -221,7 +221,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         tv.separatorColor = UIColor(white: 0.2, alpha: 1)
         tv.dataSource = self
         tv.delegate = self
-        tv.register(VideoRowCell.self, forCellReuseIdentifier: VideoRowCell.reuseId)
+        tv.registerCell(VideoRowCell.self, VideoRowCell.reuseId)
         tv.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)
         tv.tableFooterView = UIView()   // no empty separator rows while loading/empty
         tv.autoresizingMask = iPadFlexWidthHeight
@@ -457,11 +457,11 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         if tableView == playlistsTable {
-            let cell = tableView.dequeueReusableCell(withIdentifier: YTPlaylistRowCell.reuseId, for: indexPath) as! YTPlaylistRowCell
+            let cell = tableView.dequeueCell(YTPlaylistRowCell.self, YTPlaylistRowCell.reuseId, for: indexPath)
             cell.configure(with: playlists[indexPath.row])
             return cell
         }
-        let cell = tableView.dequeueReusableCell(withIdentifier: VideoRowCell.reuseId, for: indexPath) as! VideoRowCell
+        let cell = tableView.dequeueCell(VideoRowCell.self, VideoRowCell.reuseId, for: indexPath)
         cell.configure(with: list(for: tableView)[indexPath.row])
         return cell
     }
@@ -494,7 +494,7 @@ private class YTPlaylistRowCell: UITableViewCell {
     private let titleLabel = UILabel()
     private let countLabel = UILabel()
 
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    required override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 

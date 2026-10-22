@@ -23,7 +23,7 @@ import Foundation
 class ChannelRSS {
 
     // Static parse queue (one reused thread) — never create a DispatchQueue per call.
-    private static let parseQueue = DispatchQueue(label: "com.oldpipe.rssparse")
+    private static let parseQueue = AppQueue(label: "com.oldpipe.rssparse")
 
     // Fetches the feed and returns [videoId: publishEpochSeconds]. Empty on any failure —
     // callers treat a missing date as "unknown" and keep their existing fallback ordering.
@@ -41,7 +41,7 @@ class ChannelRSS {
             }
             parseQueue.async {
                 let map = ChannelRSS.parseDates(data)
-                DispatchQueue.main.async {
+                AppQueue.main.async {
                     DebugLog.log("ChannelRSS", "feed \(channelId) — \(map.count) dated entry(ies) from \(data.count) bytes")
                     completion(map)
                 }

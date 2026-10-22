@@ -26,6 +26,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var fpsBtn: UIButton?
     private var captionSizeBtn: UIButton?
     private var copyDebugBtn: UIButton?
+    private var copyCrashBtn: UIButton?
     private var didSetupUI = false
     private var loadingSpinner: UIActivityIndicatorView?
 
@@ -35,7 +36,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     // The two slow bits of loading Settings — serializing every subscription/playlist to JSON
     // and scanning the on-disk thumbnail cache to sum its size — run here off the main thread
     // so the screen shows a spinner instead of freezing.
-    private static let loadQueue = DispatchQueue(label: "com.oldpipe.settings.load")
+    private static let loadQueue = AppQueue(label: "com.oldpipe.settings.load")
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -65,7 +66,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         SettingsVC.loadQueue.async { [weak self] in
             let json = self?.buildExportJSON() ?? "{}"
             let bytes = AsyncImageView.diskCacheSize()
-            DispatchQueue.main.async {
+            AppQueue.main.async {
                 guard let self = self else { return }
                 self.exportView.text = json
                 self.cacheSizeLabel.text = "Current cache size: \(self.formatBytes(bytes))"
@@ -243,6 +244,25 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         scrollView.addSubview(clearDebug)
         y += 44 + 28
 
+        // The crash log is separate from the debug log above: always recorded, written straight
+        // to disk, and it covers the launch path — so it is the one to ask a user for when the
+        // app dies before it can show anything.
+        let crashHint = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 34))
+        crashHint.backgroundColor = .clear
+        crashHint.textColor = UIColor(white: 0.55, alpha: 1)
+        crashHint.font = UIFont.systemFont(ofSize: 11)
+        crashHint.numberOfLines = 2
+        crashHint.autoresizingMask = iPadFlexWidth
+        crashHint.text = "Crash log is always on. If the app won't start, copy the file(s) named oldpipe-launch*.log from the app's Documents folder."
+        scrollView.addSubview(crashHint)
+        y += 34 + 6
+
+        let copyCrash = makeButton("Copy Crash Log", at: y, width: contentW, pad: pad, accent: false)
+        copyCrash.addTarget(self, action: #selector(copyCrashTapped), for: .touchUpInside)
+        scrollView.addSubview(copyCrash)
+        copyCrashBtn = copyCrash
+        y += 44 + 28
+
         scrollView.contentSize = CGSize(width: w, height: y + 80)   // +80 covers mini player bar
     }
 
@@ -324,6 +344,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         flash(copyDebugBtn, "Copied \u{2713}", revertTo: "Copy Debug Log")
     }
 
+    @objc private func copyCrashTapped() {
+        UIPasteboard.general.string = CrashLog.exportText()
+        flash(copyCrashBtn, "Copied \u{2713}", revertTo: "Copy Crash Log")
+    }
+
     @objc private func clearDebugTapped() {
         DebugLog.clear()
         debugCountLabel.text = "0 log entries"
@@ -335,7 +360,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         cacheSizeLabel.text = "Calculating cache size\u{2026}"
         SettingsVC.loadQueue.async { [weak self] in
             let bytes = AsyncImageView.diskCacheSize()
-            DispatchQueue.main.async {
+            AppQueue.main.async {
                 guard let self = self else { return }
                 self.cacheSizeLabel.text = "Current cache size: \(self.formatBytes(bytes))"
             }
@@ -389,7 +414,14 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         l.textColor = .white
         l.font = UIFont.systemFont(ofSize: 16)
         l.adjustsFontSizeToFitWidth = true
+        #if IOS5_TARGET
+        // minimumScaleFactor is iOS 6; its iOS 2 predecessor is an absolute size.
+        // Swift hides minimumFontSize outright (pre-iOS-7 deprecations are marked
+        // unavailable), so it has to be reached through KVC.
+        l.setValue(12.8, forKey: "minimumFontSize")   // 16pt * 0.8
+        #else
         l.minimumScaleFactor = 0.8
+        #endif
         l.text = text
         l.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(l)
