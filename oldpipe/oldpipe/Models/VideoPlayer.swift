@@ -277,9 +277,20 @@ class VideoPlayer {
     // Before the item is ready neither flag is meaningful, so assume it is allowed.
     func supportsRate(_ rate: Float) -> Bool {
         guard let it = item, it.status == .readyToPlay else { return true }
+        #if IOS5_TARGET
+        // Both flags are iOS 6 selectors on an iOS 4 class, so the signature is legal on every
+        // target and only the send is fatal: picking 0.5x on a 4 running 5.1.1 aborted the app
+        // out of the speed sheet with -[AVPlayerItem canPlaySlowForward]: unrecognized selector.
+        // Nothing can be asked up front here, so treat every offered rate as allowed — the same
+        // assumption the not-yet-ready case above already makes — and leave it to reconcileRate
+        // to walk back a rate the stream turns out not to hold, which is how the fast options
+        // are handled on the other targets anyway.
+        return true
+        #else
         if rate < 1.0 { return it.canPlaySlowForward }
         if rate > 2.0 { return it.canPlayFastForward }
         return true
+        #endif
     }
 
     @discardableResult
