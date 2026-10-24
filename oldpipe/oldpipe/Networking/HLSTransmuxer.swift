@@ -390,10 +390,16 @@ private func mpegCRC32(_ data: Data) -> UInt32 {
 }
 
 private final class TSWriter {
+    // ONE preallocated byte buffer instead of a Data allocated per 188-byte packet.
+    // A 1080p segment is ~8000 packets; the old writer allocated a Data for each, plus a
+    // subdata() copy of its payload slice, then appended that into another Data.
     var out = Data()
+    var data: Data { return out }
     private var cc: [Int: UInt8] = [:]  // continuity counter per PID
     let pmtPID = 4096, videoPID = 256, audioPID = 257
     var ok = true                        // flipped false if a packet ever mis-sizes
+
+    init(reserve: Int) { out.reserveCapacity(reserve) }
 
     private func nextCC(_ pid: Int) -> UInt8 {
         let v = cc[pid] ?? 0
@@ -402,15 +408,15 @@ private final class TSWriter {
     }
 
     private func psi(_ pid: Int, table: Data) {
-        var payload = Data([0x00])  // pointer_field
-        payload.append(table)
+        var payload: [UInt8] = [0x00]  // pointer_field
+        payload.append(contentsOf: table)
         let crc = mpegCRC32(table)
         payload.append(contentsOf: [UInt8(crc >> 24 & 0xFF), UInt8(crc >> 16 & 0xFF),
                                     UInt8(crc >> 8 & 0xFF), UInt8(crc & 0xFF)])
-        var pkt = Data([0x47, UInt8(0x40 | (pid >> 8)), UInt8(pid & 0xFF), UInt8(0x10 | nextCC(pid))])
-        pkt.append(payload)
-        while pkt.count < 188 { pkt.append(0xFF) }
-        out.append(pkt)
+        let start = out.count
+        out.append(contentsOf: [0x47, UInt8(0x40 | (pid >> 8)), UInt8(pid & 0xFF), UInt8(0x10 | nextCC(pid))])
+        out.append(contentsOf: payload)
+        while out.count - start < 188 { out.append(0xFF) }
     }
 
     func writePAT() {
@@ -452,35 +458,36 @@ private final class TSWriter {
     // One PES packet, split across 188-byte TS packets. PCR/RAI go on the first packet.
     func writePES(pid: Int, streamId: UInt8, pts: Int64, dts: Int64?, payload: Data,
                   randomAccess: Bool, pcr: Int64?) {
-        var pes = Data([0x00, 0x00, 0x01, streamId])
-        var hdr = Data()
         let ptsDtsFlags: UInt8 = dts != nil ? 0xC0 : 0x80
         var tsBytes = encodePTS(dts != nil ? 3 : 2, pts)
         if let d = dts { tsBytes += encodePTS(1, d) }
-        hdr.append(contentsOf: [0x80, ptsDtsFlags, UInt8(tsBytes.count)])
-        hdr.append(contentsOf: tsBytes)
-        let pesLen = hdr.count + payload.count
+        let hdrCount = 3 + tsBytes.count
+        let pesLen = hdrCount + payload.count
+
+        var pes = [UInt8]()
+        pes.reserveCapacity(6 + hdrCount + payload.count)
+        pes.append(contentsOf: [0x00, 0x00, 0x01, streamId])
         if streamId == 0xE0 || pesLen > 0xFFFF {
-            pes.append(contentsOf: [0x00, 0x00])  // unbounded (video)
+            pes.append(0x00); pes.append(0x00)          // unbounded (video)
         } else {
-            pes.append(contentsOf: [UInt8(pesLen >> 8), UInt8(pesLen & 0xFF)])
+            pes.append(UInt8(pesLen >> 8)); pes.append(UInt8(pesLen & 0xFF))
         }
-        pes.append(hdr)
-        pes.append(payload)
+        pes.append(0x80); pes.append(ptsDtsFlags); pes.append(UInt8(tsBytes.count))
+        pes.append(contentsOf: tsBytes)
+        pes.append(contentsOf: payload)
 
         var off = 0
         var first = true
         while off < pes.count {
-            var pkt = Data(capacity: 188)
             let remaining = pes.count - off
-            var adaptation = Data()
+            var adaptation: [UInt8] = []
             if first && (pcr != nil || randomAccess) {
                 var flags: UInt8 = 0
                 if randomAccess { flags |= 0x40 }
-                var af = Data([flags])
+                var af: [UInt8] = [flags]
                 if let pcrV = pcr {
                     flags |= 0x10
-                    af = Data([flags])
+                    af = [flags]
                     let base = UInt64(bitPattern: pcrV) & 0x1_FFFF_FFFF
                     af.append(contentsOf: [
                         UInt8((base >> 25) & 0xFF), UInt8((base >> 17) & 0xFF),
@@ -492,18 +499,16 @@ private final class TSWriter {
             }
             var capacity = 184 - (adaptation.isEmpty ? 0 : adaptation.count + 1)
             if remaining < capacity {
-                // Need stuffing: grow the adaptation field to fill the packet exactly.
                 let stuff = capacity - remaining
                 if adaptation.isEmpty {
-                    adaptation = Data([0x00])
-                    var need = stuff - 2  // AF length byte + flags byte consumed 2 of the gap
+                    adaptation = [0x00]
+                    var need = stuff - 2
                     if need < 0 {
-                        // Gap of exactly 1 byte: AF with length 0 (no flags byte).
-                        pkt = Data([0x47, UInt8((first ? 0x40 : 0x00) | (pid >> 8)), UInt8(pid & 0xFF),
-                                    UInt8(0x30 | nextCC(pid)), 0x00])
-                        pkt.append(pes.sub(off, remaining))
-                        if pkt.count != 188 { ok = false; return }
-                        out.append(pkt)
+                        let start = out.count
+                        out.append(contentsOf: [0x47, UInt8((first ? 0x40 : 0x00) | (pid >> 8)),
+                                                UInt8(pid & 0xFF), UInt8(0x30 | nextCC(pid)), 0x00])
+                        out.append(contentsOf: pes[off..<(off + remaining)])
+                        if out.count - start != 188 { ok = false; return }
                         off += remaining
                         first = false
                         continue
@@ -515,16 +520,16 @@ private final class TSWriter {
                 capacity = remaining
             }
             let hasAF = !adaptation.isEmpty
-            pkt = Data([0x47, UInt8((first ? 0x40 : 0x00) | (pid >> 8)), UInt8(pid & 0xFF),
-                        UInt8((hasAF ? 0x30 : 0x10) | nextCC(pid))])
+            let start = out.count
+            out.append(contentsOf: [0x47, UInt8((first ? 0x40 : 0x00) | (pid >> 8)), UInt8(pid & 0xFF),
+                                    UInt8((hasAF ? 0x30 : 0x10) | nextCC(pid))])
             if hasAF {
-                pkt.append(UInt8(adaptation.count))
-                pkt.append(adaptation)
+                out.append(UInt8(adaptation.count))
+                out.append(contentsOf: adaptation)
             }
             let n = min(capacity, remaining)
-            pkt.append(pes.sub(off, n))
-            if pkt.count != 188 { ok = false; return }   // never serve a corrupt segment
-            out.append(pkt)
+            out.append(contentsOf: pes[off..<(off + n)])
+            if out.count - start != 188 { ok = false; return }
             off += n
             first = false
         }
@@ -640,7 +645,7 @@ final class HLSTransmuxer {
         let aSamples = aSamplesAll.filter { $0.dts >= a0 && $0.dts < a1 }
         guard !aSamples.isEmpty else { return nil }
 
-        let w = TSWriter()
+        let w = TSWriter(reserve: videoBlob.count + audioBlob.count + 65536)
         w.writePAT()
         w.writePMT()
 
@@ -672,7 +677,7 @@ final class HLSTransmuxer {
         items.sort { $0.dts90 < $1.dts90 }
         for item in items { item.write(w) }
         guard w.ok else { return nil }
-        return w.out
+        return w.data
     }
 
     // Transmux one AUDIO-ONLY segment: one audio fragment -> MPEG-TS with a single AAC stream.
@@ -684,7 +689,7 @@ final class HLSTransmuxer {
         guard let aSamples = parseFragments(audioBlob, defaults: info.aInit.defaults),
               !aSamples.isEmpty else { return nil }
 
-        let w = TSWriter()
+        let w = TSWriter(reserve: audioBlob.count * 2 + 65536)
         w.writePAT()
         w.writePMT(audioOnly: true)
 
@@ -699,7 +704,7 @@ final class HLSTransmuxer {
             isFirst = false
         }
         guard w.ok else { return nil }
-        return w.out
+        return w.data
     }
 
     // Segment `seg`'s time window converted to the AUDIO track's timescale.
