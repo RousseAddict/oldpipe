@@ -37,6 +37,22 @@ private class CurlDownloadBox {
 // Accumulator for one bounded ranged GET. `shouldAbort` is polled from the libcurl progress
 // callback (off the main thread) so a caller can kill a mid-flight transfer: StreamProxy uses
 // it for its superseded-generation check, OfflineDownloader for user cancellation.
+// Phase timings of one transfer, filled by rangeFetch when the caller passes one.
+// `reusedConnection` is the question this exists to answer: a fresh TCP+TLS handshake
+// costs 1-3s on an iPhone 4S, so a segment loop that silently reconnects every time is
+// slow for a reason no amount of mux optimisation will fix.
+final class CurlTiming {
+    var namelookup = 0.0
+    var connect = 0.0
+    var appconnect = 0.0
+    var total = 0.0
+    // libcurl reports 0 for a phase that did not happen. No connect AND no TLS handshake
+    // means this transfer rode an existing connection out of the shared cache.
+    var reusedConnection: Bool { return connect == 0 && appconnect == 0 }
+    var ms: Int { return Int(total * 1000) }
+    var tlsMs: Int { return Int(appconnect * 1000) }
+}
+
 final class CurlRangeCtx {
     var data = Data()
     var aborted = false
@@ -139,6 +155,7 @@ class CurlFetcher {
     // body would silently corrupt fragment offsets downstream. Returns nil on network error,
     // non-206, abort, or any short/over-long body.
     static func rangeFetch(url: String, start: Int64, end: Int64, timeout: Int = 60,
+                           timing: CurlTiming? = nil,
                            shouldAbort: @escaping () -> Bool = { false }) -> Data? {
         guard end >= start else { return nil }
         _ = curlGlobalInit
@@ -161,6 +178,11 @@ class CurlFetcher {
 
         let rc = curl_bridge_perform(h)
         let code = curl_bridge_response_code(h)
+        // Read timings BEFORE the guard: a failed transfer's phase times are the most
+        // interesting ones, and the handle is cleaned up on the way out.
+        if let t = timing {
+            curl_bridge_timing(h, &t.namelookup, &t.connect, &t.appconnect, &t.total)
+        }
         let want = end - start + 1
         guard rc == 0, code == 206, !ctx.aborted, Int64(ctx.data.count) == want else { return nil }
         return ctx.data

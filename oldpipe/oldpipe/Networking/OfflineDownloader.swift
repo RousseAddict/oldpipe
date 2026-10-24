@@ -24,6 +24,38 @@ import Foundation
 //   * Memory stays flat — one ~1.4MB segment is in RAM at a time, which an iPhone 4S can take.
 //   * Progress is exact — segments done / segments total, not a byte estimate.
 
+// Running totals for one download, logged per segment and summarised at the end. The
+// question it exists to answer is `freshConns`: the app makes a NEW curl handle per
+// segment and relies on the shared connection cache to hand back a live connection. If
+// that is silently not happening, every segment pays a TCP+TLS handshake — 1-3s each on
+// an iPhone 4S — and no amount of mux tuning would ever explain the result.
+private final class DownloadStats {
+    var fetchMs = 0, muxMs = 0, writeMs = 0
+    var tlsMs = 0, freshConns = 0, requests = 0
+    var bytes = 0
+    let started = Date()
+
+    func note(_ t: CurlTiming, bytes n: Int) {
+        requests += 1
+        fetchMs += t.ms
+        bytes += n
+        if !t.reusedConnection { freshConns += 1; tlsMs += t.tlsMs }
+    }
+
+    // Wall-clock, so it includes anything the three buckets miss.
+    var totalMs: Int { return Int(Date().timeIntervalSince(started) * 1000) }
+
+    func summary(_ label: String, segments: Int) -> String {
+        let mb = Double(bytes) / 1048576.0
+        let secs = max(Double(totalMs) / 1000.0, 0.001)
+        return String(format:
+            "%@ %d segs %.1f MB in %.1fs (%.2f MB/s) | fetch %dms mux %dms write %dms | "
+            + "%d reqs, %d FRESH CONNECTIONS (tls %dms)",
+            label, segments, mb, secs, mb / secs, fetchMs, muxMs, writeMs,
+            requests, freshConns, tlsMs)
+    }
+}
+
 final class OfflineDownloader {
 
     // ONE serial queue for every offline download, created once (a DispatchQueue(label:) per
@@ -90,7 +122,13 @@ final class OfflineDownloader {
     // baseUrl is signed with a ~6h expiry. Failure here never fails the download.
     private static func saveCaptions(_ captions: [CaptionTrack], for videoId: String) {
         guard !captions.isEmpty else { return }
-        Captions.saveOfflineSync(captions, for: videoId, shouldAbort: { isCancelled(videoId) })
+        // Bracketed with its own start line: captions are fetched BEFORE the media, so any
+        // time spent here is time the user sees before the progress counter starts moving.
+        let t0 = Date()
+        DebugLog.log("Offline", "id=\(videoId) fetching \(captions.count) caption track(s)...")
+        let n = Captions.saveOfflineSync(captions, for: videoId, shouldAbort: { isCancelled(videoId) })
+        DebugLog.log("Offline", "id=\(videoId) captions done \(n)/\(captions.count) in "
+            + "\(Int(Date().timeIntervalSince(t0) * 1000))ms")
     }
 
     // Stop a download. The in-flight ranged GET aborts within ~1s (libcurl progress callback)
@@ -152,6 +190,7 @@ final class OfflineDownloader {
 
         DebugLog.log("Offline", "id=\(video.id) start itag=\(vStream.itag) segments=\(total)")
 
+        let stats = DownloadStats()
         var refreshesLeft = maxRefreshes
         var seg = 0
         var done = 0
@@ -176,9 +215,14 @@ final class OfflineDownloader {
             }
 
             let abort: () -> Bool = { isCancelled(video.id) }
-            let vBlob = CurlFetcher.rangeFetch(url: vURL, start: vr.start, end: vr.end, shouldAbort: abort)
+            let vTime = CurlTiming(), aTime = CurlTiming()
+            let fetch0 = Date()
+            let vBlob = CurlFetcher.rangeFetch(url: vURL, start: vr.start, end: vr.end,
+                                               timing: vTime, shouldAbort: abort)
             let aBlob = vBlob == nil ? nil
-                : CurlFetcher.rangeFetch(url: aURL, start: ar.start, end: ar.end, shouldAbort: abort)
+                : CurlFetcher.rangeFetch(url: aURL, start: ar.start, end: ar.end,
+                                         timing: aTime, shouldAbort: abort)
+            let fetchMs = Int(Date().timeIntervalSince(fetch0) * 1000)
 
             guard let v = vBlob, let a = aBlob else {
                 if isCancelled(video.id) { return false }
@@ -195,20 +239,34 @@ final class OfflineDownloader {
                 continue    // same seg, new urls
             }
 
+            let mux0 = Date()
             guard let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: v, audioBlob: a) else {
                 DebugLog.log("Offline", "id=\(video.id) FAILED — mux failed on seg \(seg)")
                 return false
             }
+            let muxMs = Int(Date().timeIntervalSince(mux0) * 1000)
+
+            let write0 = Date()
             guard write(ts, to: segPath) else {
                 DebugLog.log("Offline", "id=\(video.id) FAILED — cannot write seg \(seg) (disk full?)")
                 return false
             }
+            let writeMs = Int(Date().timeIntervalSince(write0) * 1000)
+
+            stats.note(vTime, bytes: v.count)
+            stats.note(aTime, bytes: a.count)
+            stats.muxMs += muxMs
+            stats.writeMs += writeMs
+            DebugLog.log("Offline", "seg \(seg)/\(total) fetch=\(fetchMs)ms "
+                + "(v \(vTime.ms)ms\(vTime.reusedConnection ? "" : " FRESH tls \(vTime.tlsMs)ms"), "
+                + "a \(aTime.ms)ms\(aTime.reusedConnection ? "" : " FRESH tls \(aTime.tlsMs)ms")) "
+                + "mux=\(muxMs)ms write=\(writeMs)ms")
 
             seg += 1; done += 1
             report(done, total, progress)
         }
 
-        DebugLog.log("Offline", "id=\(video.id) COMPLETE \(total) segments")
+        DebugLog.log("Offline", stats.summary("id=\(video.id) COMPLETE", segments: total))
         return true
     }
 
@@ -247,6 +305,7 @@ final class OfflineDownloader {
 
         DebugLog.log("Offline", "id=\(video.id) start AUDIO itag=\(aStream.itag) segments=\(total)")
 
+        let stats = DownloadStats()
         var refreshesLeft = maxRefreshes
         var seg = 0
         var done = 0
@@ -267,7 +326,9 @@ final class OfflineDownloader {
                 DebugLog.log("Offline", "id=\(video.id) FAILED — no audio range for seg \(seg)")
                 return false
             }
+            let aTime = CurlTiming()
             guard let blob = CurlFetcher.rangeFetch(url: aURL, start: ar.start, end: ar.end,
+                                                    timing: aTime,
                                                     shouldAbort: { isCancelled(video.id) }) else {
                 if isCancelled(video.id) { return false }
                 guard refreshesLeft > 0, let a = refreshAudio(video.id, aItag: aStream.itag) else {
@@ -280,20 +341,32 @@ final class OfflineDownloader {
                 continue
             }
 
+            let mux0 = Date()
             guard let ts = HLSTransmuxer.muxAudioSegment(info, seg: seg, audioBlob: blob) else {
                 DebugLog.log("Offline", "id=\(video.id) FAILED — audio mux failed on seg \(seg)")
                 return false
             }
+            let muxMs = Int(Date().timeIntervalSince(mux0) * 1000)
+
+            let write0 = Date()
             guard write(ts, to: segPath) else {
                 DebugLog.log("Offline", "id=\(video.id) FAILED — cannot write audio seg \(seg) (disk full?)")
                 return false
             }
+            let writeMs = Int(Date().timeIntervalSince(write0) * 1000)
+
+            stats.note(aTime, bytes: blob.count)
+            stats.muxMs += muxMs
+            stats.writeMs += writeMs
+            DebugLog.log("Offline", "audio seg \(seg)/\(total) fetch=\(aTime.ms)ms"
+                + "\(aTime.reusedConnection ? " (reused)" : " FRESH tls \(aTime.tlsMs)ms") "
+                + "mux=\(muxMs)ms write=\(writeMs)ms")
 
             seg += 1; done += 1
             report(done, total, progress)
         }
 
-        DebugLog.log("Offline", "id=\(video.id) AUDIO COMPLETE \(total) segments")
+        DebugLog.log("Offline", stats.summary("id=\(video.id) AUDIO COMPLETE", segments: total))
         return true
     }
 

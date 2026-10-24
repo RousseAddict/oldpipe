@@ -25,6 +25,13 @@ void        curl_bridge_set_post_body(CurlHandle h, const char *body, long len);
 void        curl_bridge_set_useragent(CurlHandle h, const char *ua);
 int         curl_bridge_perform(CurlHandle h);
 long        curl_bridge_response_code(CurlHandle h);
+/* Phase timings of the last perform on this handle, in seconds (any may be NULL).
+   connect == 0 && appconnect == 0 means the CONNECTION WAS REUSED out of the shared
+   cache — which is the whole point of asking: a fresh TCP+TLS handshake costs 1-3s on
+   an iPhone 4S, so "was it reused?" is the difference between a fast and a slow
+   segment loop. */
+void        curl_bridge_timing(CurlHandle h, double *namelookup, double *connect,
+                               double *appconnect, double *total);
 const char *curl_bridge_strerror(int code);
 
 /* --- Raw TLS socket (CONNECT_ONLY) — used by the Chromecast CASTV2 client ---

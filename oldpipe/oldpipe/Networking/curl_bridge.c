@@ -159,6 +159,16 @@ long curl_bridge_response_code(CurlHandle handle) {
     return code;
 }
 
+void curl_bridge_timing(CurlHandle handle, double *namelookup, double *connect,
+                        double *appconnect, double *total) {
+    CURL *e = ((CurlBridgeHandle *)handle)->easy;
+    double v;
+    if (namelookup) { v = 0; curl_easy_getinfo(e, CURLINFO_NAMELOOKUP_TIME, &v); *namelookup = v; }
+    if (connect)    { v = 0; curl_easy_getinfo(e, CURLINFO_CONNECT_TIME,    &v); *connect    = v; }
+    if (appconnect) { v = 0; curl_easy_getinfo(e, CURLINFO_APPCONNECT_TIME, &v); *appconnect = v; }
+    if (total)      { v = 0; curl_easy_getinfo(e, CURLINFO_TOTAL_TIME,      &v); *total      = v; }
+}
+
 const char *curl_bridge_strerror(int code) {
     return curl_easy_strerror((CURLcode)code);
 }
