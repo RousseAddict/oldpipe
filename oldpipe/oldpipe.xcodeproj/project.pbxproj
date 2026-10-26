@@ -51,6 +51,7 @@
 		BB000001000000000000BC1E /* CastSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1E /* CastSession.swift */; };
 		BB000001000000000000BC1F /* StreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1F /* StreamResolver.swift */; };
 		BB000001000000000000BC21 /* HLSTransmuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB21 /* HLSTransmuxer.swift */; };
+		BB000001000000000000BC33 /* MP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB33 /* MP4Remuxer.swift */; };
 		BB000001000000000000BC1D /* CastDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1D /* CastDiscovery.swift */; };
 		BB000001000000000000BC1C /* CastMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1C /* CastMessage.swift */; };
 		BB000001000000000000BC19 /* StreamProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB19 /* StreamProxy.swift */; };
@@ -64,6 +65,7 @@
 		BB000001000000000000BC08 /* SearchVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB08 /* SearchVC.swift */; };
 		BB000001000000000000BC09 /* VideoPlayerVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB09 /* VideoPlayerVC.swift */; };
 		BB000001000000000000BC0A /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0A /* DownloadManager.swift */; };
+		BB000001000000000000BC34 /* PhotoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB34 /* PhotoExporter.swift */; };
 		BB000001000000000000BC0B /* DownloadsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0B /* DownloadsVC.swift */; };
 		BB000001000000000000BC17 /* PlaylistDetailVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB17 /* PlaylistDetailVC.swift */; };
 		BB000001000000000000BC18 /* SettingsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB18 /* SettingsVC.swift */; };
@@ -154,6 +156,7 @@
 		BB000001000000000000BB1E /* CastSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastSession.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1F /* StreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamResolver.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB21 /* HLSTransmuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HLSTransmuxer.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB33 /* MP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MP4Remuxer.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1D /* CastDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastDiscovery.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1C /* CastMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastMessage.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB19 /* StreamProxy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamProxy.swift; sourceTree = "<group>"; };
@@ -167,6 +170,7 @@
 		BB000001000000000000BB08 /* SearchVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB09 /* VideoPlayerVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayerVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0A /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB34 /* PhotoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoExporter.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0B /* DownloadsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB17 /* PlaylistDetailVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistDetailVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB18 /* SettingsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsVC.swift; sourceTree = "<group>"; };
@@ -302,6 +306,7 @@
 				BB000001000000000000BB1E /* CastSession.swift */,
 				BB000001000000000000BB1F /* StreamResolver.swift */,
 				BB000001000000000000BB21 /* HLSTransmuxer.swift */,
+				BB000001000000000000BB33 /* MP4Remuxer.swift */,
 				BB000001000000000000BB1D /* CastDiscovery.swift */,
 				BB000001000000000000BB1C /* CastMessage.swift */,
 				BB000001000000000000BB19 /* StreamProxy.swift */,
@@ -322,6 +327,7 @@
 				BB000001000000000000BB06 /* Video.swift */,
 				BB000001000000000000BB23 /* Captions.swift */,
 				BB000001000000000000BB0A /* DownloadManager.swift */,
+				BB000001000000000000BB34 /* PhotoExporter.swift */,
 				BB000001000000000000BB0C /* Channel.swift */,
 				BB000001000000000000BB14 /* Playlist.swift */,
 				BB000001000000000000BB0D /* SubscriptionManager.swift */,
@@ -541,6 +547,7 @@
 				BB000001000000000000BC1E /* CastSession.swift in Sources */,
 				BB000001000000000000BC1F /* StreamResolver.swift in Sources */,
 				BB000001000000000000BC21 /* HLSTransmuxer.swift in Sources */,
+				BB000001000000000000BC33 /* MP4Remuxer.swift in Sources */,
 				BB000001000000000000BC1D /* CastDiscovery.swift in Sources */,
 				BB000001000000000000BC1C /* CastMessage.swift in Sources */,
 				BB000001000000000000BC19 /* StreamProxy.swift in Sources */,
@@ -554,6 +561,7 @@
 				BB000001000000000000BC08 /* SearchVC.swift in Sources */,
 				BB000001000000000000BC09 /* VideoPlayerVC.swift in Sources */,
 				BB000001000000000000BC0A /* DownloadManager.swift in Sources */,
+				BB000001000000000000BC34 /* PhotoExporter.swift in Sources */,
 				BB000001000000000000BC0B /* DownloadsVC.swift in Sources */,
 				BB000001000000000000BC17 /* PlaylistDetailVC.swift in Sources */,
 				BB000001000000000000BC18 /* SettingsVC.swift in Sources */,
@@ -741,6 +749,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "oldpipe saves downloaded videos to your photo library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "oldpipe saves downloaded videos to your photo library.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -768,6 +778,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "oldpipe saves downloaded videos to your photo library.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "oldpipe saves downloaded videos to your photo library.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

@@ -140,6 +140,7 @@ class DownloadManager {
         // OfflineDownloader writing segments into the directory we just deleted — and its
         // completion would then re-register the entry the user asked us to remove.
         cancelDownload(videoId)
+        PhotoExporter.shared.downloadRemoved(videoId)   // same reason: it reads the files deleted below
         removeFiles(videoId)
         var list = rawList()
         list.removeAll { ($0["id"] as? String) == videoId }
@@ -196,6 +197,7 @@ class DownloadManager {
         }) { success in
             inFlight[video.id] = nil
             if success { register(video) } // on failure the partial entry remains (Incomplete)
+            PhotoExporter.shared.downloadFinished(video, success: success)
         }
     }
 
@@ -223,6 +225,7 @@ class DownloadManager {
         }) { success in
             inFlight[video.id] = nil
             if success { store(video, complete: true, quality: quality, audioOnly: false) }
+            PhotoExporter.shared.downloadFinished(video, success: success)
         }
     }
 
@@ -326,17 +329,18 @@ class DownloadManager {
     // so it stays meaningful while a download is still filling the directory. DownloadsVC
     // precomputes it once per reload rather than per cell (it walks the directory).
     static func fileSizeText(for videoId: String) -> String {
-        let bytes: Double
-        switch kind(for: videoId) {
-        case .none:
-            return ""
-        case .progressive:
-            bytes = Double(byteSize(filePath(for: videoId)))
-        case .hls:
-            bytes = Double(bundleByteSize(for: videoId))
-        }
+        let bytes = Double(diskBytes(for: videoId))
         guard bytes > 0 else { return "" }
         return String(format: "%.1f MB", bytes / (1024.0 * 1024.0))
+    }
+
+    // Bytes on disk for whichever shape this download is (0 = nothing there).
+    static func diskBytes(for videoId: String) -> Int64 {
+        switch kind(for: videoId) {
+        case .none:        return 0
+        case .progressive: return byteSize(filePath(for: videoId))
+        case .hls:         return bundleByteSize(for: videoId)
+        }
     }
 
     // Total bytes of an HLS bundle (playlist + every segment written so far).

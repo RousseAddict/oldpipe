@@ -86,6 +86,7 @@ oldpipe follows the same principles as [NewPipe](https://newpipe.net) on Android
 
 **Beyond the app**
 - Download videos for offline playback
+- Save any video to the Photos gallery, at any quality
 - Chromecast
 - Share links out to any app
 

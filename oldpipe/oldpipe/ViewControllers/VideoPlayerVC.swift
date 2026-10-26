@@ -230,6 +230,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             downloadBtn?.setTitle("Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%...", for: .normal)
             observeDownload()
         }
+        // Same for a Save to Photos, which reports on the Share button. One that finished while
+        // we were away must not leave its last "Saving 90%" there.
+        if PhotoExporter.shared.isBusy(video.id) {
+            observePhotoExport()
+        } else {
+            shareBtn?.setTitle("Share", for: .normal)
+        }
 
         // Fetch related videos immediately on open (once per VC instance).
         if relatedState == .idle { loadRelated() }
@@ -267,6 +274,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &controlsHideKey) as? Timer { t.invalidate() }
         stopCaptionTimer()
         if fsOverlay != nil { exitFullscreen() }
@@ -1548,15 +1556,127 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sheet.delegate = self
         sheet.title = shareURL()
         sheet.addButton(withTitle: "Copy Link")
-        // The long press on the title / description is invisible until you try it; these make
-        // the same two actions discoverable. Description only when there is one to copy.
-        sheet.addButton(withTitle: "Copy Title")
-        if !descriptionText.isEmpty { sheet.addButton(withTitle: "Copy Description") }
+        // Copy Title and Copy Description used to sit here; both still copy with a long press.
+        if let photos = photosSheetTitle() {
+            let idx = sheet.addButton(withTitle: photos)
+            if photos == "Stop Saving to Photos" { sheet.destructiveButtonIndex = idx }
+        }
         sheet.addButton(withTitle: "Open in Safari")
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 1
         sheet.show(in: view)
+    }
+
+    // MARK: - Save to Photos (the work is PhotoExporter's; this is the asking and the progress)
+
+    private static let photosSaveTag = 41       // UIAlertView: save the download
+    private static let photosWhenDoneTag = 42   // UIAlertView: save it once it has downloaded
+
+    // The Share sheet's Photos entry, nil for none: an audio-only download has no video to
+    // save, and once a file is with Photos (or a Stop is under way) there is nothing to undo.
+    private func photosSheetTitle() -> String? {
+        let id = video.id
+        if PhotoExporter.shared.canStop(id) { return "Stop Saving to Photos" }
+        if PhotoExporter.shared.isBusy(id) { return nil }
+        if DownloadManager.isAudioOnly(id),
+           DownloadManager.isDownloaded(id) || DownloadManager.isDownloading(id) { return nil }
+        return "Save to Photos"
+    }
+
+    // Every route asks first: a save can be a long conversion and a big file in the Camera Roll.
+    private func saveToPhotosTapped() {
+        let id = video.id
+        if DownloadManager.isDownloading(id) {
+            let pct = Int(DownloadManager.progress(for: id) * 100)
+            confirmPhotos(tag: VideoPlayerVC.photosWhenDoneTag, title: "Save to Photos",
+                          message: "This video is still downloading (\(pct)%). "
+                                 + "Save it to Photos when the download finishes?",
+                          go: "Save When Done")
+        } else if PhotoExporter.canExport(id) {
+            let what = [DownloadManager.qualityLabel(for: id), DownloadManager.fileSizeText(for: id)]
+                .filter { !$0.isEmpty }.joined(separator: " \u{2022} ")
+            var message = (what.isEmpty ? "This video" : what) + " will be added to your photo library."
+            if PhotoExporter.shared.wasSaved(id) {
+                message += " It was already saved once, so this adds a second copy."
+            }
+            confirmPhotos(tag: VideoPlayerVC.photosSaveTag, title: "Save to Photos?",
+                          message: message, go: "Save")
+        } else {
+            showPhotosDownloadPicker()   // its Download & Save button is the confirmation
+        }
+    }
+
+    // Answered in alertView(_:clickedButtonAt:).
+    private func confirmPhotos(tag: Int, title: String, message: String, go: String) {
+        let alert = UIAlertView()
+        alert.delegate = self
+        alert.tag = tag
+        alert.title = title
+        alert.message = message
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: go)
+        alert.cancelButtonIndex = 0
+        alert.show()
+    }
+
+    // Not downloaded: the Download picker with the video tiers only (audio-only is no use to
+    // Photos, and captions can't go with it). What it downloads is deleted once Photos has it,
+    // so it never shows up in Downloads.
+    private func showPhotosDownloadPicker() {
+        let choices = downloadChoices()
+        guard !choices.isEmpty else {
+            statusLabel?.text = streams.isEmpty ? "Still loading streams..."
+                                               : "This video can't be saved to Photos (no usable stream)"
+            statusLabel?.isHidden = false
+            return
+        }
+        let pick = preselection(choices, audio: nil)
+        let section = DownloadOptionSection(
+            title: "Video",
+            rows: choices.map { downloadRow($0, downloaded: false) },
+            mode: .exclusive,
+            initialSelection: [pick.row])
+        DownloadOptionsView.present(in: view, title: "Save to Photos", sections: [section],
+                                    confirmTitle: "Download & Save") { [weak self] picked in
+            guard let self = self, let idx = picked.first?.first,
+                  idx >= 0, idx < choices.count else { return }
+            let c = choices[idx]
+            let audio = c.isProgressive ? nil : self.audioStreamForHLS()
+            guard c.isProgressive || audio != nil else { return }
+            PhotoExporter.shared.downloadAndSave(self.video, quality: c.label, videoStream: c.stream,
+                                                 audioStream: audio, estimatedBytes: c.estimatedBytes)
+            self.observePhotoExport()
+        }
+    }
+
+    // Mirrors a Save to Photos onto the Share button ("Saving 34%"), the way observeDownload
+    // does for the Download button. Torn down on disappear; the export itself carries on.
+    private func observePhotoExport() {
+        if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
+        // Only an export seen running here earns a "Saved" flash — not one that never started
+        // (no room), and not an earlier save of the same video.
+        var sawBusy = false
+        let tick = { [weak self] in
+            guard let self = self else { return }
+            let id = self.video.id
+            if PhotoExporter.shared.isBusy(id), let s = PhotoExporter.shared.statusText(id) {
+                sawBusy = true
+                self.shareBtn?.setTitle(s, for: .normal)
+                return
+            }
+            if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
+            if sawBusy && PhotoExporter.shared.wasSaved(id) {
+                self.flash(self.shareBtn, "Saved \u{2713}", revertTo: "Share")
+            } else {
+                self.shareBtn?.setTitle("Share", for: .normal)
+            }
+        }
+        let t = Timer(timeInterval: 0.5, target: BlockTarget(tick),
+                      selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        objc_setAssociatedObject(self, &photoPollKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        tick()   // "Waiting..." at once, not half a second later
     }
 
     // MARK: - Add to playlist
@@ -1605,12 +1725,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             case "Copy Link":
                 UIPasteboard.general.string = shareURL()
                 flash(shareBtn, "Copied \u{2713}", revertTo: "Share")
-            case "Copy Title":
-                UIPasteboard.general.string = video.title
-                flash(shareBtn, "Copied \u{2713}", revertTo: "Share")
-            case "Copy Description":
-                UIPasteboard.general.string = descriptionText
-                flash(shareBtn, "Copied \u{2713}", revertTo: "Share")
+            case "Save to Photos":
+                // Its confirmation (an alert, or the quality picker) waits for this sheet to
+                // finish dismissing — same reason as the Playback menu below.
+                let t = Timer(timeInterval: 0.35, target: BlockTarget { [weak self] in
+                    self?.saveToPhotosTapped()
+                }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+                RunLoop.main.add(t, forMode: .common)
+            case "Stop Saving to Photos":
+                PhotoExporter.shared.cancel(video.id)
+                observePhotoExport()
             case "Open in Safari":
                 if let u = URL(string: shareURL()) { UIApplication.shared.openURL(u) }
             default:
@@ -1671,9 +1795,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
-    // MARK: - UIAlertViewDelegate (new-playlist name entry)
+    // MARK: - UIAlertViewDelegate (new-playlist name entry, Save to Photos confirmations)
 
     func alertView(_ alertView: UIAlertView, clickedButtonAt buttonIndex: Int) {
+        // The two Save to Photos confirmations: 0 = Cancel, 1 = go.
+        if alertView.tag == VideoPlayerVC.photosSaveTag || alertView.tag == VideoPlayerVC.photosWhenDoneTag {
+            guard buttonIndex == 1 else { return }
+            if alertView.tag == VideoPlayerVC.photosSaveTag {
+                PhotoExporter.shared.export(video)
+                observePhotoExport()
+            } else {
+                PhotoExporter.shared.saveWhenDownloaded(video.id)
+            }
+            return
+        }
         guard buttonIndex == 1 else { return }   // 0 = Cancel, 1 = Create
         let name = (alertView.textField(at: 0)?.text ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2840,25 +2975,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let audioChoice = audioDownloadChoice()
         let alreadyAudio = DownloadManager.isAudioOnly(video.id)
 
-        func row(_ c: DownloadChoice, downloaded: Bool) -> DownloadOptionRow {
-            let detail = c.estimatedBytes > 0
-                ? String(format: "~%.0f MB", Double(c.estimatedBytes) / (1024.0 * 1024.0))
-                : (c.isProgressive ? "muxed" : "transmuxed")
-            return DownloadOptionRow(title: c.label, detail: detail,
-                                     mark: downloaded ? "\u{2713}" : "",
-                                     enabled: true, tag: 0)
-        }
-
         let pick = preselection(choices, audio: audioChoice)
         var sections = [DownloadOptionSection(
             title: "Video",
-            rows: choices.map { row($0, downloaded: !alreadyAudio && $0.label == already) },
+            rows: choices.map { downloadRow($0, downloaded: !alreadyAudio && $0.label == already) },
             mode: .exclusive,
             initialSelection: pick.section == 0 ? [pick.row] : [])]
         if let a = audioChoice {
             sections.append(DownloadOptionSection(
                 title: "Audio",
-                rows: [row(a, downloaded: alreadyAudio)],
+                rows: [downloadRow(a, downloaded: alreadyAudio)],
                 mode: .exclusive,
                 initialSelection: pick.section == 1 ? [0] : []))
         }
@@ -2900,6 +3026,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                   idx >= 0, idx < choices.count else { return }
             self.beginDownload(choices[idx], captions: tracks)
         }
+    }
+
+    // One picker row (Download and Save to Photos): the tier, its size estimate, and a tick
+    // when it is the one already on disk.
+    private func downloadRow(_ c: DownloadChoice, downloaded: Bool) -> DownloadOptionRow {
+        let detail = c.estimatedBytes > 0
+            ? String(format: "~%.0f MB", Double(c.estimatedBytes) / (1024.0 * 1024.0))
+            : (c.isProgressive ? "muxed" : "transmuxed")
+        return DownloadOptionRow(title: c.label, detail: detail,
+                                 mark: downloaded ? "\u{2713}" : "",
+                                 enabled: true, tag: 0)
     }
 
     // Which caption rows open ticked: the languages ticked last time that this video also
@@ -3080,6 +3217,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 self.hideSpinner()
                 self.statusLabel?.text = "Saved for offline"
                 self.statusLabel?.isHidden = false
+                // A "Save When Done" has just started its export (DownloadManager's completion
+                // ran before this tick): put its progress on the Share button.
+                if PhotoExporter.shared.isBusy(self.video.id) { self.observePhotoExport() }
             } else {
                 self.hideSpinner()
                 self.statusLabel?.text = "Download failed"
@@ -3253,6 +3393,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 private var timerKey = "timerKey"
 private var progressTimerKey = "progressTimerKey"
 private var downloadPollKey = "downloadPollKey"
+private var photoPollKey = "photoPollKey"
 private var controlsHideKey = "controlsHideKey"
 private var captionTimerKey = "captionTimerKey"
 

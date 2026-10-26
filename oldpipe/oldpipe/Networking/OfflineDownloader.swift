@@ -89,16 +89,24 @@ final class OfflineDownloader {
     // Walk every segment of `videoStream` + `audioStream` into downloads/<id>/.
     // `progress` (0..1) and `completion` both fire on the main thread. Already-downloaded
     // segments are skipped, so calling this again after a failure resumes.
+    //
+    // `dir` + `cancelKey` let PhotoExporter download a bundle that is NOT a download: it lands
+    // in its own temp dir, and cancelling it must not stop (or be stopped by) a real download
+    // of the same video, so it is cancelled under its own key rather than the video id.
     static func start(video: Video, videoStream: VideoStream, audioStream: VideoStream,
                       captions: [CaptionTrack] = [],
+                      into dir: String? = nil, cancelKey: String? = nil,
                       progress: @escaping (Float) -> Void,
                       completion: @escaping (Bool) -> Void) {
-        clearCancel(video.id)
+        let key = cancelKey ?? video.id
+        let dir = dir ?? DownloadManager.bundleDir(for: video.id)
+        clearCancel(key)
         queue.async {
             saveCaptions(captions, for: video.id)
-            let ok = run(video: video, vStream: videoStream, aStream: audioStream, progress: progress)
+            let ok = run(video: video, vStream: videoStream, aStream: audioStream,
+                         dir: dir, key: key, progress: progress)
             AppQueue.main.async {
-                clearCancel(video.id)
+                clearCancel(key)
                 completion(ok)
             }
         }
@@ -162,9 +170,10 @@ final class OfflineDownloader {
 
     // MARK: - The download itself (runs on `queue`)
 
+    // `key` is what cancel() was called with — the video id, except for a Photos-only bundle.
     private static func run(video: Video, vStream: VideoStream, aStream: VideoStream,
+                            dir: String, key: String,
                             progress: @escaping (Float) -> Void) -> Bool {
-        let dir = DownloadManager.bundleDir(for: video.id)
         guard ensureDir(dir) else {
             DebugLog.log("Offline", "id=\(video.id) FAILED — cannot create \(dir)")
             return false
@@ -176,11 +185,11 @@ final class OfflineDownloader {
         // Both streams' init+sidx heads (bytes 0...indexEnd) — the segment map for the whole
         // download. One refresh attempt here too: a url minted minutes ago can already be stale.
         var parsed = heads(vURL: vURL, aURL: aURL, vEnd: vStream.indexEnd, aEnd: aStream.indexEnd,
-                           videoId: video.id)
+                           key: key)
         if parsed == nil, let r = refresh(video.id, vItag: vStream.itag, aItag: aStream.itag) {
             vURL = r.v.url; aURL = r.a.url
             parsed = heads(vURL: vURL, aURL: aURL, vEnd: r.v.indexEnd, aEnd: r.a.indexEnd,
-                           videoId: video.id)
+                           key: key)
         }
         guard let info = parsed else {
             DebugLog.log("Offline", "id=\(video.id) FAILED — could not parse stream heads")
@@ -213,7 +222,7 @@ final class OfflineDownloader {
         var pending: PrefetchSlot?
         defer { pending?.abandonAndDrain() }
         while seg < total {
-            if isCancelled(video.id) {
+            if isCancelled(key) {
                 DebugLog.log("Offline", "id=\(video.id) cancelled at seg \(seg)/\(total)")
                 return false
             }
@@ -232,7 +241,7 @@ final class OfflineDownloader {
                 return false
             }
 
-            let abort: () -> Bool = { isCancelled(video.id) }
+            let abort: () -> Bool = { isCancelled(key) }
 
             // Bytes for this segment: already in hand if the previous iteration read ahead to
             // it, otherwise fetched right here. A prefetch for some OTHER segment can only
@@ -256,7 +265,7 @@ final class OfflineDownloader {
             let vTime = slot.vTiming, aTime = slot.aTiming
 
             guard let v = got.v, let a = got.a else {
-                if isCancelled(video.id) { return false }
+                if isCancelled(key) { return false }
                 // googlevideo urls carry an `expire` (~6h) and can also start refusing ranges
                 // mid-download. Re-resolve and retry THIS segment rather than failing the lot.
                 guard refreshesLeft > 0,
@@ -272,7 +281,7 @@ final class OfflineDownloader {
 
             // Start the NEXT segment downloading before muxing this one, so the network runs
             // during the mux+write below instead of waiting for it to finish.
-            if seg + 1 < total, !isCancelled(video.id),
+            if seg + 1 < total, !isCancelled(key),
                fileSize((dir as NSString).appendingPathComponent("seg\(seg + 1).ts")) == 0,
                let nvr = HLSTransmuxer.videoRange(info, seg: seg + 1),
                let nar = HLSTransmuxer.audioRange(info, seg: seg + 1) {
@@ -474,8 +483,8 @@ final class OfflineDownloader {
     }
 
     private static func heads(vURL: String, aURL: String, vEnd: Int64, aEnd: Int64,
-                              videoId: String) -> HLSStreamInfo? {
-        let abort: () -> Bool = { isCancelled(videoId) }
+                              key: String) -> HLSStreamInfo? {
+        let abort: () -> Bool = { isCancelled(key) }
         guard vEnd > 0, aEnd > 0,
               let vHead = CurlFetcher.rangeFetch(url: vURL, start: 0, end: vEnd, shouldAbort: abort),
               let aHead = CurlFetcher.rangeFetch(url: aURL, start: 0, end: aEnd, shouldAbort: abort)

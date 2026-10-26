@@ -1,7 +1,8 @@
 import UIKit
 
 // MARK: - DownloadsVC
-// Lists locally downloaded videos. Tap to replay offline; swipe or Edit to delete.
+// Lists locally downloaded videos. Tap to replay offline; swipe or Edit to delete. A Save to
+// Photos started from the video page shows its progress in the row's status line.
 
 class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
@@ -59,13 +60,15 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         pollTimer = nil
     }
 
-    // Poll on .common so it fires during scroll tracking. Reloads only while a download is
-    // in flight (and not editing), so a manager-owned download's % updates live.
+    // Poll on .common so it fires during scroll tracking. Reloads only while a download or a
+    // Save to Photos is in flight (and not editing), so its % updates live.
     private func startPollTimer() {
         pollTimer?.invalidate()
         let t = Timer(timeInterval: 0.5, target: DownloadsPollProxy { [weak self] in
             guard let self = self, !self.tableView.isEditing else { return }
-            let active = self.videos.contains { DownloadManager.isDownloading($0.id) }
+            let active = self.videos.contains {
+                DownloadManager.isDownloading($0.id) || PhotoExporter.shared.isBusy($0.id)
+            }
             // Reload while active, plus one final time when the last download finishes
             // (otherwise the row stays stuck on "Downloading…"/"Incomplete").
             if active || self.wasDownloading { self.reload() }
@@ -141,21 +144,29 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         cell.textLabel?.text = video.title
         let isDownloading = DownloadManager.isDownloading(video.id)
         let isPartial = incomplete.contains(video.id)
+        let isExporting = PhotoExporter.shared.isBusy(video.id)
+        let exportText = PhotoExporter.shared.statusText(video.id)
         let sz = sizeText[video.id] ?? ""
         let status: String
         if isDownloading {
             status = "Downloading \(Int(DownloadManager.progress(for: video.id) * 100))%"
         } else if isPartial {
             status = "Incomplete" + (sz.isEmpty ? "" : " (\(sz))")
+        } else if let t = exportText {
+            status = t   // "Saving 34%" while exporting, "Saved to Photos ✓" after
         } else {
             // "720p • 48.2 MB" — the quality an entry was saved at is otherwise invisible now
             // that a download is no longer always 360p.
             let q = qualityText[video.id] ?? ""
             status = [q, sz].filter { !$0.isEmpty }.joined(separator: " \u{2022} ")
         }
-        cell.detailTextLabel?.textColor = (isDownloading || isPartial)
-            ? UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)   // amber for in-progress / partial
-            : UIColor(white: 0.55, alpha: 1)
+        if isDownloading || isPartial || isExporting {
+            cell.detailTextLabel?.textColor = UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)  // amber
+        } else if exportText != nil {
+            cell.detailTextLabel?.textColor = UIColor(red: 0.45, green: 0.8, blue: 0.45, alpha: 1)  // saved
+        } else {
+            cell.detailTextLabel?.textColor = UIColor(white: 0.55, alpha: 1)
+        }
         cell.detailTextLabel?.text = [video.channelName, status]
             .filter { !$0.isEmpty }.joined(separator: " • ")
 
