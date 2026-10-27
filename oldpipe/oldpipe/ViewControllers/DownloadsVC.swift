@@ -13,7 +13,16 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
     private var playedFrac: [String: CGFloat] = [:] // resume-position / duration, for the progress bar
     private var didSetupUI = false
     private var pollTimer: Timer?   // refreshes rows while a download is in flight
-    private var wasDownloading = false  // so we reload once more when the last download ends
+    private var shownState = RowState()   // what the rows were built from (see RowState)
+
+    // What the rows depend on besides the moving percentages: which downloads are in flight
+    // and whether each has anything on disk yet (an HLS one is only listed once its playlist is
+    // written), and which listed videos are exporting. A download that finishes straight into
+    // its Save to Photos changes both halves at once.
+    private struct RowState: Equatable {
+        var downloads: [String: Bool] = [:]   // in-flight id → has files on disk
+        var exports: Set<String> = []
+    }
 
     private lazy var tableView: UITableView = {
         let tv = UITableView()
@@ -60,22 +69,41 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         pollTimer = nil
     }
 
-    // Poll on .common so it fires during scroll tracking. Reloads only while a download or a
-    // Save to Photos is in flight (and not editing), so its % updates live.
+    // Polls on .common, so it also fires while scrolling, to keep a running download's or Save
+    // to Photos' % live (not while editing). The rows themselves only change with RowState —
+    // a download starting, getting files, finishing; an export starting or ending — so that is
+    // when it reloads. In between, only the running rows' status line is rewritten: a full
+    // reload twice a second read every store and walked every bundle's segments to size it.
     private func startPollTimer() {
         pollTimer?.invalidate()
         let t = Timer(timeInterval: 0.5, target: DownloadsPollProxy { [weak self] in
             guard let self = self, !self.tableView.isEditing else { return }
-            let active = self.videos.contains {
-                DownloadManager.isDownloading($0.id) || PhotoExporter.shared.isBusy($0.id)
+            if self.currentRowState() != self.shownState {
+                self.reload()
+            } else {
+                self.refreshRunningRows()
             }
-            // Reload while active, plus one final time when the last download finishes
-            // (otherwise the row stays stuck on "Downloading…"/"Incomplete").
-            if active || self.wasDownloading { self.reload() }
-            self.wasDownloading = active
         }, selector: #selector(DownloadsPollProxy.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
         pollTimer = t
+    }
+
+    private func currentRowState() -> RowState {
+        var s = RowState()
+        for id in DownloadManager.downloadingIds() { s.downloads[id] = DownloadManager.fileExists(id) }
+        for v in videos where PhotoExporter.shared.isBusy(v.id) { s.exports.insert(v.id) }
+        return s
+    }
+
+    // Rewrites, in place, the status line of the visible rows with a download or export running.
+    private func refreshRunningRows() {
+        for path in tableView.indexPathsForVisibleRows ?? [] where path.row < videos.count {
+            let video = videos[path.row]
+            guard DownloadManager.isDownloading(video.id) || PhotoExporter.shared.isBusy(video.id),
+                  let cell = tableView.cellForRow(at: path) else { continue }
+            applyStatus(to: cell, for: video)
+            cell.setNeedsLayout()   // the stock cell sizes its labels to their text in layout
+        }
     }
 
     private func setupUI() {
@@ -93,25 +121,26 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
     }
 
     private func reload() {
-        videos = DownloadManager.all()
+        let snap = DownloadManager.snapshot()   // one read of each store for the whole list
+        videos = snap.videos
         sizeText.removeAll()
         qualityText.removeAll()
-        incomplete.removeAll()
+        incomplete = snap.incomplete
         playedFrac.removeAll()
         for v in videos {
             sizeText[v.id] = DownloadManager.fileSizeText(for: v.id)
-            qualityText[v.id] = DownloadManager.qualityLabel(for: v.id)
-            if !DownloadManager.isComplete(v.id) { incomplete.insert(v.id) }
-            if DownloadManager.isWatched(v.id) {
+            qualityText[v.id] = snap.quality[v.id] ?? ""
+            if snap.watched.contains(v.id) {
                 playedFrac[v.id] = 1   // fully played → full bar (resume position is cleared)
             } else {
                 let dur = DownloadsVC.durationSeconds(v.durationText)
                 if dur > 0 {
-                    let f = CGFloat(DownloadManager.position(for: v.id) / dur)
+                    let f = CGFloat((snap.positions[v.id] ?? 0) / dur)
                     playedFrac[v.id] = max(0, min(1, f))
                 }
             }
         }
+        shownState = currentRowState()
         emptyLabel.isHidden = !videos.isEmpty
         tableView.reloadData()
     }
@@ -142,6 +171,29 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         cell.detailTextLabel?.font = UIFont.systemFont(ofSize: 12)
 
         cell.textLabel?.text = video.title
+        applyStatus(to: cell, for: video)
+
+        cell.imageView?.image = DownloadsVC.placeholder
+        cell.imageView?.layer.cornerRadius = 4
+        cell.imageView?.clipsToBounds = true
+        cell.playedFraction = playedFrac[video.id] ?? 0
+        AsyncImageView.cancel(cell.thumbTicket)
+        cell.thumbTicket = AsyncImageView.loadCell(url: video.thumbnailURL) { [weak cell] img in
+            guard let cell = cell else { return }
+            cell.thumbTicket = nil
+            cell.imageView?.image = img
+            cell.setNeedsLayout()
+        }
+
+        let selView = UIView()
+        selView.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        cell.selectedBackgroundView = selView
+        return cell
+    }
+
+    // The channel + status line under the title, and its colour. Also what the poll rewrites
+    // on the rows still running.
+    private func applyStatus(to cell: UITableViewCell, for video: Video) {
         let isDownloading = DownloadManager.isDownloading(video.id)
         let isPartial = incomplete.contains(video.id)
         let isExporting = PhotoExporter.shared.isBusy(video.id)
@@ -169,23 +221,6 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         }
         cell.detailTextLabel?.text = [video.channelName, status]
             .filter { !$0.isEmpty }.joined(separator: " • ")
-
-        cell.imageView?.image = placeholderImage()
-        cell.imageView?.layer.cornerRadius = 4
-        cell.imageView?.clipsToBounds = true
-        cell.playedFraction = playedFrac[video.id] ?? 0
-        AsyncImageView.cancel(cell.thumbTicket)
-        cell.thumbTicket = AsyncImageView.loadCell(url: video.thumbnailURL) { [weak cell] img in
-            guard let cell = cell else { return }
-            cell.thumbTicket = nil
-            cell.imageView?.image = img
-            cell.setNeedsLayout()
-        }
-
-        let selView = UIView()
-        selView.backgroundColor = UIColor(white: 0.15, alpha: 1)
-        cell.selectedBackgroundView = selView
-        return cell
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
@@ -217,7 +252,8 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
 
     // MARK: - Helpers
 
-    private func placeholderImage() -> UIImage? {
+    // Drawn once and shared by every row, not once per cellForRow.
+    private static let placeholder: UIImage? = {
         let size = CGSize(width: 80, height: 45)
         UIGraphicsBeginImageContextWithOptions(size, false, UIScreen.main.scale)
         UIColor(red: 0.15, green: 0.15, blue: 0.15, alpha: 1).setFill()
@@ -225,7 +261,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         let img = UIGraphicsGetImageFromCurrentImageContext()
         UIGraphicsEndImageContext()
         return img
-    }
+    }()
 
     // Parse "8:00" / "1:02:03" → seconds. Returns 0 if unparseable.
     private static func durationSeconds(_ text: String) -> Double {

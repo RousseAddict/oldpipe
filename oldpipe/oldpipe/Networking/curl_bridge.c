@@ -107,6 +107,12 @@ void curl_bridge_set_timeout(CurlHandle handle, long secs) {
     curl_easy_setopt(((CurlBridgeHandle *)handle)->easy, CURLOPT_TIMEOUT, secs);
 }
 
+void curl_bridge_set_low_speed(CurlHandle handle, long bytes_per_sec, long secs) {
+    CURL *e = ((CurlBridgeHandle *)handle)->easy;
+    curl_easy_setopt(e, CURLOPT_LOW_SPEED_LIMIT, bytes_per_sec);
+    curl_easy_setopt(e, CURLOPT_LOW_SPEED_TIME, secs);
+}
+
 void curl_bridge_set_write_fn(CurlHandle handle, CurlBridgeWriteFn fn, void *userdata) {
     CURL *e = ((CurlBridgeHandle *)handle)->easy;
     curl_easy_setopt(e, CURLOPT_WRITEFUNCTION, fn);

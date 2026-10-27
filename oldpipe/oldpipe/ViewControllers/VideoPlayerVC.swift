@@ -143,6 +143,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Wrapping a comment body is the expensive part of laying the list out, and relayout()
     // can fire for reasons unrelated to the comments. Measured once per comment per width.
     private var commentBodyHeights: [String: CGFloat] = [:]
+    // Comment rows already built, by position ("3" = the fourth comment, "3.1" = its second
+    // reply). The list is rebuilt for every page loaded and every reply thread opened, twice
+    // each (once for the "Loading..." row, once for the result); making every row's views and
+    // typesetting its text again each time cost O(rows) per tap, O(rows²) over a session. A
+    // row is reused only for the same comment in the same replies-toggle state. Cleared with
+    // the measured heights, and when the Related tab takes over (the rows' text bitmaps are
+    // what the comments cost in memory, and leaving the tab is when they used to be freed).
+    private var commentRowCache: [String: (id: String, expanded: Bool, row: UIView)] = [:]
 
     private var sp: VideoPlayer { return VideoPlayer.shared }
 
@@ -430,6 +438,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         replyNextToken.removeAll()
         replyStates.removeAll()
         commentBodyHeights.removeAll()
+        commentRowCache.removeAll()
         tabContentDirty = true
         activeQualityLabel = "Auto"   // the next video picks its own tier
         activeItag = nil
@@ -1095,10 +1104,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         return ceil(l.sizeThatFits(CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)).height)
     }
 
-    // Positions the tab section. Its contents are expensive to build (one view tree per
-    // comment, with no reuse) and most relayout() calls — description toggle, action button
+    // Positions the tab section. Most relayout() calls — description toggle, action button
     // reflow — only change where the section starts, so the container is simply moved unless
-    // the data behind it actually changed.
+    // the data behind it actually changed; a rebuild then reuses the comment rows already
+    // built (commentRowCache).
     private func layoutTabSection(startY: CGFloat, width w: CGFloat) -> CGFloat {
         guard let sv = scrollView else { return startY }
         let container: UIView
@@ -1109,10 +1118,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             sv.addSubview(container)
             tabContainer = container
         }
-        // A width change (rotation) invalidates every measured body height.
+        // A width change (rotation) invalidates every measured body height, and every row.
         if w != tabContentWidth {
             tabContentWidth = w
             commentBodyHeights.removeAll()
+            commentRowCache.removeAll()
             tabContentDirty = true
         }
         if tabContentDirty {
@@ -1170,6 +1180,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @objc private func detailTabTapped(_ sender: UIButton) {
         guard sender.tag != detailTab else { return }
         detailTab = sender.tag
+        if detailTab == 0 { commentRowCache.removeAll() }   // see commentRowCache
         tabContentDirty = true
         if detailTab == 1 && commentsState == .idle { loadMoreComments() }
         relayout()
@@ -1250,6 +1261,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             expandedReplies.removeValue(forKey: c.id)
             replyNextToken.removeValue(forKey: c.id)
             replyStates.removeValue(forKey: c.id)
+            commentRowCache = commentRowCache.filter { !$0.key.hasPrefix("\(idx).") }
             tabContentDirty = true
             relayout()
             return
@@ -1308,13 +1320,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
 
         for (i, c) in comments.enumerated() {
-            let row = makeCommentRow(c, width: w, topLevelIndex: i)
+            let row = commentRow(c, key: "\(i)", width: w, topLevelIndex: i)
             row.frame = CGRect(x: 0, y: y, width: w, height: row.frame.height)
             sv.addSubview(row)
             y += row.frame.height
 
-            for r in expandedReplies[c.id] ?? [] {
-                let rr = makeCommentRow(r, width: w, topLevelIndex: nil)
+            for (j, r) in (expandedReplies[c.id] ?? []).enumerated() {
+                let rr = commentRow(r, key: "\(i).\(j)", width: w, topLevelIndex: nil)
                 rr.frame = CGRect(x: 0, y: y, width: w, height: rr.frame.height)
                 sv.addSubview(rr)
                 y += rr.frame.height
@@ -1411,6 +1423,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let h = heightForText(c.text, font: font, width: width, maxLines: 0)
         commentBodyHeights[key] = h
         return h
+    }
+
+    // The row for this comment at this position: from commentRowCache when it is still the
+    // same comment with its replies toggle in the same state, built (and cached) otherwise.
+    private func commentRow(_ c: Comment, key: String, width w: CGFloat, topLevelIndex: Int?) -> UIView {
+        let expanded = topLevelIndex != nil && expandedReplies[c.id] != nil
+        if let hit = commentRowCache[key], hit.id == c.id, hit.expanded == expanded { return hit.row }
+        let row = makeCommentRow(c, width: w, topLevelIndex: topLevelIndex)
+        commentRowCache[key] = (id: c.id, expanded: expanded, row: row)
+        return row
     }
 
     // Self-sizing comment row: header line, body (full text), then likes + a replies toggle.

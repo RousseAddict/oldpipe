@@ -19,8 +19,10 @@ private let curlFileWriteCallback: @convention(c) (UnsafeRawPointer?, Int, Int, 
 }
 
 private let curlProgressCallback: @convention(c) (UnsafeMutableRawPointer?, Int64, Int64, Int64, Int64) -> Int32 = { clientp, dltotal, dlnow, _, _ in
-    guard let clientp = clientp, dltotal > 0 else { return 0 }
+    guard let clientp = clientp else { return 0 }
     let box = Unmanaged<CurlDownloadBox>.fromOpaque(clientp).takeUnretainedValue()
+    if box.shouldAbort() { return 1 }   // non-zero makes libcurl abort the transfer
+    guard dltotal > 0, box.progressHandler != nil else { return 0 }
     let progress = Float(dlnow) / Float(dltotal)
     AppQueue.main.async { box.progressHandler?(progress) }
     return 0
@@ -30,6 +32,7 @@ private class CurlDownloadBox {
     var fileHandle: FileHandle?
     var bytesReceived: Int64 = 0
     var progressHandler: ((Float) -> Void)?
+    var shouldAbort: () -> Bool = { false }
 }
 
 // MARK: - Ranged GET
@@ -56,6 +59,10 @@ final class CurlTiming {
 final class CurlRangeCtx {
     var data = Data()
     var aborted = false
+    // Whether the feed lane rangeFetch paused has been reopened yet (on the first body byte),
+    // and when to give up if it still hasn't been.
+    var feedResumed = false
+    var firstByteDeadline: TimeInterval = .greatestFiniteMagnitude   // systemUptime: monotonic
     let shouldAbort: () -> Bool
     init(shouldAbort: @escaping () -> Bool) { self.shouldAbort = shouldAbort }
 }
@@ -64,6 +71,9 @@ private let curlRangeWriteCallback: @convention(c) (UnsafeRawPointer?, Int, Int,
     let bytes = size * nmemb
     guard let ptr = ptr, let userdata = userdata else { return 0 }
     let ctx = Unmanaged<CurlRangeCtx>.fromOpaque(userdata).takeUnretainedValue()
+    // First body byte = handshake done and bytes flowing → reopen the feed lane (the same rule
+    // as StreamProxy's body callback).
+    if !ctx.feedResumed { ctx.feedResumed = true; CurlFetcher.resumeFeed() }
     if ctx.aborted { return 0 }
     ctx.data.append(Data(bytes: ptr, count: bytes))
     return bytes
@@ -74,6 +84,11 @@ private let curlRangeProgressCallback: @convention(c) (UnsafeMutableRawPointer?,
     let ctx = Unmanaged<CurlRangeCtx>.fromOpaque(clientp).takeUnretainedValue()
     if ctx.aborted { return 1 }
     if ctx.shouldAbort() { ctx.aborted = true; return 1 }
+    // Still no body byte past the deadline: give up rather than keep the feed lane closed.
+    if !ctx.feedResumed && ProcessInfo.processInfo.systemUptime > ctx.firstByteDeadline {
+        ctx.aborted = true
+        return 1
+    }
     return 0
 }
 
@@ -102,6 +117,11 @@ class CurlFetcher {
     // curl_bridge_perform on slow/timing-out feed sockets. Player requests are sequential
     // (bootstrap visitorData → player), so serializing the high lane is fine.
     private static let highQueue = AppQueue(label: "com.oldpipe.curl.high")
+    // Whole-file downloads get a lane of their own. On the feed lane each held one of the two
+    // curlLimit slots for minutes, so two at once — two downloads, or a download and a Save to
+    // Photos — stopped every thumbnail and feed request until one finished. Concurrent: there
+    // are only ever a few, each started by the user, and none should wait for another to end.
+    private static let downloadQueue = AppQueue(label: "com.oldpipe.curl.download", attributes: .concurrent)
     // Feed turnstile (preemption). Closed by a high-priority request for its whole duration so the
     // feed lane starts NO new transfers while a player request is in flight. This is the real fix:
     // the shipped OpenSSL 3.4.x serializes concurrent TLS handshakes on internal global locks, so a
@@ -147,9 +167,12 @@ class CurlFetcher {
     // already on a background thread (a proxy connection thread, or OfflineDownloader's serial
     // queue), so blocking here is the point.
     //
-    // Pauses the feed lane for the duration — same anti-concurrent-TLS rule as the proxy's
-    // streaming path — but unlike a stream these transfers are short and bounded, so the
-    // pause/resume brackets the whole call.
+    // Pauses the feed lane until the first body byte — the same anti-concurrent-TLS rule as the
+    // proxy's streaming path. By then the handshake is done; holding the lane for the rest of
+    // the body only starved everything else, and an offline download, fetching segments back to
+    // back, held it almost without a break. A transfer with no body byte about 20 s in is
+    // abandoned, so the lane is not held much longer than that (a blocking DNS lookup aside);
+    // once bytes flow, `timeout` applies.
     //
     // Requires the EXACT ranged byte count: a 200 (server ignored the range) or a truncated
     // body would silently corrupt fragment offsets downstream. Returns nil on network error,
@@ -174,7 +197,10 @@ class CurlFetcher {
         curl_bridge_set_progress_fn(h, curlRangeProgressCallback, ctxPtr)
 
         pauseFeed()
-        defer { resumeFeed() }
+        // The write callback reopens it on the first body byte; this covers a transfer that
+        // never got one (error, abort, empty body).
+        defer { if !ctx.feedResumed { ctx.feedResumed = true; resumeFeed() } }
+        ctx.firstByteDeadline = ProcessInfo.processInfo.systemUptime + 20
 
         let rc = curl_bridge_perform(h)
         let code = curl_bridge_response_code(h)
@@ -274,17 +300,26 @@ class CurlFetcher {
         }
     }
 
-    // File download with progress
+    // File download with progress, on downloadQueue. Returns the fetcher as a cancellation
+    // handle: cancel() stops the transfer at its next progress tick (about once a second, but
+    // none come during a DNS lookup), and the completion reports failure — even when the
+    // transfer had already finished, so a cancelled download is never handed on as complete.
+    @discardableResult
     static func downloadToFile(url: String,
                                outputPath: String,
                                progress: ((Float) -> Void)?,
-                               completion: @escaping (Bool) -> Void) {
+                               completion: @escaping (Bool) -> Void) -> CurlFetcher {
         let fetcher = CurlFetcher()
         retain(fetcher)
-        submit {
-            let ok = fetcher.syncDownload(url: url, outputPath: outputPath, progress: progress)
-            AppQueue.main.async { release(fetcher); completion(ok) }
+        downloadQueue.async {
+            // Not started while a priority request has the turnstile closed — the feed lane's
+            // rule, so a download's handshake doesn't land on top of the player's.
+            feedTurnstile.wait(); feedTurnstile.signal()
+            let ok = !fetcher.isCancelled
+                && fetcher.syncDownload(url: url, outputPath: outputPath, progress: progress)
+            AppQueue.main.async { release(fetcher); completion(ok && !fetcher.isCancelled) }
         }
+        return fetcher
     }
 
     // MARK: - Lifecycle
@@ -353,13 +388,18 @@ class CurlFetcher {
         FileManager.default.createFile(atPath: outputPath, contents: nil, attributes: nil)
         guard let fh = FileHandle(forWritingAtPath: outputPath) else { return false }
         let box = CurlDownloadBox(); box.fileHandle = fh; box.progressHandler = progress
+        box.shouldAbort = { self.isCancelled }
         let boxPtr = Unmanaged.passUnretained(box).toOpaque()
         url.withCString { curl_bridge_set_url(h, $0) }
         curl_bridge_set_ssl_noverify(h)
         curl_bridge_set_follow_redirects(h)
-        curl_bridge_set_timeout(h, 600)
+        // No cap on the whole transfer: a long video on a slow link takes longer than any fixed
+        // limit, and the old 600 s one killed such downloads and deleted the partial file. A
+        // stall is still caught — under 1 KB/s for 30 s aborts.
+        curl_bridge_set_low_speed(h, 1024, 30)
         curl_bridge_set_write_fn(h, curlFileWriteCallback, boxPtr)
-        if progress != nil { curl_bridge_set_progress_fn(h, curlProgressCallback, boxPtr) }
+        // Always installed, progress handler or not: it is also where cancel() lands.
+        curl_bridge_set_progress_fn(h, curlProgressCallback, boxPtr)
         let rc = curl_bridge_perform(h)
         fh.closeFile()
         guard rc == 0 else { try? FileManager.default.removeItem(atPath: outputPath); return false }

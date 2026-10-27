@@ -17,6 +17,9 @@ void        curl_bridge_set_url(CurlHandle h, const char *url);
 void        curl_bridge_set_ssl_noverify(CurlHandle h);
 void        curl_bridge_set_follow_redirects(CurlHandle h);
 void        curl_bridge_set_timeout(CurlHandle h, long secs);
+/* Abort when the transfer averages under bytes_per_sec for secs seconds: a stall limit, as
+   opposed to set_timeout's cap on the whole transfer. */
+void        curl_bridge_set_low_speed(CurlHandle h, long bytes_per_sec, long secs);
 void        curl_bridge_set_write_fn(CurlHandle h, CurlBridgeWriteFn fn, void *userdata);
 void        curl_bridge_set_header_fn(CurlHandle h, CurlBridgeWriteFn fn, void *userdata);
 void        curl_bridge_set_progress_fn(CurlHandle h, CurlBridgeProgressFn fn, void *clientp);

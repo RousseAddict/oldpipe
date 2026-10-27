@@ -136,9 +136,9 @@ class DownloadManager {
     }
 
     static func remove(_ videoId: String) {
-        // Stop an in-flight transfer FIRST. Without this, deleting a downloading row leaves
-        // OfflineDownloader writing segments into the directory we just deleted — and its
-        // completion would then re-register the entry the user asked us to remove.
+        // Stop an in-flight transfer FIRST. Without this, deleting a downloading row leaves it
+        // writing into the file or directory we just deleted — and its completion would then
+        // re-register the entry the user asked us to remove.
         cancelDownload(videoId)
         PhotoExporter.shared.downloadRemoved(videoId)   // same reason: it reads the files deleted below
         removeFiles(videoId)
@@ -177,8 +177,12 @@ class DownloadManager {
     // id → latest progress 0..1 for an in-flight download. Touched only on the main thread
     // (CurlFetcher dispatches both its progress and completion callbacks to main), so no lock.
     private static var inFlight: [String: Float] = [:]
+    // id → the transfer behind an in-flight progressive download, so it can be stopped
+    // mid-file. Main thread only, like inFlight.
+    private static var progressiveTransfers: [String: CurlFetcher] = [:]
 
     static func isDownloading(_ videoId: String) -> Bool { return inFlight[videoId] != nil }
+    static func downloadingIds() -> [String] { return Array(inFlight.keys) }
     static func progress(for videoId: String) -> Float { return inFlight[videoId] ?? 0 }
 
     // Owns the whole transfer + completion. Because the manager (not a VC) holds the
@@ -192,11 +196,14 @@ class DownloadManager {
         OfflineDownloader.saveCaptionsOnly(captions, for: video.id)
         store(video, complete: false, quality: quality, audioOnly: false)  // visible (Incomplete) while in progress
         inFlight[video.id] = 0
-        CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
+        progressiveTransfers[video.id] = CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
             inFlight[video.id] = p
         }) { success in
             inFlight[video.id] = nil
-            if success { register(video) } // on failure the partial entry remains (Incomplete)
+            progressiveTransfers[video.id] = nil
+            // On failure the entry stays, flagged incomplete — but the partial file is gone
+            // (syncDownload deletes it), so the entry no longer lists.
+            if success { register(video) }
             PhotoExporter.shared.downloadFinished(video, success: success)
         }
     }
@@ -250,10 +257,13 @@ class DownloadManager {
         }
     }
 
-    // Stop an in-flight download. Only the HLS path can actually be interrupted mid-transfer;
-    // a progressive copy runs inside one curl call and is left to finish.
+    // Stop an in-flight download, of either kind. Its completion still runs, reporting failure
+    // (even if the transfer had just finished), so a cancelled download is never registered as
+    // complete. OfflineDownloader is told either way: for a 360p download it is the one
+    // fetching the captions.
     static func cancelDownload(_ videoId: String) {
         guard inFlight[videoId] != nil else { return }
+        progressiveTransfers[videoId]?.cancel()
         OfflineDownloader.cancel(videoId)
     }
 
@@ -308,11 +318,15 @@ class DownloadManager {
     // Delete every downloaded file and clear all download-related state, including
     // playback positions and watched flags for streamed-only videos (Settings → Reset All).
     static func clearAll() {
-        for id in inFlight.keys { OfflineDownloader.cancel(id) }
+        // Each entry the way remove() takes it down. A cancelled download stays in inFlight
+        // until its transfer unwinds and reports back, which also keeps a new download of the
+        // same video from starting into the files being deleted here.
         for entry in rawList() {
-            if let id = entry["id"] as? String { removeFiles(id) }
+            guard let id = entry["id"] as? String else { continue }
+            cancelDownload(id)
+            PhotoExporter.shared.downloadRemoved(id)
+            removeFiles(id)
         }
-        inFlight.removeAll()
         UserDefaults.standard.removeObject(forKey: defaultsKey)
         UserDefaults.standard.removeObject(forKey: positionsKey)
         UserDefaults.standard.removeObject(forKey: watchedKey)
@@ -323,6 +337,40 @@ class DownloadManager {
     static func all() -> [Video] {
         return rawList().compactMap { Video.from(dict: $0) }
             .filter { fileExists($0.id) }
+    }
+
+    // What DownloadsVC shows for each row, from one read of each store. The per-video helpers
+    // (isComplete, qualityLabel, isWatched, position) each read and convert a whole store, so
+    // calling them row by row multiplied that by the length of the list.
+    struct Snapshot {
+        let videos: [Video]                 // as all()
+        let incomplete: Set<String>
+        let quality: [String: String]
+        let watched: Set<String>
+        let positions: [String: Double]     // resume points, for the listed videos only
+    }
+
+    static func snapshot() -> Snapshot {
+        let list = rawList()
+        var incomplete = Set<String>()
+        var quality: [String: String] = [:]
+        for entry in list {
+            guard let id = entry["id"] as? String else { continue }
+            // Same rules as isComplete and qualityLabel: no flag = a legacy, complete entry.
+            if let n = entry["complete"] as? NSNumber, !n.boolValue { incomplete.insert(id) }
+            quality[id] = (entry["dl_quality"] as? String) ?? ""
+        }
+        let videos = list.compactMap { Video.from(dict: $0) }.filter { fileExists($0.id) }
+        let watchedIds = Set((UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? [])
+        let allPositions = positionsDict()
+        var watched = Set<String>()
+        var positions: [String: Double] = [:]
+        for v in videos {
+            if watchedIds.contains(v.id) { watched.insert(v.id) }
+            if let p = (allPositions[v.id] as? NSNumber)?.doubleValue { positions[v.id] = p }
+        }
+        return Snapshot(videos: videos, incomplete: incomplete, quality: quality,
+                        watched: watched, positions: positions)
     }
 
     // Human-readable size on disk, e.g. "11.4 MB". For an HLS bundle this sums every segment,

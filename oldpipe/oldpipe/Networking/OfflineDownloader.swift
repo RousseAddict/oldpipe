@@ -67,8 +67,9 @@ final class OfflineDownloader {
 
     // ONE serial queue for every offline download, created once (a DispatchQueue(label:) per
     // call spawns an OS thread each time — the 4S thread budget rule). Serial is also what we
-    // want semantically: CurlFetcher.rangeFetch closes the feed turnstile for each transfer, so
-    // two concurrent downloads would spend their time fighting over it. Extra requests queue.
+    // want semantically: two downloads at once would only split the same link and the A5's two
+    // cores between them, and take turns at the feed turnstile that CurlFetcher.rangeFetch
+    // closes until each fetch's first byte. Extra requests queue.
     private static let queue = AppQueue(label: "com.oldpipe.offline")
 
     // Reads one segment ahead while `queue` muxes the previous one — see PrefetchSlot. Serial,
@@ -106,8 +107,11 @@ final class OfflineDownloader {
             let ok = run(video: video, vStream: videoStream, aStream: audioStream,
                          dir: dir, key: key, progress: progress)
             AppQueue.main.async {
+                // A cancel that landed after run() finished still counts: the caller has
+                // already taken the download down (see cancel()).
+                let cancelled = isCancelled(key)
                 clearCancel(key)
-                completion(ok)
+                completion(ok && !cancelled)
             }
         }
     }
@@ -125,8 +129,9 @@ final class OfflineDownloader {
             saveCaptions(captions, for: video.id)
             let ok = runAudio(video: video, aStream: audioStream, progress: progress)
             AppQueue.main.async {
+                let cancelled = isCancelled(video.id)   // as in start()
                 clearCancel(video.id)
-                completion(ok)
+                completion(ok && !cancelled)
             }
         }
     }
@@ -135,6 +140,9 @@ final class OfflineDownloader {
     // progressive path hands its copy to CurlFetcher). Independent files, so it can run
     // alongside rather than blocking the transfer.
     static func saveCaptionsOnly(_ captions: [CaptionTrack], for videoId: String) {
+        // Like start(): clear a cancel left over from an earlier download of this video, or
+        // these captions would be skipped.
+        clearCancel(videoId)
         guard !captions.isEmpty else { return }
         queue.async { saveCaptions(captions, for: videoId) }
     }
@@ -558,10 +566,9 @@ final class OfflineDownloader {
 // busy, and it caps peak memory at two segments rather than the whole file — the constraint
 // that matters on a 4S.
 //
-// Fetching ahead does NOT mean fetching in parallel. CurlFetcher.rangeFetch brackets every
-// transfer with the binary feed turnstile, so two simultaneous fetches would simply queue
-// behind each other and gain nothing; the win here comes entirely from overlapping the
-// fetch with the MUX. By construction the loop never fetches while a prefetch is in flight.
+// Fetching ahead does NOT mean fetching in parallel: two simultaneous fetches would only split
+// the same link, so the win here comes entirely from overlapping the fetch with the MUX. By
+// construction the loop never fetches while a prefetch is in flight.
 private final class PrefetchSlot {
     let seg: Int
     let vTiming = CurlTiming()

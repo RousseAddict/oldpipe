@@ -46,6 +46,7 @@ final class PhotoExporter: NSObject {
     private var backgroundTasks: [String: UIBackgroundTaskIdentifier] = [:]
     private var photoOnly: Set<String> = []              // running downloadAndSave(), not export()
     private var pending: Set<String> = []                // saveWhenDownloaded(), not started yet
+    private var progressiveTransfers: [String: CurlFetcher] = [:]  // a Photos-only 360p copy
 
     // Written on the main thread, read from the export queue, so every access takes the lock.
     private var cancelledIds: Set<String> = []
@@ -177,10 +178,11 @@ final class PhotoExporter: NSObject {
 
     private func downloadProgressive(_ id: String, url: String, quality: String) {
         let path = PhotoExporter.workPath("\(id)-download.mp4")
-        CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
+        progressiveTransfers[id] = CurlFetcher.downloadToFile(url: url, outputPath: path, progress: { p in
             self.setProgress(id, Int(p * 100))
         }) { ok in
-            // A progressive copy runs inside one curl call, so a Stop only lands here.
+            self.progressiveTransfers[id] = nil
+            // A Stop aborts the transfer (see stop()), which also ends here, as a failure.
             let stopped = self.isCancelled(id)
             if !ok || stopped {
                 unlink(path)
@@ -201,7 +203,7 @@ final class PhotoExporter: NSObject {
     // MARK: - Stop
 
     // The Share sheet's Stop. A queued export never starts; a running download or conversion
-    // stops at its next segment (a progressive copy runs to its end first) and cleans up.
+    // stops at its next segment (a progressive copy at its next progress tick) and cleans up.
     func cancel(_ videoId: String) {
         if pending.remove(videoId) != nil { return }
         guard canStop(videoId) else { return }
@@ -218,7 +220,10 @@ final class PhotoExporter: NSObject {
 
     private func stop(_ id: String) {
         setCancelled(id, true)
-        if photoOnly.contains(id) { OfflineDownloader.cancel(PhotoExporter.downloadKey(id)) }
+        if photoOnly.contains(id) {
+            OfflineDownloader.cancel(PhotoExporter.downloadKey(id))
+            progressiveTransfers[id]?.cancel()
+        }
     }
 
     // MARK: - Conversion (runs on `queue`)
