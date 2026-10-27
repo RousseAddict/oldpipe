@@ -298,6 +298,10 @@ class CurlFetcher {
 
     // MARK: - Sync implementations
 
+    // syncFetchData and syncPostJSON hand a whole body to a parser, so they ask for gzip:
+    // innertube JSON comes down 4-10x smaller, and the RSS and caption XML compress well too.
+    // Not rangeFetch or StreamProxy, which check or forward exact byte counts, nor
+    // syncDownload, whose media would not compress.
     private func syncFetchData(url: String, timeout: Int) -> Data? {
         _ = CurlFetcher.curlGlobalInit
         let h = curl_bridge_init(); defer { curl_bridge_cleanup(h) }
@@ -307,6 +311,7 @@ class CurlFetcher {
         curl_bridge_set_ssl_noverify(h)
         curl_bridge_set_follow_redirects(h)
         curl_bridge_set_timeout(h, CLong(timeout))
+        curl_bridge_set_accept_gzip(h)
         curl_bridge_set_write_fn(h, curlDataWriteCallback, ptr)
         guard curl_bridge_perform(h) == 0 else { return nil }
         guard curl_bridge_response_code(h) == 200 else { return nil }
@@ -323,6 +328,7 @@ class CurlFetcher {
         curl_bridge_set_ssl_noverify(h)
         curl_bridge_set_follow_redirects(h)
         curl_bridge_set_timeout(h, CLong(timeout))
+        curl_bridge_set_accept_gzip(h)
         curl_bridge_set_write_fn(h, curlDataWriteCallback, ptr)
         for header in headers {
             header.withCString { curl_bridge_add_header(h, $0) }

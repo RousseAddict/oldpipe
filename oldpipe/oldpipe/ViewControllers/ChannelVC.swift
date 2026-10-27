@@ -330,7 +330,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private func loadShorts() {
         guard !didLoadShorts else { return }
         didLoadShorts = true
-        YoutubeAPI.getChannelShorts(channelId: channelId, priority: true) { [weak self] vids, token in
+        YoutubeAPI.getChannelShorts(channelId: channelId, priority: true) { [weak self] vids, _, token in
             guard let self = self else { return }
             self.shorts = vids
             self.shortsSeen = Set(vids.map { $0.id })

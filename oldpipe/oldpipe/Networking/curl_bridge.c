@@ -144,6 +144,13 @@ void curl_bridge_set_useragent(CurlHandle handle, const char *ua) {
     curl_easy_setopt(((CurlBridgeHandle *)handle)->easy, CURLOPT_USERAGENT, ua);
 }
 
+void curl_bridge_set_accept_gzip(CurlHandle handle) {
+    /* Sends Accept-Encoding: gzip and inflates the body before the write callback sees it;
+       innertube JSON comes down 4-10x smaller. Only gzip is offered, not "" (which would add
+       deflate): it is what YouTube answers with, and it keeps libcurl on a single decoder. */
+    curl_easy_setopt(((CurlBridgeHandle *)handle)->easy, CURLOPT_ACCEPT_ENCODING, "gzip");
+}
+
 int curl_bridge_perform(CurlHandle handle) {
     CurlBridgeHandle *h = (CurlBridgeHandle *)handle;
     /* Apply accumulated headers right before perform */

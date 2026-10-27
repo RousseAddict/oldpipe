@@ -23,6 +23,10 @@ void        curl_bridge_set_progress_fn(CurlHandle h, CurlBridgeProgressFn fn, v
 void        curl_bridge_add_header(CurlHandle h, const char *header);
 void        curl_bridge_set_post_body(CurlHandle h, const char *body, long len);
 void        curl_bridge_set_useragent(CurlHandle h, const char *ua);
+/* Request a gzip body, inflated by libcurl before the write callback. Only for a transfer
+   whose whole body goes to a parser: NOT for a ranged transfer, which checks the body length
+   against the range it asked for, nor a proxied one, which forwards the server's headers. */
+void        curl_bridge_set_accept_gzip(CurlHandle h);
 int         curl_bridge_perform(CurlHandle h);
 long        curl_bridge_response_code(CurlHandle h);
 /* Phase timings of the last perform on this handle, in seconds (any may be NULL).

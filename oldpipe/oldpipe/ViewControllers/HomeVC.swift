@@ -6,8 +6,8 @@ import UIKit
 // side menu with Subscriptions + Downloads. Empty state when no subscriptions.
 //
 // Also serves as a channel GROUP feed: init(groupId:) narrows every feed path to that
-// group's channels (see feedChannels()). HomeVC keeps no shared/singleton state and the
-// per-channel cache is keyed by channel id, so a group instance pushed on the nav stack is
+// group's channels (see feedChannels()). The only state HomeVC instances share is the
+// per-channel FeedCache, keyed by channel id, so a group instance pushed on the nav stack is
 // safe and warms the root feed's cache (and vice versa).
 
 class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
@@ -81,75 +81,16 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     // smooth refreshes instead of one flicker per channel that returns.
     private var reloadTimer: Timer?
 
-    // MARK: - Per-channel feed cache (persisted)
-    // Each subscribed channel's newest few videos are cached under its own id (+ a
-    // timestamp). Adding a channel therefore only fetches THAT channel — every other
-    // channel renders instantly from cache. Stale (>TTL) or missing channels are refetched.
-    private static let channelCacheKey = "home_channel_cache"        // [channelId: [videoDict]]
-    private static let channelCacheTimeKey = "home_channel_cache_time" // [channelId: epochSeconds]
-    private static let shortsCacheKey = "home_shorts_cache"          // [channelId: [videoDict]]
-    private static let shortsCacheTimeKey = "home_shorts_cache_time" // [channelId: epochSeconds]
-    // Publish dates for Shorts, read from each channel's Atom feed (see ChannelRSS) because the
-    // innertube Shorts tab carries none. Kept per channel so it is bounded by the subscription
-    // count and drops out with the rest of a channel's cache.
-    private static let shortsDatesKey = "home_shorts_dates"          // [channelId: [videoId: epochSeconds]]
-    private static let feedCacheTTL: TimeInterval = 1800  // 30 min — older cache refetches
+    // MARK: - Per-channel feed cache
+    // Each subscribed channel's newest few videos and Shorts, under its own id with the time it
+    // was fetched (see FeedCache at the bottom of this file). Adding a channel therefore only
+    // fetches THAT channel — every other channel renders instantly from cache. Stale (>TTL) or
+    // missing channels are refetched.
+    private static let feedCache = FeedCache()
 
     // Wipe the cached feed (Settings → Reset Cache). Subscriptions/playlists are untouched.
-    // Also clears the legacy whole-feed keys so upgrading installs don't leave them behind.
     static func clearFeedCache() {
-        for k in [channelCacheKey, channelCacheTimeKey, shortsCacheKey, shortsCacheTimeKey,
-                  shortsDatesKey,
-                  "home_feed_cache", "home_feed_cache_subs", "home_feed_cache_time"] {
-            UserDefaults.standard.removeObject(forKey: k)
-        }
-        UserDefaults.standard.synchronize()
-    }
-
-    // Persist one channel's videos (+ now as its freshness timestamp). An empty list is
-    // still stored (with a timestamp) so a channel with no videos isn't refetched every appear.
-    private static func saveChannelVideos(_ videos: [Video], for id: String) {
-        var map = UserDefaults.standard.dictionary(forKey: channelCacheKey) ?? [:]
-        map[id] = videos.map { $0.toDict() }
-        UserDefaults.standard.set(map, forKey: channelCacheKey)
-        var times = UserDefaults.standard.dictionary(forKey: channelCacheTimeKey) ?? [:]
-        times[id] = Date().timeIntervalSince1970
-        UserDefaults.standard.set(times, forKey: channelCacheTimeKey)
-        UserDefaults.standard.synchronize()
-    }
-
-    // Same as saveChannelVideos but for the per-channel Shorts cache.
-    private static func saveChannelShorts(_ videos: [Video], for id: String) {
-        var map = UserDefaults.standard.dictionary(forKey: shortsCacheKey) ?? [:]
-        map[id] = videos.map { $0.toDict() }
-        UserDefaults.standard.set(map, forKey: shortsCacheKey)
-        var times = UserDefaults.standard.dictionary(forKey: shortsCacheTimeKey) ?? [:]
-        times[id] = Date().timeIntervalSince1970
-        UserDefaults.standard.set(times, forKey: shortsCacheTimeKey)
-        UserDefaults.standard.synchronize()
-    }
-
-    private static func saveChannelShortsDates(_ dates: [String: Double], for id: String) {
-        var map = UserDefaults.standard.dictionary(forKey: shortsDatesKey) ?? [:]
-        map[id] = dates
-        UserDefaults.standard.set(map, forKey: shortsDatesKey)
-        UserDefaults.standard.synchronize()
-    }
-
-    // Flattened videoId → publish date across every channel's feed.
-    private static func cachedShortsDates() -> [String: Double] {
-        guard let map = UserDefaults.standard.dictionary(forKey: shortsDatesKey) else { return [:] }
-        var out: [String: Double] = [:]
-        for (_, value) in map {
-            guard let perChannel = value as? [String: Any] else { continue }
-            for (videoId, ts) in perChannel {
-                // Numeric `as? Double` silently returns nil on the Swift 5.1.5 runtime — go
-                // through NSNumber.
-                guard let n = (ts as? NSNumber)?.doubleValue, n > 0 else { continue }
-                out[videoId] = n
-            }
-        }
-        return out
+        feedCache.clear()
     }
 
     init(groupId: String? = nil) {
@@ -407,13 +348,8 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
         guard !shortsLoading else { return }
 
-        let times = UserDefaults.standard.dictionary(forKey: HomeVC.shortsCacheTimeKey) ?? [:]
         let now = Date().timeIntervalSince1970
-        let toFetch = subs.filter { ch in
-            guard let ts = (times[ch.id] as? NSNumber)?.doubleValue else { return true }
-            let age = now - ts
-            return !(age >= 0 && age < HomeVC.feedCacheTTL)
-        }
+        let toFetch = subs.filter { HomeVC.feedCache.shorts.isDue($0.id, now: now) }
         guard !toFetch.isEmpty else { return }
 
         shortsLoading = true
@@ -425,9 +361,15 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         var remaining = toFetch.count
         for channel in toFetch {
             // priority:false — Shorts is a background feed like the videos feed.
-            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { [weak self] vids, token in
+            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { [weak self] vids, fresh, token in
+                // Stored before the self check, and a failure keeps the cached copy — the same
+                // rules as the videos feed (see loadFeed).
+                if fresh != nil || !vids.isEmpty {
+                    HomeVC.feedCache.store(Array(vids.prefix(12)), in: .shorts, for: channel.id)
+                } else {
+                    HomeVC.feedCache.recordFailure(in: .shorts, for: channel.id)
+                }
                 guard let self = self else { return }
-                HomeVC.saveChannelShorts(Array(vids.prefix(12)), for: channel.id)
                 // Stash this channel's continuation token for infinite scroll (drop if absent).
                 if let t = token, !t.isEmpty { self.shortsTokens[channel.id] = t }
                 else { self.shortsTokens.removeValue(forKey: channel.id) }
@@ -440,9 +382,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             // the feed must never wait on it, and a failed fetch just leaves those Shorts in the
             // shuffled tail. Whichever lands last triggers the coalesced rebuild.
             ChannelRSS.fetchPublishDates(channelId: channel.id, priority: false) { [weak self] dates in
-                guard let self = self, !dates.isEmpty else { return }
-                HomeVC.saveChannelShortsDates(dates, for: channel.id)
-                self.scheduleShortsReload()
+                guard !dates.isEmpty else { return }
+                HomeVC.feedCache.storeShortsDates(dates, for: channel.id)
+                self?.scheduleShortsReload()
             }
         }
     }
@@ -469,13 +411,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     private func rebuildShortsFromCache() {
         let subs = feedChannels()
-        let map = UserDefaults.standard.dictionary(forKey: HomeVC.shortsCacheKey) ?? [:]
+        let cached = HomeVC.feedCache.shorts.byChannel
         var merged: [Video] = []
         var seen = Set<String>()
         for ch in subs {
-            guard let dicts = map[ch.id] as? [[String: Any]] else { continue }
-            for d in dicts {
-                guard let v = Video.from(dict: d), !seen.contains(v.id) else { continue }
+            for v in cached[ch.id] ?? [] where !seen.contains(v.id) {
                 seen.insert(v.id)
                 merged.append(v)
             }
@@ -487,7 +427,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // concatenating them per channel would make the tail feel grouped ("all of channel A,
         // then all of channel B"). shuffle() and sorted() are pure Swift stdlib
         // (runtime-independent, safe on 5.1.5).
-        let dates = HomeVC.cachedShortsDates()
+        let dates = HomeVC.feedCache.allShortsDates()
         for i in 0..<merged.count {
             if let ts = dates[merged[i].id] { merged[i].publishedTimestamp = ts }
         }
@@ -742,14 +682,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
         guard !isLoading else { return }
 
-        // Fetch only channels whose cache is missing or stale (>TTL).
-        let times = UserDefaults.standard.dictionary(forKey: HomeVC.channelCacheTimeKey) ?? [:]
+        // Fetch only channels whose cache is missing or stale (>TTL), and not failing right now.
         let now = Date().timeIntervalSince1970
-        let toFetch = subs.filter { ch in
-            guard let ts = (times[ch.id] as? NSNumber)?.doubleValue else { return true }
-            let age = now - ts
-            return !(age >= 0 && age < HomeVC.feedCacheTTL)
-        }
+        let toFetch = subs.filter { HomeVC.feedCache.videos.isDue($0.id, now: now) }
         guard !toFetch.isEmpty else { return }
         loadFeed(channels: toFetch)
     }
@@ -783,6 +718,18 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         var remaining = toFetch.count
         for channel in toFetch {
             YoutubeAPI.getChannelVideos(channelId: channel.id) { [weak self] vids, fresh, _ in
+                // Stored before the self check: the cache is shared, so a group feed popped
+                // mid-load still warms the root feed with what it paid for. A failed request —
+                // no channel metadata and no videos — keeps the cached copy and leaves the
+                // channel stale, so it is retried (see FeedCache.Lists.isDue) instead of showing
+                // nothing for the whole TTL. A channel that really has no videos still answers
+                // with its metadata, so its empty list is stored and not refetched every appear.
+                if fresh != nil || !vids.isEmpty {
+                    // Keep newest few per channel (channel browse returns newest-first).
+                    HomeVC.feedCache.store(Array(vids.prefix(6)), in: .videos, for: channel.id)
+                } else {
+                    HomeVC.feedCache.recordFailure(in: .videos, for: channel.id)
+                }
                 guard let self = self else { return }
                 // Heal the stored avatar/name from the fresh channel result (fixes blank
                 // icons in ManageSubscriptionsVC for subs saved before their avatar was known).
@@ -790,8 +737,6 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                     SubscriptionManager.updateThumbnail(channelId: channel.id,
                                                         thumbnailURL: c.thumbnailURL, name: c.name)
                 }
-                // Keep newest few per channel (channel browse returns newest-first).
-                HomeVC.saveChannelVideos(Array(vids.prefix(6)), for: channel.id)
                 self.scheduleProgressiveReload()
                 remaining -= 1
                 if remaining == 0 { self.finishFeed() }
@@ -824,23 +769,22 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     }
 
     // Merge every subscribed channel's cached videos, de-dupe, and sort newest-first.
-    // Reads the cache dict once (not per channel) to stay cheap on the iPhone 4S.
     private func rebuildFromCache() {
         CrashLog.mark("HomeVC: rebuildFromCache")
         let subs = feedChannels()
-        let map = UserDefaults.standard.dictionary(forKey: HomeVC.channelCacheKey) ?? [:]
+        let cached = HomeVC.feedCache.videos.byChannel
         var merged: [Video] = []
         var seen = Set<String>()
         for ch in subs {
-            guard let dicts = map[ch.id] as? [[String: Any]] else { continue }
-            for d in dicts {
-                guard let v = Video.from(dict: d), !seen.contains(v.id) else { continue }
+            for v in cached[ch.id] ?? [] where !seen.contains(v.id) {
                 seen.insert(v.id)
                 merged.append(v)
             }
         }
-        // Sort latest-first using the relative "published" text (e.g. "3 days ago").
-        merged.sort { HomeVC.approxAge($0.publishedText) < HomeVC.approxAge($1.publishedText) }
+        // Newest first, by the absolute publish time worked out when each channel was fetched
+        // (0 = unknown, sorts last). Sorting on the "3 days ago" text itself parsed both strings
+        // on every comparison, and compared texts captured at different times.
+        merged.sort { $0.publishedTimestamp > $1.publishedTimestamp }
         videos = merged
         if merged.isEmpty {
             let emptyText = groupId != nil
@@ -852,29 +796,6 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             statusLabel?.isHidden = true
         }
         tableView?.reloadData()
-    }
-
-    // Convert a relative "published" string ("3 days ago", "Streamed 2 hours ago") into an
-    // approximate age in seconds. Smaller = more recent; unknown sorts last.
-    private static func approxAge(_ text: String) -> Double {
-        let lower = text.lowercased()
-        if lower.isEmpty { return .greatestFiniteMagnitude }
-        var digits = ""
-        for ch in lower {
-            if ch.isNumber { digits.append(ch) }
-            else if !digits.isEmpty { break }
-        }
-        let num = Double(digits) ?? 1
-        let unit: Double
-        if lower.contains("year")        { unit = 31_536_000 }
-        else if lower.contains("month")  { unit = 2_592_000 }
-        else if lower.contains("week")   { unit = 604_800 }
-        else if lower.contains("day")    { unit = 86_400 }
-        else if lower.contains("hour")   { unit = 3_600 }
-        else if lower.contains("minute") { unit = 60 }
-        else if lower.contains("second") { unit = 1 }
-        else { return .greatestFiniteMagnitude }
-        return num * unit
     }
 
     // MARK: - UITableViewDataSource
@@ -921,6 +842,227 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         let video = videos[indexPath.row]
         DebugLog.log("Home", "tap video id=\(video.id) title=\"\(video.title)\" channel=\(video.channelName)")
         navigationController?.openVideo(video)
+    }
+}
+
+// MARK: - Feed cache
+// What HomeVC renders its feeds from: each subscribed channel's newest few videos and Shorts,
+// stamped with when they were fetched, plus the Shorts publish dates read from each channel's
+// Atom feed (the innertube Shorts tab carries none — see ChannelRSS).
+//
+// Held in memory, already decoded, and written to its own file in Caches — every couple of
+// seconds while it changes, and when the app goes to the background. It used to live in
+// UserDefaults, which cost the main thread twice over: every channel that came back re-read
+// the whole map, wrote it back and synchronize()d — once per channel per load — and because a
+// defaults domain is saved as one file, every synchronize() anywhere else in the app rewrote
+// the whole feed as well.
+//
+// Main thread only; the file is written on ioQueue, from a copy.
+private final class FeedCache: NSObject {
+
+    static let ttl: TimeInterval = 1800        // 30 min — older entries are refetched
+    static let retryDelay: TimeInterval = 120  // between attempts at a channel that failed
+
+    enum Kind { case videos, shorts }
+
+    // One kind of per-channel list (videos or Shorts): what each channel returned, and when.
+    struct Lists {
+        var byChannel: [String: [Video]] = [:]
+        var fetchedAt: [String: Double] = [:]   // channelId → epoch seconds of the last success
+        // channelId → epoch seconds of the last failed fetch. Memory only: not worth keeping
+        // across launches.
+        var failedAt: [String: Double] = [:]
+
+        // Whether to fetch the channel now: nothing fetched within the TTL, and no failure in
+        // the last retryDelay — so a channel that keeps failing (offline, or since deleted) is
+        // retried every couple of minutes, not on every appear.
+        func isDue(_ channelId: String, now: Double) -> Bool {
+            if let t = fetchedAt[channelId], now - t >= 0, now - t < FeedCache.ttl { return false }
+            if let t = failedAt[channelId], now - t >= 0, now - t < FeedCache.retryDelay { return false }
+            return true
+        }
+    }
+
+    private(set) var videos = Lists()
+    private(set) var shorts = Lists()
+    private var shortsDates: [String: [String: Double]] = [:]   // channelId → videoId → epoch
+
+    // The file's keys are the UserDefaults keys the cache used to live under, so the old copy
+    // decodes exactly like the file.
+    private static let videosKey = "home_channel_cache"           // [channelId: [videoDict]]
+    private static let videosTimeKey = "home_channel_cache_time"  // [channelId: epochSeconds]
+    private static let shortsKey = "home_shorts_cache"
+    private static let shortsTimeKey = "home_shorts_cache_time"
+    private static let shortsDatesKey = "home_shorts_dates"       // [channelId: [videoId: epochSeconds]]
+    private static let keys = [videosKey, videosTimeKey, shortsKey, shortsTimeKey, shortsDatesKey]
+    // The whole-feed cache from before the per-channel one. Only ever removed.
+    private static let legacyKeys = ["home_feed_cache", "home_feed_cache_subs", "home_feed_cache_time"]
+
+    private static let path: String = {
+        let dirs = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true)
+        let base = dirs.first ?? NSTemporaryDirectory()
+        return (base as NSString).appendingPathComponent("com.oldpipe.feedcache.plist")
+    }()
+
+    // Serial, so writes and a reset's delete land in the order they were asked for.
+    private static let ioQueue = AppQueue(label: "com.oldpipe.feedcache")
+
+    private var saveScheduled = false
+
+    override init() {
+        super.init()
+        load()
+        // What is still waiting to be written goes out before the app can be suspended — and
+        // then possibly killed without another chance.
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground),
+                                               name: UIApplication.didEnterBackgroundNotification,
+                                               object: nil)
+    }
+
+    // MARK: Updates
+
+    func store(_ list: [Video], in kind: Kind, for channelId: String) {
+        update(kind) { lists in
+            lists.byChannel[channelId] = list
+            lists.fetchedAt[channelId] = Date().timeIntervalSince1970
+            lists.failedAt[channelId] = nil
+        }
+        setNeedsSave()
+    }
+
+    // A failed fetch keeps whatever was cached for the channel and leaves it stale.
+    func recordFailure(in kind: Kind, for channelId: String) {
+        update(kind) { $0.failedAt[channelId] = Date().timeIntervalSince1970 }
+    }
+
+    func storeShortsDates(_ dates: [String: Double], for channelId: String) {
+        shortsDates[channelId] = dates
+        setNeedsSave()
+    }
+
+    // Flattened videoId → publish date across every channel's Atom feed.
+    func allShortsDates() -> [String: Double] {
+        var out: [String: Double] = [:]
+        for (_, perChannel) in shortsDates {
+            for (videoId, ts) in perChannel where ts > 0 { out[videoId] = ts }
+        }
+        return out
+    }
+
+    // Settings → Reset Cache / Reset All.
+    func clear() {
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(scheduledSave), object: nil)
+        saveScheduled = false
+        videos = Lists()
+        shorts = Lists()
+        shortsDates = [:]
+        let path = FeedCache.path
+        FeedCache.ioQueue.async { try? FileManager.default.removeItem(atPath: path) }
+    }
+
+    private func update(_ kind: Kind, _ change: (inout Lists) -> Void) {
+        switch kind {
+        case .videos: change(&videos)
+        case .shorts: change(&shorts)
+        }
+    }
+
+    // MARK: Persistence
+
+    private func load() {
+        let defaults = UserDefaults.standard
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: FeedCache.path)),
+           let root = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] {
+            decode(root)
+        } else {
+            // First launch since the move out of UserDefaults: adopt the copy kept there, and
+            // write it straight out, since it is about to be removed below.
+            var root: [String: Any] = [:]
+            for k in FeedCache.keys { root[k] = defaults.object(forKey: k) }
+            decode(root)
+            if !root.isEmpty { save() }
+        }
+        // Checked on every launch, not only the one that adopts them: a removal only reaches
+        // disk with a later defaults sync, which an app killed early never gets to.
+        for k in FeedCache.keys + FeedCache.legacyKeys where defaults.object(forKey: k) != nil {
+            defaults.removeObject(forKey: k)
+        }
+    }
+
+    private func decode(_ root: [String: Any]) {
+        videos = Lists(byChannel: FeedCache.videoLists(root[FeedCache.videosKey]),
+                       fetchedAt: FeedCache.numbers(root[FeedCache.videosTimeKey]))
+        shorts = Lists(byChannel: FeedCache.videoLists(root[FeedCache.shortsKey]),
+                       fetchedAt: FeedCache.numbers(root[FeedCache.shortsTimeKey]))
+        var dates: [String: [String: Double]] = [:]
+        for (channelId, perChannel) in (root[FeedCache.shortsDatesKey] as? [String: Any]) ?? [:] {
+            dates[channelId] = FeedCache.numbers(perChannel)
+        }
+        shortsDates = dates
+    }
+
+    private static func videoLists(_ value: Any?) -> [String: [Video]] {
+        var out: [String: [Video]] = [:]
+        for (channelId, list) in (value as? [String: Any]) ?? [:] {
+            guard let dicts = list as? [[String: Any]] else { continue }
+            out[channelId] = dicts.compactMap { Video.from(dict: $0) }
+        }
+        return out
+    }
+
+    // [key: NSNumber] → [key: Double]. Through NSNumber because a direct `as? Double` silently
+    // returns nil on the Swift 5.1.5 runtime.
+    private static func numbers(_ value: Any?) -> [String: Double] {
+        var out: [String: Double] = [:]
+        for (key, n) in (value as? [String: Any]) ?? [:] {
+            if let d = (n as? NSNumber)?.doubleValue { out[key] = d }
+        }
+        return out
+    }
+
+    // A feed load stores one channel at a time. The first change schedules a write a couple of
+    // seconds out and the ones after it ride along, so a load writes at most every couple of
+    // seconds — and a long one still reaches disk as it goes.
+    private func setNeedsSave() {
+        guard !saveScheduled else { return }
+        saveScheduled = true
+        perform(#selector(scheduledSave), with: nil, afterDelay: 2, inModes: [.common])
+    }
+
+    @objc private func scheduledSave() {
+        save()
+    }
+
+    // Written before returning: once this returns, the app can be suspended at any moment.
+    @objc private func appDidEnterBackground() {
+        if saveScheduled { save(waitUntilWritten: true) }
+    }
+
+    private func save(waitUntilWritten: Bool = false) {
+        // Also called directly; a write scheduled for later would only repeat this one.
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(scheduledSave), object: nil)
+        saveScheduled = false
+        // Copied here on main; encoded and written on ioQueue.
+        let videos = self.videos, shorts = self.shorts, dates = shortsDates
+        let path = FeedCache.path
+        let write: () -> Void = {
+            let root: [String: Any] = [
+                FeedCache.videosKey: videos.byChannel.mapValues { $0.map { $0.toDict() } },
+                FeedCache.videosTimeKey: videos.fetchedAt,
+                FeedCache.shortsKey: shorts.byChannel.mapValues { $0.map { $0.toDict() } },
+                FeedCache.shortsTimeKey: shorts.fetchedAt,
+                FeedCache.shortsDatesKey: dates
+            ]
+            guard let data = try? PropertyListSerialization.data(fromPropertyList: root,
+                                                                 format: .binary, options: 0)
+            else { return }
+            _ = (data as NSData).write(toFile: path, atomically: true)
+        }
+        if waitUntilWritten {
+            FeedCache.ioQueue.sync(execute: write)
+        } else {
+            FeedCache.ioQueue.async(execute: write)
+        }
     }
 }
 

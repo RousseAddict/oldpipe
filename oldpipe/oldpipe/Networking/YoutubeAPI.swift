@@ -168,34 +168,56 @@ class YoutubeAPI {
         }
     }
 
-    // Two-leg resolution. ANDROID answers first and is the ONLY source of a muxed itag 18, but
-    // its adaptiveFormats are SABR-only, so it alone would cap every video at 360p and kill the
+    // One player leg's answer: (streams, video details, description, failure reason, captions).
+    private typealias PlayerLeg = (streams: [VideoStream], video: Video?, desc: String,
+                                   failure: String, captions: [CaptionTrack])
+
+    // Two-leg resolution. ANDROID is the ONLY source of a muxed itag 18, but its
+    // adaptiveFormats are SABR-only, so it alone would cap every video at 360p and kill the
     // quality sheet. The VISIONOS leg supplies the adaptive tiers and the two lists are MERGED — so
     // downstream code finds both a progressive stream (direct play / download / cast) and the
     // fMP4 tiers (HLS transmux) exactly as it did when ANDROID_VR returned both in one response.
-    // Second request is conditional, not unconditional: if YouTube ever restores plain urls to
-    // ANDROID's adaptiveFormats this collapses back to a single round trip on its own.
+    // Both legs are queued at once, back to back on the serial high-priority lane. Queuing
+    // VISIONOS only after ANDROID had answered left a gap in which the video page's `next`
+    // request took the lane, so every video waited for its related list before it could play.
+    // If YouTube ever restores plain urls to ANDROID's adaptiveFormats, ANDROID is delivered on
+    // its own as soon as it lands; the VISIONOS request still runs, and its answer is dropped.
     // Refreshing visitorData is NOT a fix for a gated response and is never attempted — the gate
     // is per-video and server-side, and fires with a freshly minted token and with none at all.
     private static func resolveStreams(videoId: String,
                                        completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        performPlayer(videoId: videoId, client: androidPlayer) { streams, video, desc, failure, captions in
+        // Both legs complete on main (performPlayer hops there, and getStreams is only ever
+        // called there), so they meet without a lock.
+        var android: PlayerLeg?
+        var visionOS: PlayerLeg?
+        var delivered = false
+        func deliverWhenReady() {
+            guard !delivered, let a = android else { return }
             // !isProgressive == carries initRange/indexRange == usable by the HLS transmuxer.
-            if streams.contains(where: { !$0.isProgressive }) {
-                completion(streams, video, desc, failure, captions)
+            if a.streams.contains(where: { !$0.isProgressive }) {
+                delivered = true
+                DebugLog.log("YoutubeAPI", "\(androidPlayer.name) carried adaptive tiers id=\(videoId) — \(visionOSPlayer.name) answer not needed")
+                completion(a.streams, a.video, a.desc, a.failure, a.captions)
                 return
             }
-            DebugLog.log("YoutubeAPI", "\(androidPlayer.name) gave \(streams.count) stream(s), no adaptive tier id=\(videoId) — adding the \(visionOSPlayer.name) client")
-            performPlayer(videoId: videoId, client: visionOSPlayer) { vrStreams, vrVideo, vrDesc, vrFailure, vrCaptions in
-                // Prefer the first leg's metadata; fall back to the second's when the first came
-                // back empty-handed (gated video, livestream, or a failed request).
-                let merged = streams + vrStreams
-                completion(merged,
-                           video ?? vrVideo,
-                           desc.isEmpty ? vrDesc : desc,
-                           merged.isEmpty ? (failure.isEmpty ? vrFailure : failure) : "",
-                           captions.isEmpty ? vrCaptions : captions)
-            }
+            guard let v = visionOS else { return }
+            delivered = true
+            // Prefer the first leg's metadata; fall back to the second's when the first came
+            // back empty-handed (gated video, livestream, or a failed request).
+            let merged = a.streams + v.streams
+            completion(merged,
+                       a.video ?? v.video,
+                       a.desc.isEmpty ? v.desc : a.desc,
+                       merged.isEmpty ? (a.failure.isEmpty ? v.failure : a.failure) : "",
+                       a.captions.isEmpty ? v.captions : a.captions)
+        }
+        performPlayer(videoId: videoId, client: androidPlayer) { s, v, d, f, c in
+            android = (s, v, d, f, c)
+            deliverWhenReady()
+        }
+        performPlayer(videoId: videoId, client: visionOSPlayer) { s, v, d, f, c in
+            visionOS = (s, v, d, f, c)
+            deliverWhenReady()
         }
     }
 
@@ -245,18 +267,18 @@ class YoutubeAPI {
         }
     }
 
-    // completion: (shorts videos, continuation token for next page or nil)
-    static func getChannelShorts(channelId: String, priority: Bool = false, completion: @escaping ([Video], String?) -> Void) {
+    // completion: (shorts videos, channel metadata, continuation token for next page or nil)
+    static func getChannelShorts(channelId: String, priority: Bool = false, completion: @escaping ([Video], Channel?, String?) -> Void) {
         // params "EgZzaG9ydHPyBgUKA5oBAA%3D%3D" = the channel's "Shorts" tab.
         let payload = body(client: webClient, extra: ["browseId": channelId, "params": "EgZzaG9ydHPyBgUKA5oBAA%3D%3D"])
-        guard let jsonStr = toJSON(payload) else { completion([], nil); return }
+        guard let jsonStr = toJSON(payload) else { completion([], nil, nil); return }
         let url = "\(baseURL)/browse?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: webUserAgent, timeout: 30, priority: priority) { data in
-            guard let data = data else { completion([], nil); return }
+            guard let data = data else { completion([], nil, nil); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseChannelResponse(data, channelId: channelId)
-                AppQueue.main.async { completion(result.0, result.2) }
+                AppQueue.main.async { completion(result.0, result.1, result.2) }
             }
         }
     }

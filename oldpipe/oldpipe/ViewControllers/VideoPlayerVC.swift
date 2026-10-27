@@ -20,6 +20,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var streamsFailure = ""
     // A > tap made while the player request was in flight; loadStreams starts it on arrival.
     private var playWhenStreamsLoad = false
+    // True while pollUntilReady waits for a play attempt to become ready or fail.
+    private var playAttemptPending = false
     // Set when an attempt failed hard (AVPlayerItem.status == .failed), which usually means
     // the resolved URL itself is bad (expired signature, unplayable format), or when the
     // response had nothing to play (often a dropped connection). The next play tap then
@@ -225,6 +227,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // returning from a pushed VC), reattach onto the live playback. Otherwise load.
         if sp.isActive(video.id) {
             showActivePlayback()
+            // Already playing, so nothing waits on the lane: related goes ahead of the
+            // description refetch below rather than behind its two player requests.
+            loadRelatedIfIdle()
             // Reopened onto live playback (e.g. from the mini bar) — still fetch the
             // description in the background without disturbing the playing UI.
             if !didRequestStreams { loadStreams(updateStatus: false) }
@@ -247,8 +252,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             shareBtn?.setTitle("Share", for: .normal)
         }
 
-        // Fetch related videos immediately on open (once per VC instance).
-        if relatedState == .idle { loadRelated() }
+        // Related videos — not ahead of anything playback is waiting for (see loadRelatedIfIdle).
+        loadRelatedIfIdle()
 
         // Own the singleton's autoplay-advance callback while we're the frontmost player,
         // so a playlist auto-advance swaps this VC's content in place.
@@ -288,6 +293,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+        playAttemptPending = false   // that poll will never report back
         if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
@@ -810,6 +816,27 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // MARK: - Related videos
+
+    // `next` (related videos, the comments token, authored chapters) shares the serial
+    // high-priority lane and its feed turnstile with everything playback needs first: the
+    // player requests, then — after a play tap — the stream's own first fetches, since the
+    // iOS 6 proxy and every HLS tier wait on the same turnstile. Queued any earlier it would
+    // run first and hold the video back. So it waits until playback is not waiting on the
+    // network, and is asked for again whenever that changes: when loadStreams completes, when
+    // a play tap's button fade ends, and when a play attempt becomes ready or fails
+    // (pollUntilReady).
+    private func loadRelatedIfIdle() {
+        guard relatedState == .idle, !playbackPending else { return }
+        loadRelated()
+    }
+
+    // True while playback is waiting on the network: a play tap is on its way (the button
+    // fading out, or the stream loading into the player), or this video's player requests are
+    // in flight — unless it is already in the player (reopened from the mini bar), where they
+    // only refetch the description, which nothing waits on.
+    private var playbackPending: Bool {
+        return startPending || playAttemptPending || (streamsLoading && !sp.isActive(video.id))
+    }
 
     private func loadRelated() {
         relatedState = .loading
@@ -2363,6 +2390,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 DebugLog.log("Player", "id=\(self.video.id) starting held play tap")
                 self.startPlay()
             }
+            self.loadRelatedIfIdle()
         }
     }
 
@@ -2820,6 +2848,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             guard let self = self else { return }
             self.startPending = false
             self.startPlay()
+            self.loadRelatedIfIdle()
         })
     }
 
@@ -3231,15 +3260,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             count += 1
             if self.sp.isReady {
                 if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+                self.playAttemptPending = false
                 onReady()
+                self.loadRelatedIfIdle()
             } else if self.sp.isFailed || count > maxTicks {
                 let timedOut = !self.sp.isFailed
                 if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+                self.playAttemptPending = false
                 onFail(timedOut)
+                self.loadRelatedIfIdle()
             }
         }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         objc_setAssociatedObject(self, &timerKey, timer, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        playAttemptPending = true
     }
 
     // VC-owned poll timer that mirrors the manager-owned download's state into the UI.
