@@ -12,9 +12,18 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var video: Video
     private var streams: [VideoStream] = []
     private var didRequestStreams = false
+    // True while a player request is in flight. An empty `streams` alone can't tell "still
+    // loading" from "loaded, nothing to play" — reading it as the latter is what flashed
+    // "No streams available" at a > tap made before the response arrived.
+    private var streamsLoading = false
+    // YouTube's reason the last player response had nothing to play, "" when it had streams.
+    private var streamsFailure = ""
+    // A > tap made while the player request was in flight; loadStreams starts it on arrival.
+    private var playWhenStreamsLoad = false
     // Set when an attempt failed hard (AVPlayerItem.status == .failed), which usually means
-    // the resolved URL itself is bad (expired signature, unplayable format). The next play
-    // tap then re-resolves the player response instead of replaying the same broken URL.
+    // the resolved URL itself is bad (expired signature, unplayable format), or when the
+    // response had nothing to play (often a dropped connection). The next play tap then
+    // re-resolves the player response instead of replaying the same broken result.
     private var streamsStale = false
 
 
@@ -269,6 +278,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onAdvance = nil
         sp.onRecovery = nil
         sp.onRateReverted = nil
+        // A held > tap goes with the page: playback must not start behind the screen pushed
+        // over it. The response still lands and leaves "Tap to play" for the way back.
+        if playWhenStreamsLoad {
+            playWhenStreamsLoad = false
+            hideSpinner()
+            playBtn?.isHidden = false
+        }
         NotificationCenter.default.removeObserver(self)
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
         if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
@@ -379,7 +395,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             // so make the next tap re-fetch them instead of reusing what just failed.
             streamsStale = true
             detachLayer()
-            statusLabel?.text = "Connection lost \u{2022} tap > to retry"
+            statusLabel?.text = "Connection lost \u{2022} tap to retry"
             statusLabel?.isHidden = false
             playBtn?.isHidden = false
         }
@@ -390,6 +406,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         contentGen += 1   // invalidates every in-flight response for the previous video
         streams = []
         didRequestStreams = false
+        streamsFailure = ""
+        playWhenStreamsLoad = false
         streamsStale = false
         relatedState = .idle
         descriptionText = ""
@@ -1626,8 +1644,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private func showPhotosDownloadPicker() {
         let choices = downloadChoices()
         guard !choices.isEmpty else {
-            statusLabel?.text = streams.isEmpty ? "Still loading streams..."
-                                               : "This video can't be saved to Photos (no usable stream)"
+            statusLabel?.text = streamsLoading ? "Still loading streams..."
+                              : streams.isEmpty ? noStreamsMessage
+                              : "This video can't be saved to Photos (no usable stream)"
             statusLabel?.isHidden = false
             return
         }
@@ -1863,8 +1882,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // A Chromecast fetches the URL itself, so it needs a self-contained muxed file — it can
         // neither reach the local transmux proxy nor mux two adaptive tracks on its own.
         guard let preferred = preferredStream() else {
-            statusLabel?.text = streams.isEmpty ? "No stream to cast yet"
-                                               : "This video can't be cast (no muxed stream)"
+            statusLabel?.text = streamsLoading ? "No stream to cast yet"
+                              : streams.isEmpty ? noStreamsMessage
+                              : "This video can't be cast (no muxed stream)"
             statusLabel?.isHidden = false
             return
         }
@@ -2300,7 +2320,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // Already downloaded — no network needed, play offline.
         if DownloadManager.isDownloaded(video.id) {
             if updateStatus {
-                statusLabel?.text = "Downloaded \u{2022} tap > to play"
+                statusLabel?.text = "Downloaded \u{2022} tap to play"
                 statusLabel?.isHidden = false
             }
             // Captions saved with the download: the only way a downloaded video has any,
@@ -2317,18 +2337,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             statusLabel?.isHidden = false
         }
 
+        streamsLoading = true
         DebugLog.log("Player", "loadStreams start id=\(video.id) updateStatus=\(updateStatus)")
         YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc, failure, captions in
             guard let self = self else { return }
+            self.streamsLoading = false
             self.streams = streams
+            self.streamsFailure = streams.isEmpty ? failure : ""
             self.captionTracks = captions
             DebugLog.log("Player", "getStreams result id=\(self.video.id) formats=\(streams.count) itags=\(streams.map { $0.itag }) failure=\"\(failure)\"")
             if updateStatus {
-                // Report YouTube's own explanation (bot check, purchase required, live not
-                // started, region/age gate...) rather than a catch-all string.
-                self.statusLabel?.text = streams.isEmpty
-                    ? (failure.isEmpty ? "No streams available" : failure)
-                    : "Tap > to play"
+                self.statusLabel?.text = streams.isEmpty ? self.noStreamsMessage : "Tap to play"
             }
             if !desc.isEmpty {
                 self.descriptionText = desc
@@ -2337,7 +2356,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             }
             self.restoreCaptionSelection()
             completion?()
+            // A > tap held while this request was in flight. startPlay also reports an empty
+            // response, so the held tap ends in either playback or YouTube's reason.
+            if self.playWhenStreamsLoad {
+                self.playWhenStreamsLoad = false
+                DebugLog.log("Player", "id=\(self.video.id) starting held play tap")
+                self.startPlay()
+            }
         }
+    }
+
+    // Shown when the player response has nothing to play. YouTube's own explanation (bot
+    // check, purchase required, live not started, region/age gate...) rather than a catch-all.
+    private var noStreamsMessage: String {
+        return streamsFailure.isEmpty ? "No streams available" : streamsFailure
     }
 
     // MARK: - Stream selection
@@ -2804,6 +2836,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             DebugLog.log("Player", "id=\(video.id) offline copy unplayable — falling back to stream")
         }
 
+        // The tap beat the player response. Hold it — spinner and "Loading..." stay up from
+        // playTapped — and let loadStreams start playback when the response lands.
+        if streamsLoading {
+            playWhenStreamsLoad = true
+            DebugLog.log("Player", "id=\(video.id) play tap held until streams load")
+            return
+        }
+
         // Retry after a hard failure: fetch a fresh player response first, then come back
         // through here with new URLs. streamsStale is cleared up front so this can't loop.
         if streamsStale {
@@ -2841,9 +2881,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 return
             }
             hideSpinner()
-            statusLabel?.text = streams.isEmpty ? "No streams available" : "Still loading streams..."
+            statusLabel?.text = streams.isEmpty ? noStreamsMessage
+                                                : "This video can't be played (no usable stream)"
             statusLabel?.isHidden = false
             playBtn?.isHidden = false
+            // Ask YouTube again on the next tap rather than re-reading this same answer —
+            // an empty response is often just a dropped connection.
+            streamsStale = true
             return
         }
 
@@ -2874,7 +2918,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         } else {
             DebugLog.log("Player", "id=\(video.id) StreamProxy.localURL failed — cannot stream")
             hideSpinner()
-            statusLabel?.text = "Stream unavailable \u{2022} tap > to retry"
+            statusLabel?.text = "Stream unavailable \u{2022} tap to retry"
             statusLabel?.isHidden = false
             playBtn?.isHidden = false
         }
@@ -2962,8 +3006,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         guard !DownloadManager.isDownloaded(video.id) else { return }
         let choices = downloadChoices()
         guard !choices.isEmpty else {
-            statusLabel?.text = streams.isEmpty ? "Still loading streams..."
-                                               : "This video can't be downloaded (no usable stream)"
+            statusLabel?.text = streamsLoading ? "Still loading streams..."
+                              : streams.isEmpty ? noStreamsMessage
+                              : "This video can't be downloaded (no usable stream)"
             statusLabel?.isHidden = false
             return
         }
@@ -3124,7 +3169,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             let itemError = self.sp.currentItemError?.localizedDescription ?? "none"
             DebugLog.log("Player", "startPlayback FAILED id=\(self.video.id) timedOut=\(timedOut) itemError=\(itemError) \(self.sp.failureDiagnostics)")
             self.hideSpinner()
-            self.statusLabel?.text = "Playback failed \u{2022} tap > to retry"
+            self.statusLabel?.text = "Playback failed \u{2022} tap to retry"
             self.statusLabel?.isHidden = false
             self.playBtn?.isHidden = false
         })
@@ -3167,8 +3212,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             // A timeout may just be a slow connection, so the resolved URLs are kept and a
             // retry reuses them. A hard failure points at the URL itself — force a re-resolve.
             if !timedOut { self.streamsStale = true }
-            self.statusLabel?.text = timedOut ? "Stream timed out \u{2022} tap > to retry"
-                                              : "Stream failed \u{2022} tap > to retry"
+            self.statusLabel?.text = timedOut ? "Stream timed out \u{2022} tap to retry"
+                                              : "Stream failed \u{2022} tap to retry"
             self.statusLabel?.isHidden = false
             self.playBtn?.isHidden = false
         })
