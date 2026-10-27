@@ -10,7 +10,7 @@ import UIKit
 
 class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
-    private let channelId: String
+    let channelId: String   // read by Navigator to find this page in the stack
     private var channelName: String
     private var avatarURL = ""
     private var channelDescription = ""
@@ -474,11 +474,10 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         tableView.deselectRow(at: indexPath, animated: true)
         if tableView == playlistsTable {
             let p = playlists[indexPath.row]
-            navigationController?.pushViewController(YTPlaylistVC(playlistId: p.id, title: p.title), animated: true)
+            navigationController?.openYTPlaylist(id: p.id, title: p.title)
             return
         }
-        let vc = VideoPlayerVC(video: list(for: tableView)[indexPath.row])
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(list(for: tableView)[indexPath.row])
     }
 }
 

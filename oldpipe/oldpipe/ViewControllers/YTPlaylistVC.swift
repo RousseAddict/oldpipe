@@ -9,7 +9,7 @@ import UIKit
 
 class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
-    private let playlistId: String
+    let playlistId: String   // read by Navigator to find this page in the stack
     private let playlistTitle: String
 
     private var videos: [Video] = []
@@ -180,8 +180,7 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
         // Seed the singleton autoplay queue so playback advances through the playlist
         // (stopping at the end) even after this VC / the player VC is popped.
         VideoPlayer.shared.setQueue(videos, startIndex: indexPath.row)
-        let vc = VideoPlayerVC(video: videos[indexPath.row])
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(videos[indexPath.row])
     }
 }
 

@@ -124,8 +124,6 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        let video = results[indexPath.row]
-        let vc = VideoPlayerVC(video: video)
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(results[indexPath.row])
     }
 }

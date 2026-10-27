@@ -141,7 +141,6 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         // Seed the singleton autoplay queue so playback advances through the playlist
         // (stopping at the end) even after this VC / the player VC is popped.
         VideoPlayer.shared.setQueue(videos, startIndex: indexPath.row)
-        let vc = VideoPlayerVC(video: videos[indexPath.row])
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(videos[indexPath.row])
     }
 }

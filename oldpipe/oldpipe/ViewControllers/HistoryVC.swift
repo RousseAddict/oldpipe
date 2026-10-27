@@ -150,7 +150,6 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        let vc = VideoPlayerVC(video: videos[indexPath.row])
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(videos[indexPath.row])
     }
 }

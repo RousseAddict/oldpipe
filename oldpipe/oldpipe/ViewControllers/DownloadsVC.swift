@@ -212,9 +212,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        let video = videos[indexPath.row]
-        let vc = VideoPlayerVC(video: video)
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(videos[indexPath.row])
     }
 
     // MARK: - Helpers

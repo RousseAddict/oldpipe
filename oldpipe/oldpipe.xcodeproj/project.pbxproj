@@ -81,6 +81,7 @@
 		BB000001000000000000BC10 /* ManageSubscriptionsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */; };
 		BB000001000000000000BC16 /* PlaylistsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB16 /* PlaylistsVC.swift */; };
 		BB000001000000000000BC1B /* HistoryVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB1B /* HistoryVC.swift */; };
+		BB000001000000000000BC35 /* Navigator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB35 /* Navigator.swift */; };
 		BB000001000000000000BC20 /* ShortsPlayerVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB20 /* ShortsPlayerVC.swift */; };
 		BB000001000000000000BC11 /* VideoRowCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB11 /* VideoRowCell.swift */; };
 		BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB13 /* MiniPlayerBar.swift */; };
@@ -186,6 +187,7 @@
 		BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManageSubscriptionsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB16 /* PlaylistsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB1B /* HistoryVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryVC.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB35 /* Navigator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Navigator.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB20 /* ShortsPlayerVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortsPlayerVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB11 /* VideoRowCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRowCell.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB13 /* MiniPlayerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerBar.swift; sourceTree = "<group>"; };
@@ -373,6 +375,7 @@
 				BB000001000000000000BB10 /* ManageSubscriptionsVC.swift */,
 				BB000001000000000000BB16 /* PlaylistsVC.swift */,
 				BB000001000000000000BB1B /* HistoryVC.swift */,
+				BB000001000000000000BB35 /* Navigator.swift */,
 				BB000001000000000000BB20 /* ShortsPlayerVC.swift */,
 				BB000001000000000000BB29 /* YTPlaylistVC.swift */,
 			);
@@ -577,6 +580,7 @@
 				BB000001000000000000BC10 /* ManageSubscriptionsVC.swift in Sources */,
 				BB000001000000000000BC16 /* PlaylistsVC.swift in Sources */,
 				BB000001000000000000BC1B /* HistoryVC.swift in Sources */,
+				BB000001000000000000BC35 /* Navigator.swift in Sources */,
 				BB000001000000000000BC20 /* ShortsPlayerVC.swift in Sources */,
 				BB000001000000000000BC11 /* VideoRowCell.swift in Sources */,
 				BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */,

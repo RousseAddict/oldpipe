@@ -346,8 +346,7 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
             return
         }
 
-        navigationController?.pushViewController(
-            ChannelVC(channelId: channel.id, name: channel.name), animated: true)
+        navigationController?.openChannel(id: channel.id, name: channel.name)
     }
 
     // The inverse of the pill filter: which groups is this one channel in.

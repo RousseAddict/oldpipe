@@ -225,7 +225,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         bar.onOpen = { [weak nav] video in
             guard let nav = nav else { return }
             if nav.topViewController is VideoPlayerVC { return }
-            nav.pushViewController(VideoPlayerVC(video: video), animated: true)
+            nav.openVideo(video)
         }
         win.addSubview(bar)
         miniBar = bar

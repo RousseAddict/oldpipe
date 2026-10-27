@@ -920,8 +920,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         if tableView === shortsTable { return }   // shorts taps handled by the per-card button
         let video = videos[indexPath.row]
         DebugLog.log("Home", "tap video id=\(video.id) title=\"\(video.title)\" channel=\(video.channelName)")
-        let vc = VideoPlayerVC(video: video)
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openVideo(video)
     }
 }
 

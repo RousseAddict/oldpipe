@@ -791,8 +791,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     @objc private func channelTapped() {
         guard !video.channelId.isEmpty else { return }
-        let vc = ChannelVC(channelId: video.channelId, name: video.channelName)
-        navigationController?.pushViewController(vc, animated: true)
+        navigationController?.openChannel(id: video.channelId, name: video.channelName)
     }
 
     private func updateDownloadButton() {
@@ -1556,8 +1555,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @objc private func relatedRowTapped(_ sender: UIButton) {
         let idx = sender.tag
         guard idx >= 0, idx < relatedVideos.count else { return }
-        let vc = VideoPlayerVC(video: relatedVideos[idx])
-        navigationController?.pushViewController(vc, animated: true)
+        // Replaces this page rather than stacking on it: Back goes to the list, not to the
+        // previous video (Navigator.swift).
+        navigationController?.openVideo(relatedVideos[idx])
     }
 
     // MARK: - Share
