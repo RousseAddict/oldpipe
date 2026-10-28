@@ -26,6 +26,19 @@ class SubscriptionManager {
         UserDefaults.standard.synchronize()
     }
 
+    // Many at once (Settings → Import): the same result as subscribe() per channel, with one
+    // read and one write of the store instead of one of each per channel.
+    static func subscribe(_ channels: [Channel]) {
+        guard !channels.isEmpty else { return }
+        var list = rawList()
+        for channel in channels where !channel.id.isEmpty {
+            list.removeAll { ($0["id"] as? String) == channel.id }
+            list.insert(channel.toDict(), at: 0)
+        }
+        UserDefaults.standard.set(list, forKey: defaultsKey)
+        UserDefaults.standard.synchronize()
+    }
+
     // Refresh a stored channel's avatar/name from a fresh API result. No-op if the channel
     // isn't subscribed or the new value is empty/unchanged. Heals subscriptions saved before
     // their avatar URL was known (the subscribe toggle can fire before the channel API returns).

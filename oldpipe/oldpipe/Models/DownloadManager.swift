@@ -288,6 +288,7 @@ class DownloadManager {
 
     static func clearPosition(for videoId: String) {
         var d = positionsDict()
+        guard d[videoId] != nil else { return }   // nothing to remove: skip rewriting the store
         d[videoId] = nil
         UserDefaults.standard.set(d, forKey: positionsKey)
     }
@@ -304,13 +305,11 @@ class DownloadManager {
         UserDefaults.standard.set(ids, forKey: watchedKey)
     }
 
-    static func isWatched(_ videoId: String) -> Bool {
-        let ids = (UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? []
-        return ids.contains(videoId)
-    }
-
+    // Called by every savePosition — every 5 s of playback — so it only rewrites the store when
+    // the video was actually marked.
     static func clearWatched(_ videoId: String) {
         var ids = (UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? []
+        guard ids.contains(videoId) else { return }
         ids.removeAll { $0 == videoId }
         UserDefaults.standard.set(ids, forKey: watchedKey)
     }
@@ -340,8 +339,8 @@ class DownloadManager {
     }
 
     // What DownloadsVC shows for each row, from one read of each store. The per-video helpers
-    // (isComplete, qualityLabel, isWatched, position) each read and convert a whole store, so
-    // calling them row by row multiplied that by the length of the list.
+    // (isComplete, qualityLabel, position) each read and convert a whole store, so calling
+    // them row by row multiplied that by the length of the list.
     struct Snapshot {
         let videos: [Video]                 // as all()
         let incomplete: Set<String>
@@ -361,16 +360,24 @@ class DownloadManager {
             quality[id] = (entry["dl_quality"] as? String) ?? ""
         }
         let videos = list.compactMap { Video.from(dict: $0) }.filter { fileExists($0.id) }
+        let play = playState(for: videos.map { $0.id })
+        return Snapshot(videos: videos, incomplete: incomplete, quality: quality,
+                        watched: play.watched, positions: play.positions)
+    }
+
+    // Watched marks and resume points for these videos, from one read of each store — for a
+    // list that shows a progress bar per row (DownloadsVC, HistoryVC), where a lookup per row
+    // would read and convert the whole store again each time.
+    static func playState(for videoIds: [String]) -> (watched: Set<String>, positions: [String: Double]) {
         let watchedIds = Set((UserDefaults.standard.array(forKey: watchedKey) as? [String]) ?? [])
         let allPositions = positionsDict()
         var watched = Set<String>()
         var positions: [String: Double] = [:]
-        for v in videos {
-            if watchedIds.contains(v.id) { watched.insert(v.id) }
-            if let p = (allPositions[v.id] as? NSNumber)?.doubleValue { positions[v.id] = p }
+        for id in videoIds {
+            if watchedIds.contains(id) { watched.insert(id) }
+            if let p = (allPositions[id] as? NSNumber)?.doubleValue { positions[id] = p }
         }
-        return Snapshot(videos: videos, incomplete: incomplete, quality: quality,
-                        watched: watched, positions: positions)
+        return (watched, positions)
     }
 
     // Human-readable size on disk, e.g. "11.4 MB". For an HLS bundle this sums every segment,

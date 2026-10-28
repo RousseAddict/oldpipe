@@ -176,6 +176,10 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         cell.imageView?.image = DownloadsVC.placeholder
         cell.imageView?.layer.cornerRadius = 4
         cell.imageView?.clipsToBounds = true
+        // Rounded and clipped (the progress bar inside must not poke past the corners), so
+        // rasterized, or the corners are rendered off-screen on every frame of a scroll.
+        cell.imageView?.layer.shouldRasterize = true
+        cell.imageView?.layer.rasterizationScale = UIScreen.main.scale
         cell.playedFraction = playedFrac[video.id] ?? 0
         AsyncImageView.cancel(cell.thumbTicket)
         cell.thumbTicket = AsyncImageView.loadCell(url: video.thumbnailURL) { [weak cell] img in

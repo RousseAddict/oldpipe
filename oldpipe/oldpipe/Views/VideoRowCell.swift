@@ -42,6 +42,10 @@ class VideoRowCell: UITableViewCell {
         durationLabel.textAlignment = .center
         durationLabel.layer.cornerRadius = 3
         durationLabel.clipsToBounds = true
+        // Rounded and clipped, so rasterized like the thumbnail — otherwise its corners are
+        // rendered off-screen again on every frame of a scroll.
+        durationLabel.layer.shouldRasterize = true
+        durationLabel.layer.rasterizationScale = UIScreen.main.scale
         contentView.addSubview(durationLabel)
 
         titleLabel.backgroundColor = .clear

@@ -67,13 +67,14 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
     private func reload() {
         videos = HistoryManager.all()
         playedFrac.removeAll()
+        let play = DownloadManager.playState(for: videos.map { $0.id })   // one read per store
         for v in videos {
-            if DownloadManager.isWatched(v.id) {
+            if play.watched.contains(v.id) {
                 playedFrac[v.id] = 1   // fully played → full bar (resume position is cleared)
             } else {
                 let dur = HistoryVC.durationSeconds(v.durationText)
                 if dur > 0 {
-                    let f = CGFloat(DownloadManager.position(for: v.id) / dur)
+                    let f = CGFloat((play.positions[v.id] ?? 0) / dur)
                     playedFrac[v.id] = max(0, min(1, f))
                 }
             }

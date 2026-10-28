@@ -1552,6 +1552,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         thumb.contentMode = .scaleAspectFill
         thumb.clipsToBounds = true
         thumb.layer.cornerRadius = 4
+        // Rounded and clipped: rasterized (as in VideoRowCell) so the page's scroll doesn't
+        // render these corners off-screen every frame. Same for the duration badge below.
+        thumb.layer.shouldRasterize = true
+        thumb.layer.rasterizationScale = UIScreen.main.scale
         if !v.thumbnailURL.isEmpty { thumb.load(url: v.thumbnailURL) }
         row.addSubview(thumb)
 
@@ -1566,6 +1570,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             dur.frame = CGRect(x: thumb.frame.maxX - dW - 4, y: thumb.frame.maxY - 18, width: dW, height: 14)
             dur.layer.cornerRadius = 2
             dur.clipsToBounds = true
+            dur.layer.shouldRasterize = true
+            dur.layer.rasterizationScale = UIScreen.main.scale
             row.addSubview(dur)
         }
 
@@ -1881,8 +1887,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let name = (alertView.textField(at: 0)?.text ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
-        let pl = PlaylistManager.create(name: name)
-        PlaylistManager.add(video: video, to: pl.id)
+        PlaylistManager.create(name: name, videos: [video])   // one write, not create + add
         flash(addPlaylistBtn, "Added \u{2713}", revertTo: "Playlist")
     }
 

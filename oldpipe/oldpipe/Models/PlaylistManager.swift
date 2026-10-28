@@ -17,10 +17,18 @@ class PlaylistManager {
         return rawList().first { ($0["id"] as? String) == id }.flatMap { Playlist.from(dict: $0) }
     }
 
-    // Create an empty playlist (inserted newest-first) and return it.
+    // Create a playlist (inserted newest-first) and return it. `videos` fills it in the same
+    // write: saving a YouTube playlist used to create it empty and add() each video in turn,
+    // every add a full read and rewrite of all the playlists. Same rule as add(): de-duplicated
+    // by id, a repeated video keeping its last position.
     @discardableResult
-    static func create(name: String) -> Playlist {
-        let playlist = Playlist(id: UUID().uuidString, name: name, videos: [],
+    static func create(name: String, videos: [Video] = []) -> Playlist {
+        var seen = Set<String>()
+        var unique: [Video] = []
+        for v in videos.reversed() {
+            if seen.insert(v.id).inserted { unique.append(v) }
+        }
+        let playlist = Playlist(id: UUID().uuidString, name: name, videos: unique.reversed(),
                                 createdAt: Date().timeIntervalSince1970)
         var list = rawList()
         list.insert(playlist.toDict(), at: 0)

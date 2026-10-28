@@ -25,6 +25,7 @@ class VideoPlayer {
     private var pendingResume: Double = 0
     private var didApplyResume = false
     private var lastSavedPos: Double = 0
+    private var markedWatched = false   // this load's video already marked watched
     private var artwork: UIImage?
     private var ticker: Timer?
     private var endObserver: NSObjectProtocol?   // AVPlayerItemDidPlayToEndTime for the current item
@@ -169,6 +170,7 @@ class VideoPlayer {
         pendingResume = resume
         didApplyResume = false
         lastSavedPos = resume
+        markedWatched = false
         // Watchdog state is per-load, except the attempt counter during a recovery — that one
         // has to survive the reload it is driving, or every attempt would look like the first.
         // Loading a *different* video supersedes a recovery outright.
@@ -694,9 +696,14 @@ class VideoPlayer {
         guard let v = currentVideo else { return }
         let cur = currentSeconds, dur = durationSeconds
         if dur > 0, cur >= dur - 2 {
-            DownloadManager.markWatched(v.id); lastSavedPos = 0
+            // Once: the ticker keeps running while a finished video sits in the mini bar (or one
+            // is paused in its last seconds), and this used to rewrite the positions and watched
+            // stores every second until something else was played.
+            if !markedWatched { DownloadManager.markWatched(v.id); markedWatched = true }
+            lastSavedPos = 0
         } else if abs(cur - lastSavedPos) >= 5 {
             lastSavedPos = cur; DownloadManager.savePosition(cur, for: v.id)
+            markedWatched = false   // savePosition clears the watched mark, so the end counts again
         }
     }
 
@@ -704,8 +711,13 @@ class VideoPlayer {
         guard let v = currentVideo else { return }
         let cur = currentSeconds, dur = durationSeconds
         guard cur > 5 else { return }
-        if dur > 0, cur >= dur - 5 { DownloadManager.markWatched(v.id) }
-        else { DownloadManager.savePosition(cur, for: v.id) }
+        // Keeps saveResumeThrottled's bookkeeping in step, or a pause mid-video right after a
+        // finish would leave markedWatched set and the next end would not be marked.
+        if dur > 0, cur >= dur - 5 {
+            DownloadManager.markWatched(v.id); markedWatched = true
+        } else {
+            DownloadManager.savePosition(cur, for: v.id); markedWatched = false; lastSavedPos = cur
+        }
     }
 
     // MARK: - Now Playing (lock screen)

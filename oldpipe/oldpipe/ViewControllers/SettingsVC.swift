@@ -521,12 +521,9 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
         var subCount = 0
         if let subs = dict["subscriptions"] as? [[String: Any]] {
-            for d in subs {
-                if let c = Channel.from(dict: d) {
-                    SubscriptionManager.subscribe(c)
-                    subCount += 1
-                }
-            }
+            let channels = subs.compactMap { Channel.from(dict: $0) }
+            SubscriptionManager.subscribe(channels)   // one write for the whole list
+            subCount = channels.count
         }
 
         var plCount = 0

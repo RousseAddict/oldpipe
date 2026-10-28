@@ -523,6 +523,8 @@ private class ChannelCell: UITableViewCell {
         avatar.backgroundColor = UIColor(white: 0.15, alpha: 1)
         avatar.layer.cornerRadius = 20
         avatar.clipsToBounds = true
+        avatar.layer.shouldRasterize = true   // rounded + clipped: as ChannelVC's avatar
+        avatar.layer.rasterizationScale = UIScreen.main.scale
         avatar.contentMode = .scaleAspectFill
         contentView.addSubview(avatar)
 

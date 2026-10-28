@@ -5,8 +5,11 @@ class AsyncImageView: UIImageView {
     // MARK: - Memory cache
     private static let cache: NSCache<NSString, UIImage> = {
         let c = NSCache<NSString, UIImage>()
-        c.countLimit = 20
-        c.totalCostLimit = 30 * 1024 * 1024  // 30 MB decoded bytes
+        // The memory the cache used to settle at — 20 thumbnails decoded at 806 KB each — now
+        // holds ~70 of them at 230 KB (see downscaleAndDecode). At 20, about three screens of
+        // rows, a list scrolled back any further re-decoded them from disk.
+        c.countLimit = 100
+        c.totalCostLimit = 16 * 1024 * 1024  // 16 MB decoded bytes
         return c
     }()
 
@@ -45,6 +48,13 @@ class AsyncImageView: UIImageView {
         var token: CurlFetcher?
         var waiters: [Int: (UIImage) -> Void] = [:]
         var nextWaiterId = 0
+        // Set on main when the last waiter withdraws, read on decodeQueue — the one field
+        // here touched off main, hence the lock.
+        private var _cancelled = false
+        var cancelled: Bool {
+            get { objc_sync_enter(self); defer { objc_sync_exit(self) }; return _cancelled }
+            set { objc_sync_enter(self); _cancelled = newValue; objc_sync_exit(self) }
+        }
     }
 
     // Opaque handle a caller keeps so it can withdraw its own waiter later.
@@ -100,6 +110,7 @@ class AsyncImageView: UIImageView {
         guard let t = ticket, let req = inflight[t.url] else { return }
         req.waiters.removeValue(forKey: t.waiterId)
         guard req.waiters.isEmpty else { return }   // another view still wants this image
+        req.cancelled = true
         req.token?.cancel()
         inflight.removeValue(forKey: t.url)
     }
@@ -124,6 +135,15 @@ class AsyncImageView: UIImageView {
 
         let path = diskPath(for: url)
         decodeQueue.async {
+            // Rows scrolled past in a fling queue their reads here faster than they run; one
+            // whose view has since let go is skipped rather than read, decoded and cached ahead
+            // of the rows now on screen. (Its entry left `inflight` when it was cancelled.)
+            if req.cancelled { return }
+            // A request for the same URL queued just ahead may already have decoded it.
+            if let img = cache.object(forKey: url as NSString) {
+                AppQueue.main.async { finish(req, url: url, image: img) }
+                return
+            }
             if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
                let img = safeDecode(data) {
                 cache.setObject(img, forKey: url as NSString, cost: bitmapCost(img))
@@ -170,12 +190,17 @@ class AsyncImageView: UIImageView {
         return downscaleAndDecode(raw)
     }
 
-    private static func downscaleAndDecode(_ image: UIImage, maxPx: CGFloat = 300) -> UIImage {
-        let w = image.size.width, h = image.size.height
+    // Decoded at the source's own pixels, never more, with the long side capped at maxPx: 320
+    // is the width of the mqdefault frame every list thumbnail is, so those decode 1:1 and only
+    // larger sources, such as channel avatars, come out smaller. Drawn at scale 1 — the cap
+    // used to be applied in points with the screen's scale, which turned a 320x180 thumbnail
+    // into a 600x336 bitmap: 3.5x the memory for no detail the source didn't have.
+    private static func downscaleAndDecode(_ image: UIImage, maxPx: CGFloat = 320) -> UIImage {
+        let w = image.size.width * image.scale, h = image.size.height * image.scale
         let ratio: CGFloat = (w > maxPx || h > maxPx) ? min(maxPx / w, maxPx / h) : 1.0
         let target = CGSize(width: floor(w * ratio), height: floor(h * ratio))
         guard target.width > 0, target.height > 0 else { return image }
-        UIGraphicsBeginImageContextWithOptions(target, false, UIScreen.main.scale)
+        UIGraphicsBeginImageContextWithOptions(target, false, 1)
         image.draw(in: CGRect(origin: .zero, size: target))
         let result = UIGraphicsGetImageFromCurrentImageContext() ?? image
         UIGraphicsEndImageContext()

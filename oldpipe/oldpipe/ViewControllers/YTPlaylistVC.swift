@@ -146,10 +146,7 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
     @objc private func saveTapped() {
         guard !videos.isEmpty else { return }
         let name = playlistTitle.isEmpty ? "Playlist" : playlistTitle
-        let created = PlaylistManager.create(name: name)
-        for v in videos {
-            PlaylistManager.add(video: v, to: created.id)
-        }
+        PlaylistManager.create(name: name, videos: videos)   // one write for the whole list
         saveItem.title = "Saved \(videos.count) \u{2713}"
         let t = Timer(timeInterval: 1.5, target: YTPlaylistBlockTarget { [weak self] in
             self?.saveItem.title = "Save"
