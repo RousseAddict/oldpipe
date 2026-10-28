@@ -2,10 +2,11 @@ import UIKit
 
 // MARK: - DownloadOptionsView
 //
-// The "Download" modal: a card over a dimmed backdrop, built from a list of SECTIONS of
-// single-select rows. Quality is the only section populated today; Format (video vs audio-only)
-// and Captions are the next two, and they slot in by appending another Section — the layout and
-// hit-testing walk the array and know nothing about what a section means.
+// The "Download" modal: a card over a dimmed backdrop, built from a list of SECTIONS of rows.
+// The video page fills it with Save to, Video, Audio and Captions; they slot in by appending
+// another Section — the layout and hit-testing walk the array and know nothing about what a
+// section means. The one place a caller reacts to a tap is onChange (Photos greys out Audio
+// and Captions).
 //
 // A real view rather than a UIActionSheet because a sheet is a flat list of buttons: it can't
 // carry a per-row size estimate, a section header, or the extra sections coming later.
@@ -24,12 +25,15 @@ struct DownloadOptionRow {
     let tag: Int
 }
 
-// How a section's rows behave. The modal mixes both: the download target is one choice spread
-// over two groups, while caption languages are independent ticks in the same sheet.
+// How a section's rows behave. The modal mixes all three: the download target is one choice
+// spread over two groups, where it goes is a choice of its own, and caption languages are
+// independent ticks in the same sheet.
 enum DownloadOptionMode {
     // Part of the modal-wide SINGLE choice: ticking a row here clears every other exclusive
     // section too, so "720p" and "Audio only" cannot both be chosen.
     case exclusive
+    // One row of this section, whatever the others hold ("oldpipe" or "Photos").
+    case single
     // Independent — any number of rows may be ticked, and other sections are untouched.
     case multi
 }
@@ -76,8 +80,11 @@ final class DownloadOptionsView: UIView {
     private let sections: [DownloadOptionSection]
     // Ticked row indices per section. A Set because a .multi section can hold several.
     private var selection: [Set<Int>]
+    // A greyed-out section keeps its ticks, so turning it back on restores them.
+    private var sectionEnabled: [Bool]
     private let confirmTitle: String
     private var onConfirm: (([[Int]]) -> Void)?
+    private var onChange: ((DownloadOptionsView, [[Int]]) -> Void)?
 
     private let backdrop = UIButton(type: .custom)
     private let card = UIView()
@@ -94,6 +101,7 @@ final class DownloadOptionsView: UIView {
     private var rowDetailLabels: [UILabel] = []
     private var rowMarkLabels: [UILabel] = []
     private var headerLabels: [UILabel] = []
+    private var sectionHeaders: [Int: UILabel] = [:]
     private var scroller = UIScrollView()
 
     // MARK: - Presentation
@@ -101,17 +109,47 @@ final class DownloadOptionsView: UIView {
     // Add to `host` (the presenting VC's view) and fade in. Sized from the host's bounds and
     // flexible in both axes, so the iOS 8 build's iPad rotation reflows it for free and the
     // portrait-locked iOS 6/7 builds compile the mask to [] exactly as every other view does.
+    // `onChange` runs after every tap, and once before the modal shows, with the ticks so far.
     @discardableResult
     static func present(in host: UIView, title: String, sections: [DownloadOptionSection],
                         confirmTitle: String,
+                        onChange: ((DownloadOptionsView, [[Int]]) -> Void)? = nil,
                         onConfirm: @escaping ([[Int]]) -> Void) -> DownloadOptionsView {
         let v = DownloadOptionsView(frame: host.bounds, title: title, sections: sections,
                                     confirmTitle: confirmTitle, onConfirm: onConfirm)
+        v.onChange = onChange
+        v.notifyChange()
         v.autoresizingMask = iPadFlexWidthHeight
         v.alpha = 0
         host.addSubview(v)
         UIView.animate(withDuration: 0.18) { v.alpha = 1 }
         return v
+    }
+
+    // MARK: - Changes from onChange
+
+    // Grey a section out, or back in. Its rows stop taking taps but keep their ticks; whether
+    // those still count is the caller's to decide when it reads `picked`.
+    func setSectionEnabled(_ section: Int, _ enabled: Bool) {
+        guard section >= 0, section < sections.count, sectionEnabled[section] != enabled else { return }
+        sectionEnabled[section] = enabled
+        for (i, path) in rowIndexPaths.enumerated() where path.section == section {
+            rowButtons[i].isEnabled = enabled && sections[section].rows[path.row].enabled
+            rowButtons[i].alpha = enabled ? 1 : 0.35
+        }
+        sectionHeaders[section]?.alpha = enabled ? 1 : 0.35
+    }
+
+    // Tick a row as a tap would, without calling onChange back.
+    func select(section: Int, row: Int) {
+        guard section >= 0, section < sections.count,
+              row >= 0, row < sections[section].rows.count else { return }
+        apply(section: section, row: row)
+        refreshSelectionMarks()
+    }
+
+    func setConfirmTitle(_ title: String) {
+        confirmBtn.setTitle(title, for: .normal)
     }
 
     func dismiss() {
@@ -125,6 +163,7 @@ final class DownloadOptionsView: UIView {
                  onConfirm: @escaping ([[Int]]) -> Void) {
         self.sections = sections
         self.selection = sections.map { Set($0.initialSelection) }
+        self.sectionEnabled = sections.map { _ in true }
         self.confirmTitle = confirmTitle
         self.onConfirm = onConfirm
         super.init(frame: frame)
@@ -193,6 +232,7 @@ final class DownloadOptionsView: UIView {
                 header.font = UIFont.boldSystemFont(ofSize: 11)
                 scroller.addSubview(header)
                 headerLabels.append(header)
+                sectionHeaders[s] = header
             }
             for (r, row) in section.rows.enumerated() {
                 let btn = UIButton(type: .custom)
@@ -312,21 +352,32 @@ final class DownloadOptionsView: UIView {
         let idx = sender.tag
         guard idx >= 0, idx < rowIndexPaths.count else { return }
         let path = rowIndexPaths[idx]
-        switch sections[path.section].mode {
+        apply(section: path.section, row: path.row)
+        refreshSelectionMarks()
+        notifyChange()
+    }
+
+    private func apply(section: Int, row: Int) {
+        switch sections[section].mode {
         case .exclusive:
             // Clear every exclusive section, not just this one — the choice spans them.
             for i in sections.indices where sections[i].mode == .exclusive {
                 selection[i].removeAll()
             }
-            selection[path.section] = [path.row]
+            selection[section] = [row]
+        case .single:
+            selection[section] = [row]
         case .multi:
-            if selection[path.section].contains(path.row) {
-                selection[path.section].remove(path.row)
+            if selection[section].contains(row) {
+                selection[section].remove(row)
             } else {
-                selection[path.section].insert(path.row)
+                selection[section].insert(row)
             }
         }
-        refreshSelectionMarks()
+    }
+
+    private func notifyChange() {
+        onChange?(self, selection.map { Array($0).sorted() })
     }
 
     // The selected row in each section is tinted and ticked; a row that carries its own mark

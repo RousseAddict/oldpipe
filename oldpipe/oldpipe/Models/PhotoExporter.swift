@@ -1,7 +1,7 @@
 import UIKit
 
 // MARK: - PhotoExporter
-// "Save to Photos", from the Share sheet on the video page (VideoPlayerVC).
+// "Save to Photos", from the Download button on the video page (VideoPlayerVC).
 //
 // UISaveVideoAtPathToSavedPhotosAlbum (iOS 3.1+) does the actual import on every target, but it
 // only takes one MP4/MOV file. A direct 360p download already is one (downloads/<id>.mp4) and
@@ -63,6 +63,9 @@ final class PhotoExporter: NSObject {
 
     // Saved this session — the confirmation warns that saving again makes a second copy.
     func wasSaved(_ videoId: String) -> Bool { return saved.contains(videoId) }
+
+    // Waiting for its download to finish (saveWhenDownloaded), not started yet.
+    func isPending(_ videoId: String) -> Bool { return pending.contains(videoId) }
 
     // nil = nothing to say; the row shows its usual quality and size.
     func statusText(_ videoId: String) -> String? {
@@ -202,7 +205,7 @@ final class PhotoExporter: NSObject {
 
     // MARK: - Stop
 
-    // The Share sheet's Stop. A queued export never starts; a running download or conversion
+    // The Download button's Stop. A queued export never starts; a running download or conversion
     // stops at its next segment (a progressive copy at its next progress tick) and cleans up.
     func cancel(_ videoId: String) {
         if pending.remove(videoId) != nil { return }
