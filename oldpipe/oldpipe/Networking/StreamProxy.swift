@@ -156,6 +156,9 @@ final class StreamProxy: NSObject {
     private var listenFd: Int32 = -1
     private var port: UInt16 = 0
     private var started = false
+    // Bumped by every start(), so an accept loop that ends can tell whether the listener it
+    // served is still the current one — fd numbers are handed out again as soon as one closes.
+    private var listenerGen: UInt64 = 0
 
     // Maps the opaque local path token -> (real googlevideo URL, generation). Avoids encoding
     // the URL into the path (addingPercentEncoding / base64 options are iOS 7+). NSLock-guarded
@@ -248,13 +251,29 @@ final class StreamProxy: NSObject {
         DebugLog.log("StreamProxy", "closeCurrentStream gen=\(bumped)")
     }
 
-    // Tear down the listen socket so the NEXT localURL(for:) opens a fresh one. iOS reclaims
-    // loopback listening sockets while an app is SUSPENDED in the background; on resume the old
-    // socket/port is dead, so localURL would hand AVPlayer a URL to a closed port → no bytes →
-    // the stream stalls past AVPlayer's readiness window → download fallback. Called from
-    // AppDelegate on foreground. Closing listenFd unblocks acceptLoop's accept() so that thread
-    // exits cleanly; flipping `started` back to false makes start() rebind on next use. No-op if
-    // the listener was never started (iOS 7+ never uses the proxy, so this stays a no-op there).
+    // Called by AppDelegate each time the app becomes active. iOS reclaims loopback listening
+    // sockets while an app is SUSPENDED in the background; on resume the old socket/port is dead,
+    // so localURL would hand AVPlayer a URL to a closed port → no bytes → the stream stalls past
+    // AVPlayer's readiness window → download fallback. But an app that kept playing in the
+    // background was never suspended, and becoming active also follows a Notification Center
+    // pull or a declined call: tearing the listener down unconditionally, as this used to, sent
+    // the playing video's next segment (every HLS segment is a new connection) to a closed port.
+    // So it is only rebuilt when it no longer answers: the probe sends a request (handled as an
+    // unknown path → 404), which a socket left with no accept loop cannot answer even though it
+    // still completes the connect. Loopback replies in a few ms; 500 ms per step only bounds a
+    // dead one. With no socket to probe from (-1) there is no verdict, and the listener stays.
+    func resetIfDead() {
+        lock.lock()
+        let live = started, p = port
+        lock.unlock()
+        guard live, curl_bridge_loopback_answers(p, 500) == 0 else { return }
+        DebugLog.log("StreamProxy", "listener on port \(p) does not answer — rebinding on next use")
+        reset()
+    }
+
+    // Tear down the listen socket so the NEXT localURL(for:) opens a fresh one. Closing
+    // listenFd unblocks acceptLoop's accept() so that thread exits cleanly; flipping `started`
+    // back to false makes start() rebind on next use. No-op if the listener was never started.
     func reset() {
         lock.lock()
         guard started else { lock.unlock(); return }
@@ -306,27 +325,59 @@ final class StreamProxy: NSObject {
 
         listenFd = fd
         started = true
+        listenerGen += 1
         // Raw Thread (not GCD): the accept loop blocks forever, and per-connection threads
         // block in a synchronous curl_easy_perform for the whole stream — parking those on a
         // GCD concurrent queue would exhaust its width. NSThread each owns a real OS thread.
-        let t = Thread(target: self, selector: #selector(acceptLoop), object: nil)
+        let args: NSArray = [NSNumber(value: fd), NSNumber(value: listenerGen)]
+        let t = Thread(target: self, selector: #selector(acceptLoop(_:)), object: args)
         t.stackSize = 512 * 1024
         t.start()
         return true
     }
 
-    @objc private func acceptLoop() {
+    @objc private func acceptLoop(_ obj: Any) {
+        guard let args = obj as? NSArray, args.count == 2,
+              let fdNum = args[0] as? NSNumber, let genNum = args[1] as? NSNumber else { return }
+        let fd = fdNum.int32Value, gen = genNum.uint64Value
+        var acceptErr: Int32 = 0
+        var transientErrors = 0
         while true {
-            let client = accept(listenFd, nil, nil)
+            let client = accept(fd, nil, nil)
             if client < 0 {
-                if errno == EINTR { continue }
+                let e = errno
+                if e == EINTR { continue }
+                // A client that reset while it waited in the backlog, or a passing shortage of
+                // descriptors or buffers (every connection costs a thread and curl's sockets):
+                // the listener itself is fine, so try again shortly. Only so many times in a
+                // row, though — a socket reclaimed during a suspension can keep failing the
+                // same way, and this loop must end for it to be replaced.
+                if [ECONNABORTED, EMFILE, ENFILE, ENOBUFS, ENOMEM].contains(e), transientErrors < 20 {
+                    transientErrors += 1
+                    usleep(50_000)
+                    continue
+                }
+                acceptErr = e
                 break
             }
+            transientErrors = 0
             var yes: Int32 = 1
             setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
             let t = Thread(target: self, selector: #selector(handleConnection(_:)), object: NSNumber(value: client))
             t.stackSize = 512 * 1024
             t.start()
+        }
+        // Nobody accepts on this socket any more. If it is still the current listener (it was
+        // not closed by reset() but failed — e.g. reclaimed while the app was suspended), drop
+        // it so the next stream binds a fresh one at once, rather than handing out a port whose
+        // connections are never answered until resetIfDead next runs.
+        lock.lock()
+        let current = started && listenerGen == gen
+        if current { started = false; listenFd = -1 }
+        lock.unlock()
+        if current {
+            close(fd)
+            DebugLog.log("StreamProxy", "accept loop ended (errno \(acceptErr)) — rebinding on next use")
         }
     }
 

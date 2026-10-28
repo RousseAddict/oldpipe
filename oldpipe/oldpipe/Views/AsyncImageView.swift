@@ -44,7 +44,7 @@ class AsyncImageView: UIImageView {
     // Touched ONLY on the main thread (same invariant as DownloadManager.inFlight), so no
     // lock: every entry/exit below is either already on main or hops to main first.
 
-    private final class ImageRequest {
+    fileprivate final class ImageRequest {
         var token: CurlFetcher?
         var waiters: [Int: (UIImage) -> Void] = [:]
         var nextWaiterId = 0
@@ -57,11 +57,17 @@ class AsyncImageView: UIImageView {
         }
     }
 
-    // Opaque handle a caller keeps so it can withdraw its own waiter later.
+    // Opaque handle a caller keeps so it can withdraw its own waiter later. It names the
+    // request it joined, not just the URL: a later request for the same URL numbers its
+    // waiters from 0 again, so a ticket left over from a finished one (a failed load never
+    // clears it) used to withdraw some other view's waiter.
     final class ImageRequestTicket {
         fileprivate let url: String
         fileprivate let waiterId: Int
-        fileprivate init(url: String, waiterId: Int) { self.url = url; self.waiterId = waiterId }
+        fileprivate weak var request: ImageRequest?
+        fileprivate init(url: String, waiterId: Int, request: ImageRequest) {
+            self.url = url; self.waiterId = waiterId; self.request = request
+        }
     }
 
     private static var inflight: [String: ImageRequest] = [:]
@@ -107,12 +113,21 @@ class AsyncImageView: UIImageView {
     }
 
     static func cancel(_ ticket: ImageRequestTicket?) {
-        guard let t = ticket, let req = inflight[t.url] else { return }
+        guard let t = ticket, let req = t.request, inflight[t.url] === req else { return }
         req.waiters.removeValue(forKey: t.waiterId)
         guard req.waiters.isEmpty else { return }   // another view still wants this image
-        req.cancelled = true
-        req.token?.cancel()
-        inflight.removeValue(forKey: t.url)
+        // Torn down on the next turn of the main queue, not now. A reloadData cancels every
+        // visible row in prepareForReuse, and the same rows ask for the same URLs again moments
+        // later in the same layout pass: tearing down at once threw away each request's place
+        // in the 2-wide curl queue, so every progressive Home reload sent the thumbnails on
+        // screen to the back of it again (and one already downloading was fetched twice).
+        // Asked for again before this runs, the request has a waiter and simply carries on.
+        AppQueue.main.async {
+            guard req.waiters.isEmpty, inflight[t.url] === req else { return }
+            req.cancelled = true
+            req.token?.cancel()
+            inflight.removeValue(forKey: t.url)
+        }
     }
 
     // MARK: - Shared pipeline: disk → network → decode → cache
@@ -123,7 +138,7 @@ class AsyncImageView: UIImageView {
             let id = existing.nextWaiterId
             existing.nextWaiterId += 1
             existing.waiters[id] = completion
-            return ImageRequestTicket(url: url, waiterId: id)
+            return ImageRequestTicket(url: url, waiterId: id, request: existing)
         }
 
         // Register BEFORE hopping to decodeQueue, otherwise two cells asking for the same
@@ -169,7 +184,7 @@ class AsyncImageView: UIImageView {
                 }
             }
         }
-        return ImageRequestTicket(url: url, waiterId: 0)
+        return ImageRequestTicket(url: url, waiterId: 0, request: req)
     }
 
     // Identity check: cancel-then-re-request for the same URL puts a NEW ImageRequest in

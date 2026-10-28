@@ -123,7 +123,7 @@ struct VideoStream {
 
 // A seekable point inside a video. Taken from the watch page's own chapter list when YouTube
 // publishes one (see YoutubeAPI.parseChapters), else parsed out of the description below.
-struct Chapter {
+struct Chapter: Equatable {
     let title: String
     let startSeconds: Double
 

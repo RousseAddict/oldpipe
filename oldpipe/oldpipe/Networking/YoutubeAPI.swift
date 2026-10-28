@@ -160,12 +160,61 @@ class YoutubeAPI {
     // completion: (streams, video details, full description text, failure reason, caption tracks)
     // failure reason is empty when streams came back; otherwise it is a user-facing
     // explanation of why there is nothing to play (bot check, paid, live, network...).
-    static func getStreams(videoId: String, completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
-        if cachedVisitorData.isEmpty {
-            bootstrapVisitorData { resolveStreams(videoId: videoId, completion: completion) }
-        } else {
-            resolveStreams(videoId: videoId, completion: completion)
+    //
+    // reuse: true accepts a recent answer for the same video (see recentAnswers) instead of
+    // asking again; completion still runs on a later turn of the main queue, as when it fetches.
+    static func getStreams(videoId: String, reuse: Bool = false,
+                           completion: @escaping ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void) {
+        if reuse, let a = recentAnswer(for: videoId) {
+            DebugLog.log("YoutubeAPI", "player answer reused id=\(videoId)")
+            AppQueue.main.async { completion(a.streams, a.video, a.desc, a.failure, a.captions) }
+            return
         }
+        let remembering: ([VideoStream], Video?, String, String, [CaptionTrack]) -> Void = { s, v, d, f, c in
+            remember((s, v, d, f, c), for: videoId)
+            completion(s, v, d, f, c)
+        }
+        if cachedVisitorData.isEmpty {
+            bootstrapVisitorData { resolveStreams(videoId: videoId, completion: remembering) }
+        } else {
+            resolveStreams(videoId: videoId, completion: remembering)
+        }
+    }
+
+    // The last few player answers, by video id. A page that shows a video the app has only just
+    // resolved asked for it all over again: on a playlist advance StreamResolver has fetched the
+    // streams a moment before the page wants the description and captions, and a page reopened
+    // from the mini bar is showing the video the player is still playing from its own answer.
+    // Each refetch was two requests on the high-priority lane, each holding the feed turnstile —
+    // which the stream proxy and every HLS segment fetch wait on — for its whole transfer, right
+    // as the new video was starting. Only callers passing reuse: true read this: a retry after a
+    // failed stream, a recovery and a download's URL refresh always ask again, since a failure
+    // may mean the URLs themselves stopped working (they are tied to the IP they were issued to).
+    // Only complete answers are kept — a muxed format AND the adaptive tiers — so a second leg
+    // that failed once is asked again rather than leaving a reopened page without its qualities.
+    // Main thread only, like every getStreams caller.
+    private static var recentAnswers: [(videoId: String, at: TimeInterval, answer: PlayerLeg)] = []
+    private static let recentAnswerLimit = 3
+    private static let recentAnswerMaxAge: TimeInterval = 600
+
+    private static func recentAnswer(for videoId: String) -> PlayerLeg? {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let e = recentAnswers.first(where: { $0.videoId == videoId }),
+              now - e.at < recentAnswerMaxAge else { return nil }
+        return e.answer
+    }
+
+    // Drop a video's answer — its stream failed, so its URLs may no longer work.
+    static func forgetAnswer(for videoId: String) {
+        recentAnswers.removeAll { $0.videoId == videoId }
+    }
+
+    private static func remember(_ answer: PlayerLeg, for videoId: String) {
+        guard answer.streams.contains(where: { $0.isProgressive }),
+              answer.streams.contains(where: { !$0.isProgressive }) else { return }
+        recentAnswers.removeAll { $0.videoId == videoId }
+        recentAnswers.insert((videoId, ProcessInfo.processInfo.systemUptime, answer), at: 0)
+        if recentAnswers.count > recentAnswerLimit { recentAnswers.removeLast() }
     }
 
     // One player leg's answer: (streams, video details, description, failure reason, captions).

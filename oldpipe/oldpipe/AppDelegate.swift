@@ -238,11 +238,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     // On return from the background, iOS may have (a) torn down StreamProxy's loopback listen
     // socket and (b) deactivated our audio session while suspended. Both leave a resumed app
-    // unable to start a new iOS-6 stream — it stalls and falls back to download. Rebuild the
-    // proxy listener lazily (next play re-binds a fresh port) and re-activate the audio session.
+    // unable to start a new proxied stream — it stalls and falls back to download. Rebuild the
+    // proxy listener if it is dead (next play re-binds a fresh port; a live one keeps serving
+    // the video still playing) and re-activate the audio session.
     func applicationDidBecomeActive(_ application: UIApplication) {
-        DebugLog.log("App", "applicationDidBecomeActive — resetting proxy listener + reactivating audio session")
-        StreamProxy.shared.reset()
+        DebugLog.log("App", "applicationDidBecomeActive — checking proxy listener + reactivating audio session")
+        StreamProxy.shared.resetIfDead()
         VideoPlayer.shared.reactivateSession()
     }
 

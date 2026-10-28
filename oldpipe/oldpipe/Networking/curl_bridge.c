@@ -3,6 +3,12 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <poll.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 /* Wrapper struct — holds easy handle + header slist so both are freed together */
 typedef struct {
@@ -266,4 +272,44 @@ long curl_bridge_recv(CurlHandle handle, void *buf, long len, long timeout_ms) {
     }
     if (rc == CURLE_AGAIN) return 0;   /* readable flag was stale — treat as timeout */
     return -1;
+}
+
+/* --- Loopback probe — StreamProxy's listener --- */
+
+/* Is anything still answering on 127.0.0.1:port? A completed connect is not enough: a listen
+   socket nobody accepts on any more still completes handshakes into its backlog. So this sends
+   a request and waits for any reply. Non-blocking throughout, each wait bounded by timeout_ms.
+   Here rather than in Swift because fcntl is variadic, which Swift reaches only through a
+   wrapper in the Darwin overlay — one more thing the shipped 5.1.5 runtimes would have to have. */
+int curl_bridge_loopback_answers(unsigned short port, long timeout_ms) {
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) return -1;
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes));
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_len = sizeof(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    int answered = 0;
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || errno == EINPROGRESS) {
+        int err = 0;
+        socklen_t len = sizeof(err);
+        if (curl_bridge_wait(fd, POLLOUT, timeout_ms) == 1
+            && getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+            static const char req[] = "GET /alive HTTP/1.0\r\n\r\n";
+            char buf[16];
+            if (send(fd, req, sizeof(req) - 1, 0) == (ssize_t)(sizeof(req) - 1)
+                && curl_bridge_wait(fd, POLLIN, timeout_ms) == 1
+                && recv(fd, buf, sizeof(buf), 0) > 0) {
+                answered = 1;
+            }
+        }
+    }
+    close(fd);
+    return answered;
 }

@@ -88,6 +88,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     // missing channels are refetched.
     private static let feedCache = FeedCache()
 
+    // Channel requests a feed keeps in flight at once: the width of CurlFetcher's background
+    // lane (curlLimit), so the feed runs as fast as before while leaving room in the queue for
+    // the thumbnails it brings on screen (see ChannelFanOut).
+    private static let feedWidth = 2
+
     // Wipe the cached feed (Settings → Reset Cache). Subscriptions/playlists are untouched.
     static func clearFeedCache() {
         feedCache.clear()
@@ -359,9 +364,10 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         }
 
         var remaining = toFetch.count
-        for channel in toFetch {
+        // Fed feedWidth channels at a time, as the videos feed is (see ChannelFanOut).
+        ChannelFanOut.run(toFetch, width: HomeVC.feedWidth) { [weak self] channel, done in
             // priority:false — Shorts is a background feed like the videos feed.
-            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { [weak self] vids, fresh, token in
+            YoutubeAPI.getChannelShorts(channelId: channel.id, priority: false) { vids, fresh, token in
                 // Stored before the self check, and a failure keeps the cached copy — the same
                 // rules as the videos feed (see loadFeed).
                 if fresh != nil || !vids.isEmpty {
@@ -369,6 +375,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                 } else {
                     HomeVC.feedCache.recordFailure(in: .shorts, for: channel.id)
                 }
+                done()
                 guard let self = self else { return }
                 // Stash this channel's continuation token for infinite scroll (drop if absent).
                 if let t = token, !t.isEmpty { self.shortsTokens[channel.id] = t }
@@ -700,9 +707,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         loadFeed(channels: subs, isRefresh: true)
     }
 
-    // Fetch the given channels in parallel (CurlFetcher caps concurrency at 4). Each result
-    // is cached per-channel and triggers a coalesced re-render, so videos appear as they
-    // arrive rather than all at once when the slowest channel finishes.
+    // Fetch the given channels, feedWidth at a time (see ChannelFanOut). Each result is cached
+    // per-channel and triggers a coalesced re-render, so videos appear as they arrive rather
+    // than all at once when the slowest channel finishes.
     private func loadFeed(channels toFetch: [Channel], isRefresh: Bool = false) {
         CrashLog.mark("HomeVC: loadFeed n=\(toFetch.count)")
         guard !toFetch.isEmpty else { return }
@@ -716,8 +723,8 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         }
 
         var remaining = toFetch.count
-        for channel in toFetch {
-            YoutubeAPI.getChannelVideos(channelId: channel.id) { [weak self] vids, fresh, _ in
+        ChannelFanOut.run(toFetch, width: HomeVC.feedWidth) { [weak self] channel, done in
+            YoutubeAPI.getChannelVideos(channelId: channel.id) { vids, fresh, _ in
                 // Stored before the self check: the cache is shared, so a group feed popped
                 // mid-load still warms the root feed with what it paid for. A failed request —
                 // no channel metadata and no videos — keeps the cached copy and leaves the
@@ -730,6 +737,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
                 } else {
                     HomeVC.feedCache.recordFailure(in: .videos, for: channel.id)
                 }
+                done()
                 guard let self = self else { return }
                 // Heal the stored avatar/name from the fresh channel result (fixes blank
                 // icons in ManageSubscriptionsVC for subs saved before their avatar was known).
@@ -842,6 +850,39 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         let video = videos[indexPath.row]
         DebugLog.log("Home", "tap video id=\(video.id) title=\"\(video.title)\" channel=\(video.channelName)")
         navigationController?.openVideo(video)
+    }
+}
+
+// MARK: - Channel fan-out
+// Runs one request per channel with at most `width` in flight, starting the next as each one
+// calls its `done`. CurlFetcher's background lane is first come, first served, and thumbnails
+// share it: queuing a whole subscription list at once put every thumbnail on screen behind
+// every channel request, so the feed's rows stayed blank until the last channel was in — and
+// so did any screen opened meanwhile. Fed a few channels at a time, the lane serves the
+// thumbnails asked for in between. The chain keeps itself alive through the `done` closures it
+// hands out, so a feed popped mid-load still finishes warming the shared cache, as it did when
+// every request was queued up front.
+//
+// Main thread only (every caller's completion lands on main).
+private final class ChannelFanOut {
+    private var pending: [Channel]
+    private let fetch: (Channel, @escaping () -> Void) -> Void
+
+    static func run(_ channels: [Channel], width: Int,
+                    fetch: @escaping (Channel, @escaping () -> Void) -> Void) {
+        let fanOut = ChannelFanOut(channels, fetch: fetch)
+        for _ in 0..<min(width, channels.count) { fanOut.next() }
+    }
+
+    private init(_ channels: [Channel], fetch: @escaping (Channel, @escaping () -> Void) -> Void) {
+        pending = channels
+        self.fetch = fetch
+    }
+
+    private func next() {
+        guard !pending.isEmpty else { return }
+        let channel = pending.removeFirst()
+        fetch(channel) { self.next() }
     }
 }
 

@@ -98,9 +98,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // description and related arrive asynchronously (in either order) and the description
     // can expand/collapse, so relayout() repositions the action buttons each time.
     private var contentBelowMetaY: CGFloat = 0
-    private var descriptionText = ""
-    private var descExpanded = false
-    private var descRowViews: [UIView] = []
+    private var descriptionText = "" { didSet { descContentDirty = true } }
+    private var descExpanded = false { didSet { descContentDirty = true } }
     private var relatedVideos: [Video] = []
     private var relatedState = LoadState.idle
 
@@ -109,8 +108,21 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // kept apart from what is actually displayed and refreshChapters() re-picks a winner
     // each time one of them lands.
     private var apiChapters: [Chapter] = []
-    private var chapters: [Chapter] = []
-    private var chaptersExpanded = false
+    // Compared, not just marked: refreshChapters re-picks the list each time the description
+    // or related videos land, usually ending with the list already on screen.
+    private var chapters: [Chapter] = [] { didSet { if chapters != oldValue { descContentDirty = true } } }
+    private var chaptersExpanded = false { didSet { descContentDirty = true } }
+
+    // Chapters + description live in a container of their own, for the same reason as the tab
+    // section below: relayout() runs on every comment page, reply thread and tab switch, and
+    // rebuilding them each time measured the whole description twice and remade every chapter
+    // row (70+ on a long tutorial) for a section that had not changed. The observers above mark
+    // it dirty; otherwise it is only moved. descHeights keeps the two measurements of the
+    // current text, so expanding or collapsing it does not measure it again.
+    private var descContainer: UIView?
+    private var descContentDirty = true
+    private var descContentWidth: CGFloat = 0
+    private var descHeights: (text: String, width: CGFloat, collapsed: CGFloat, full: CGFloat)?
 
     // The tab section lives in its own container so that a description expand/collapse —
     // which only moves it down the page — costs one frame assignment instead of rebuilding
@@ -239,8 +251,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             // description refetch below rather than behind its two player requests.
             loadRelatedIfIdle()
             // Reopened onto live playback (e.g. from the mini bar) — still fetch the
-            // description in the background without disturbing the playing UI.
-            if !didRequestStreams { loadStreams(updateStatus: false) }
+            // description in the background without disturbing the playing UI. The player is
+            // playing from a recent answer for this video, so that one is read back if it is
+            // still held (YoutubeAPI.recentAnswers) rather than asked for twice more.
+            if !didRequestStreams { loadStreams(updateStatus: false, reuse: true) }
         } else if !didRequestStreams {
             loadStreams()
         }
@@ -275,6 +289,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // singleton has to be able to reach us to say so.
         sp.onRateReverted = { [weak self] in self?.handleRateReverted() }
 
+        // And for the end of a start the player made by itself, which related waits behind.
+        sp.onStartSettled = { [weak self] in self?.loadRelatedIfIdle() }
+
         // Captions survive a push/pop of another VC (cues stay parsed) — restart the ticker
         // that viewWillDisappear stopped.
         if activeCaptionIndex >= 0, !captionCues.isEmpty {
@@ -291,6 +308,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onAdvance = nil
         sp.onRecovery = nil
         sp.onRateReverted = nil
+        sp.onStartSettled = nil
         // A held > tap goes with the page: playback must not start behind the screen pushed
         // over it. The response still lands and leaves "Tap to play" for the way back.
         if playWhenStreamsLoad {
@@ -419,6 +437,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         video = newVideo
         contentGen += 1   // invalidates every in-flight response for the previous video
         streams = []
+        // The previous video's player request, if one is still out, now drops its answer
+        // (loadStreams checks contentGen), so it can no longer be the one to clear this.
+        streamsLoading = false
         didRequestStreams = false
         streamsFailure = ""
         playWhenStreamsLoad = false
@@ -483,9 +504,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         showActivePlayback()   // re-attach layer + show controls + resync progress
         relayout()
 
-        // Fetch the new video's description + related quietly (no status label changes).
-        loadStreams(updateStatus: false)
-        loadRelated()
+        // The new video's description + related, quietly (no status label changes). The
+        // player's own answer for it is a moment old, so it is read back, not fetched again;
+        // related waits until the new stream has started (sp.isStarting, onStartSettled).
+        loadStreams(updateStatus: false, reuse: true)
+        loadRelatedIfIdle()
     }
 
     // MARK: - Orientation → fullscreen
@@ -832,19 +855,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // iOS 6 proxy and every HLS tier wait on the same turnstile. Queued any earlier it would
     // run first and hold the video back. So it waits until playback is not waiting on the
     // network, and is asked for again whenever that changes: when loadStreams completes, when
-    // a play tap's button fade ends, and when a play attempt becomes ready or fails
-    // (pollUntilReady).
+    // a play tap's button fade ends, when a play attempt becomes ready or fails
+    // (pollUntilReady), and when a start the player made on its own — a playlist advance, a
+    // recovery — settles (onStartSettled).
     private func loadRelatedIfIdle() {
         guard relatedState == .idle, !playbackPending else { return }
         loadRelated()
     }
 
     // True while playback is waiting on the network: a play tap is on its way (the button
-    // fading out, or the stream loading into the player), or this video's player requests are
-    // in flight — unless it is already in the player (reopened from the mini bar), where they
-    // only refetch the description, which nothing waits on.
+    // fading out, or the stream loading into the player), the player is starting a video by
+    // itself (a playlist advance swapped this page in while its stream was still loading), or
+    // this video's player requests are in flight — unless it is already in the player
+    // (reopened from the mini bar), where they only refetch the description, which nothing
+    // waits on.
     private var playbackPending: Bool {
-        return startPending || playAttemptPending || (streamsLoading && !sp.isActive(video.id))
+        return startPending || playAttemptPending || sp.isStarting
+            || (streamsLoading && !sp.isActive(video.id))
     }
 
     private func loadRelated() {
@@ -886,19 +913,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // action buttons and re-lays the async sections, then sizes the scroll content once.
     private func relayout() {
         guard let sv = scrollView else { return }
-        // The description label is a copy target; a visible menu would be left pointing at a
-        // view that is about to be removed (same reason layoutTabSection hides it).
-        UIMenuController.shared.setMenuVisible(false, animated: false)
-        for v in descRowViews { v.removeFromSuperview() }
-        descRowViews.removeAll()
-
         let w = sv.bounds.width
         let padding: CGFloat = 12
         var y = contentBelowMetaY
 
         // Chapters, then the description (directly under the meta line).
-        y = buildChaptersSection(startY: y, width: w)
-        y = buildDescriptionSection(startY: y, width: w)
+        y = layoutDescSection(startY: y, width: w)
 
         // Download button.
         downloadBtn?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 44)
@@ -953,19 +973,50 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         showControls()
     }
 
+    // Positions the chapters + description container, rebuilding its contents only when they
+    // changed (see descContainer) — the same scheme as layoutTabSection.
+    private func layoutDescSection(startY: CGFloat, width w: CGFloat) -> CGFloat {
+        guard let sv = scrollView else { return startY }
+        let container: UIView
+        if let c = descContainer {
+            container = c
+        } else {
+            container = UIView()
+            sv.addSubview(container)
+            descContainer = container
+        }
+        if w != descContentWidth {
+            descContentWidth = w
+            descContentDirty = true
+        }
+        if descContentDirty {
+            // The description label is a copy target; a visible menu would be left pointing at
+            // a view that is about to be removed (same reason layoutTabSection hides it).
+            UIMenuController.shared.setMenuVisible(false, animated: false)
+            for v in container.subviews { v.removeFromSuperview() }
+            var h = buildChaptersSection(startY: 0, width: w, into: container)
+            h = buildDescriptionSection(startY: h, width: w, into: container)
+            container.frame = CGRect(x: 0, y: startY, width: w, height: h)
+            descContentDirty = false
+        } else {
+            container.frame = CGRect(x: 0, y: startY, width: w, height: container.frame.height)
+        }
+        return startY + container.frame.height
+    }
+
     // Chapter rows above the description: [time][title], the whole row tappable. Collapsed
     // to the first few — a long tutorial can carry 70+ chapters, and one row is two labels
     // inside a button, so showing them all by default would be the heaviest thing on the
     // page on a 4S.
-    private func buildChaptersSection(startY: CGFloat, width w: CGFloat) -> CGFloat {
-        guard !chapters.isEmpty, let sv = scrollView else { return startY }
+    private func buildChaptersSection(startY: CGFloat, width w: CGFloat, into sv: UIView) -> CGFloat {
+        guard !chapters.isEmpty else { return startY }
         let padding: CGFloat = 12
         let bodyW = w - padding * 2
         var y = startY
 
         let sep = UIView(frame: CGRect(x: 0, y: y, width: w, height: 0.5))
         sep.backgroundColor = UIColor(white: 0.2, alpha: 1)
-        sv.addSubview(sep); descRowViews.append(sep)
+        sv.addSubview(sep)
         y += 12
 
         let header = UILabel()
@@ -974,7 +1025,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         header.font = UIFont.boldSystemFont(ofSize: 16)
         header.text = "Chapters"
         header.frame = CGRect(x: padding, y: y, width: bodyW, height: 22)
-        sv.addSubview(header); descRowViews.append(header)
+        sv.addSubview(header)
         y += 30
 
         let collapsedCount = 5
@@ -1017,7 +1068,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             title.text = chapter.title
             row.addSubview(title)
 
-            sv.addSubview(row); descRowViews.append(row)
+            sv.addSubview(row)
             y += rowH + 4
         }
 
@@ -1029,7 +1080,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             toggle.contentHorizontalAlignment = .left
             toggle.frame = CGRect(x: padding, y: y + 4, width: bodyW, height: 24)
             toggle.addTarget(self, action: #selector(chaptersToggleTapped), for: .touchUpInside)
-            sv.addSubview(toggle); descRowViews.append(toggle)
+            sv.addSubview(toggle)
             y += 32
         }
         y += 6
@@ -1038,15 +1089,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Collapsible description block. Collapsed to 4 lines; a "Show more"/"Show less"
     // toggle appears only when the text is actually longer than the collapsed cap.
-    private func buildDescriptionSection(startY: CGFloat, width w: CGFloat) -> CGFloat {
-        guard !descriptionText.isEmpty, let sv = scrollView else { return startY }
+    private func buildDescriptionSection(startY: CGFloat, width w: CGFloat, into sv: UIView) -> CGFloat {
+        guard !descriptionText.isEmpty else { return startY }
         let padding: CGFloat = 12
         let bodyW = w - padding * 2
         var y = startY
 
         let sep = UIView(frame: CGRect(x: 0, y: y, width: w, height: 0.5))
         sep.backgroundColor = UIColor(white: 0.2, alpha: 1)
-        sv.addSubview(sep); descRowViews.append(sep)
+        sv.addSubview(sep)
         y += 12
 
         let header = UILabel()
@@ -1055,13 +1106,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         header.font = UIFont.boldSystemFont(ofSize: 16)
         header.text = "Description"
         header.frame = CGRect(x: padding, y: y, width: bodyW, height: 22)
-        sv.addSubview(header); descRowViews.append(header)
+        sv.addSubview(header)
         y += 30
 
         let bodyFont = UIFont.systemFont(ofSize: 13)
-        // Measure collapsed (4-line) vs full height to decide whether a toggle is needed.
-        let collapsedH = heightForText(descriptionText, font: bodyFont, width: bodyW, maxLines: 4)
-        let fullH = heightForText(descriptionText, font: bodyFont, width: bodyW, maxLines: 0)
+        // Measure collapsed (4-line) vs full height to decide whether a toggle is needed —
+        // once per text and width (see descHeights).
+        let collapsedH: CGFloat, fullH: CGFloat
+        if let m = descHeights, m.width == bodyW, m.text == descriptionText {
+            collapsedH = m.collapsed; fullH = m.full
+        } else {
+            collapsedH = heightForText(descriptionText, font: bodyFont, width: bodyW, maxLines: 4)
+            fullH = heightForText(descriptionText, font: bodyFont, width: bodyW, maxLines: 0)
+            descHeights = (descriptionText, bodyW, collapsedH, fullH)
+        }
         let truncated = fullH > collapsedH + 1
 
         let body = CopyableLabel()
@@ -1078,7 +1136,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             target: self, action: #selector(copyableLongPressed(_:))))
         let bodyH = descExpanded ? fullH : collapsedH
         body.frame = CGRect(x: padding, y: y, width: bodyW, height: bodyH)
-        sv.addSubview(body); descRowViews.append(body)
+        sv.addSubview(body)
         y += bodyH + 4
 
         if truncated {
@@ -1089,7 +1147,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             toggle.contentHorizontalAlignment = .left
             toggle.frame = CGRect(x: padding, y: y, width: bodyW, height: 24)
             toggle.addTarget(self, action: #selector(descToggleTapped), for: .touchUpInside)
-            sv.addSubview(toggle); descRowViews.append(toggle)
+            sv.addSubview(toggle)
             y += 28
         }
         y += 6
@@ -2369,7 +2427,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // updateStatus == false when called purely to fetch the description while playback
     // is already live (reopened from the mini bar) — leaves the status label untouched.
-    private func loadStreams(updateStatus: Bool = true, completion: (() -> Void)? = nil) {
+    // reuse == true accepts the player's recent answer for this video (YoutubeAPI.getStreams);
+    // only for a video already playing from it, never for a retry after a failure.
+    private func loadStreams(updateStatus: Bool = true, reuse: Bool = false,
+                             completion: (() -> Void)? = nil) {
         didRequestStreams = true
         // Already downloaded — no network needed, play offline.
         if DownloadManager.isDownloaded(video.id) {
@@ -2393,8 +2454,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         streamsLoading = true
         DebugLog.log("Player", "loadStreams start id=\(video.id) updateStatus=\(updateStatus)")
-        YoutubeAPI.getStreams(videoId: video.id) { [weak self] streams, _, desc, failure, captions in
-            guard let self = self else { return }
+        let gen = contentGen
+        YoutubeAPI.getStreams(videoId: video.id, reuse: reuse) { [weak self] streams, _, desc, failure, captions in
+            // An answer for the video before a playlist advance must not land on this one — a
+            // reused answer for the new video can arrive first.
+            guard let self = self, gen == self.contentGen else { return }
             self.streamsLoading = false
             self.streams = streams
             self.streamsFailure = streams.isEmpty ? failure : ""

@@ -56,4 +56,9 @@ long        curl_bridge_send(CurlHandle h, const void *buf, long len);
    Returns >0 bytes read, 0 on timeout (no data), -1 on error/closed. */
 long        curl_bridge_recv(CurlHandle h, void *buf, long len, long timeout_ms);
 
+/* --- Loopback probe — StreamProxy checks its own listener on returning to the foreground ---
+   Sends a request to 127.0.0.1:port and waits up to timeout_ms per step for any reply.
+   Returns 1 answered, 0 refused or silent, -1 no socket to probe with (no verdict). */
+int         curl_bridge_loopback_answers(unsigned short port, long timeout_ms);
+
 #endif

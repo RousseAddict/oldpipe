@@ -99,6 +99,13 @@ class VideoPlayer {
     var onAdvance: ((Video) -> Void)?
     private var advanceWaitTimer: Timer?
 
+    // True while the player is starting a video on its own — a queue advance or a recovery
+    // reload — and waiting for it to become ready (waitForReadyThenPlay). onStartSettled fires
+    // when that wait ends, played or given up; it is set by the frontmost VideoPlayerVC, which
+    // holds its related-videos request back meanwhile (see its loadRelatedIfIdle).
+    var isStarting: Bool { return advanceWaitTimer != nil }
+    var onStartSettled: (() -> Void)?
+
     func setQueue(_ videos: [Video], startIndex: Int) {
         queue = videos
         queueIndex = startIndex
@@ -506,6 +513,10 @@ class VideoPlayer {
         recovering = true
         recoveryAttempts += 1
         stalledTicks = 0
+        // The answer this stream came from is now suspect (its URLs are tied to an IP that may
+        // have changed), so a page reopened meanwhile must not be handed it back; the re-resolve
+        // below fetches afresh and leaves its own answer in its place.
+        YoutubeAPI.forgetAnswer(for: video.id)
         let attempt = recoveryAttempts
         let at = currentSeconds
         DebugLog.log("VideoPlayer", "recovery id=\(video.id) attempt=\(attempt) reason=\(reason) at=\(Int(at))s")
@@ -596,8 +607,9 @@ class VideoPlayer {
             }
             let resume = DownloadManager.position(for: next.id)
             self.load(video: next, url: r.url, isLocal: r.isLocal, resume: resume, artwork: nil)
-            self.onAdvance?(next)   // let the frontmost VideoPlayerVC swap its content
+            // Waiting first, so the page sees isStarting while it swaps its content in.
             self.waitForReadyThenPlay()
+            self.onAdvance?(next)   // let the frontmost VideoPlayerVC swap its content
         }
     }
 
@@ -616,9 +628,11 @@ class VideoPlayer {
                 self.advanceWaitTimer?.invalidate(); self.advanceWaitTimer = nil
                 self.applyResumeAndPlay()
                 onReady?()
+                self.onStartSettled?()
             } else if self.isFailed || count > maxTicks {
                 self.advanceWaitTimer?.invalidate(); self.advanceWaitTimer = nil
                 onFail?()
+                self.onStartSettled?()
             }
         }, selector: #selector(TickProxy.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
