@@ -171,7 +171,10 @@ struct Chapter: Equatable {
                 var n = 0
                 var len = 0
                 while j < chars.count, let d = digit(chars[j]) {
-                    n = n * 10 + d
+                    // Only a timestamp's few digits are worth a value. Int is 32 bits on armv7,
+                    // so the 19-digit id in an x.com/status link used to overflow n * 10 and
+                    // trap — killing the video page of any description that carries one.
+                    if len < maxGroupDigits { n = n * 10 + d }
                     len += 1
                     j += 1
                 }
@@ -181,10 +184,12 @@ struct Chapter: Equatable {
                 break
             }
 
+            // A longer leading group ("12345678:00") is an id, not a time.
+            let lead = groups.first.map { $0.digits <= maxGroupDigits } ?? false
             var seconds = -1.0
-            if groups.count == 2, groups[1].digits == 2, groups[1].value < 60 {
+            if lead, groups.count == 2, groups[1].digits == 2, groups[1].value < 60 {
                 seconds = Double(groups[0].value * 60 + groups[1].value)
-            } else if groups.count == 3, groups[1].digits == 2, groups[1].value < 60,
+            } else if lead, groups.count == 3, groups[1].digits == 2, groups[1].value < 60,
                       groups[2].digits == 2, groups[2].value < 60 {
                 seconds = Double(groups[0].value * 3600 + groups[1].value * 60 + groups[2].value)
             }
@@ -201,6 +206,10 @@ struct Chapter: Equatable {
         }
         return nil
     }
+
+    // Longest leading group a timestamp can have: 99999 minutes or hours is already far past
+    // any video, and 99999 * 3600 still fits a 32-bit Int.
+    private static let maxGroupDigits = 5
 
     // Leftovers of whatever bracketed/bulleted the timestamp.
     private static let titleTrim = CharacterSet(charactersIn: " \t-–—:•|·*>_()[]{}\u{00A0}")
