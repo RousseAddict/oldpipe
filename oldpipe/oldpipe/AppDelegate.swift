@@ -236,6 +236,22 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
+    #if IOS5_TARGET
+    // Emulator test hook. Only the iOS 5 build registers the oldpipe:// scheme (build-ios5.sh),
+    // so `uiopen oldpipe://history/0` over SSH opens History's newest video the way a tap
+    // would, which lets a video-page crash be chased with nobody at the screen.
+    func application(_ application: UIApplication, open url: URL,
+                     sourceApplication: String?, annotation: Any) -> Bool {
+        guard url.host == "history", let n = Int(url.lastPathComponent) else { return true }
+        let videos = HistoryManager.all()
+        guard n >= 0, n < videos.count,
+              let nav = window?.rootViewController as? UINavigationController else { return true }
+        CrashLog.mark("url: opening history #\(n) \(videos[n].id)")
+        nav.openVideo(videos[n])
+        return true
+    }
+    #endif
+
     // On return from the background, iOS may have (a) torn down StreamProxy's loopback listen
     // socket and (b) deactivated our audio session while suspended. Both leave a resumed app
     // unable to start a new proxied stream — it stalls and falls back to download. Rebuild the

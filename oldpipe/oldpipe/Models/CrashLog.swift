@@ -3,8 +3,10 @@ import UIKit
 // MARK: - CrashLog
 // The Swift half of the launch trace. The C half (ios5_launchlog.h) owns the file,
 // the rotation and the fatal-signal handlers, because it runs far earlier than any
-// Swift can: its first marker is written from libS5's constructor, before the Swift
-// runtime has even initialised. This type just appends to the same file once Swift
+// Swift can: its first marker is written from libS5's constructor on iOS 5, before the
+// Swift runtime has even initialised, and from the app image's on iOS 6+. A fatal
+// signal there writes its frames and queue, and stderr is the same file, so a Swift
+// runtime trap's own message lands right above them. This type just appends to it once Swift
 // is alive, and adds the two things C cannot do — ObjC exception reporting and a
 // readable export.
 //
@@ -39,9 +41,9 @@ enum CrashLog {
     // this runs the file already holds markers 1-3 from the C constructors and the app
     // delegate's init, so an absent marker 4 localises the crash to UIApplicationMain.
     //
-    // No signal handlers here: ios5_log_arm() armed them from libS5's constructor, which
-    // covers the whole window this function could never see. Re-arming from Swift would
-    // only narrow the coverage.
+    // No signal handlers here: ios5_log_arm() armed them from the app image's constructor
+    // (and on iOS 5 from libS5's, earlier still), which covers the whole window this
+    // function could never see. Re-arming from Swift would only narrow the coverage.
     static func install() {
         NSSetUncaughtExceptionHandler { ex in CrashLog.record(exception: ex) }
         let d = UIDevice.current
@@ -94,8 +96,10 @@ enum CrashLog {
     }
 
     static func clear() {
-        let fm = FileManager.default
-        try? fm.removeItem(atPath: currentPath)
-        try? fm.removeItem(atPath: previousPath)
+        // Emptied, not deleted: stderr points at this file for the whole run
+        // (ios5_log_capture_stderr), and a deleted one would swallow what the Swift
+        // runtime prints before a crash until the next launch.
+        _ = truncate(currentPath, 0)
+        try? FileManager.default.removeItem(atPath: previousPath)
     }
 }

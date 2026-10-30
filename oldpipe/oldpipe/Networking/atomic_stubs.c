@@ -4,7 +4,8 @@
  * ___atomic_is_lock_free lives in atomic_stubs.S (assembly, because Clang
  * treats that name as a builtin with a conflicting signature).
  *
- * Everything below exists only for the iOS 5 build. Linking with
+ * Everything below, up to the launch-log constructor at the end, exists only
+ * for the iOS 5 build. Linking with
  * -ios_version_min 5.0 stops ld resolving the compiler-rt atomic helpers from
  * libSystem — iOS 5's libSystem genuinely does not export them — so OpenSSL's
  * threads_pthread.o, which calls them for its 64-bit counters, has nothing to
@@ -193,12 +194,18 @@ static const struct ios5_program_vars ios5_pvars = {
     &__progname,
 };
 
+#endif /* IOS5_TARGET */
+
 /*
- * Second checkpoint: the app image's own initialiser.
+ * Second checkpoint: the app image's own initialiser, on every target.
  *
  * Reaching here means every dependent dylib loaded, bound AND ran its
  * initialisers without dying — the Swift runtime's included. If marker 1 is in
  * the log and this one is not, the fault is in that interval.
+ *
+ * iOS 6+ has no libS5, so this is the first code of ours there: it rotates the
+ * log itself, and from here on a crash on any target leaves its signal, frames
+ * and queue in the log instead of nothing.
  */
 #include "ios5_launchlog.h"
 
@@ -206,6 +213,11 @@ __attribute__((constructor))
 static void ios5_app_image_init(void) {
     const char *home;
     ios5_log_resolve();
+#ifndef IOS5_TARGET
+    ios5_log_rotate();
+    ios5_log("=== oldpipe launch ===\n");
+#endif
+    ios5_log_capture_stderr();
     ios5_log_arm();     /* re-arm against this image; idempotent */
     ios5_log("2. app image constructor: all dylib initialisers completed\n");
     home = getenv("HOME");
@@ -215,5 +227,3 @@ static void ios5_app_image_init(void) {
         ios5_log("\n");
     }
 }
-
-#endif /* IOS5_TARGET */
