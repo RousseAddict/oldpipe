@@ -136,15 +136,33 @@ private final class HLSSession {
     // ranged GET, no mux. The transmuxed bytes were written once, at download time, by
     // OfflineDownloader running this very same pipeline.
     let localDir: String?
+    // Names the two encoded files behind the urls (see StreamProxy.headKey), so a later session
+    // for the same files can reuse the parsed heads. nil when the urls don't say.
+    let headKey: String?
+    // The segment after the one AVPlayer last asked for, being fetched before it asks (see
+    // StreamProxy.makeSegment). Guarded by StreamProxy.lock.
+    var ahead: PrefetchSlot?
+    // The segment AVPlayer asked for most recently, -1 before the first. Only that request
+    // may start a read-ahead (see startReadAhead). Guarded by StreamProxy.lock.
+    var lastAsked = -1
     init(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64,
-         gen: UInt64, localDir: String? = nil) {
+         gen: UInt64, localDir: String? = nil, headKey: String? = nil) {
         self.videoURL = videoURL
         self.audioURL = audioURL
         self.videoIndexEnd = videoIndexEnd
         self.audioIndexEnd = audioIndexEnd
         self.gen = gen
         self.localDir = localDir
+        self.headKey = headKey
     }
+}
+
+// The parsed heads of one stream pair, kept after its session for the next one (see
+// StreamProxy.ensureParsed).
+private struct CachedHeads {
+    let key: String
+    let info: HLSStreamInfo
+    let playlist: String
 }
 
 // MARK: - StreamProxy
@@ -172,6 +190,15 @@ final class StreamProxy: NSObject {
     private var currentGen: UInt64 = 0
     private let lock = NSLock()
 
+    // Fetches live HLS segments ahead of AVPlayer (see makeSegment). Serial and static like every
+    // queue in the app: one thread for the life of the process, and only one read-ahead is ever
+    // outstanding, since every change of stream drops the old ones (dropReadAheadLocked).
+    private static let readAheadQueue = AppQueue(label: "com.oldpipe.proxy.readahead")
+
+    // Parsed heads of the last few stream pairs played, newest last. Same lock as routes.
+    private var headCache: [CachedHeads] = []
+    private static let headCacheSize = 4
+
     // Return a local http:// URL that proxies to `remote`. Starts the listener on first use.
     // nil only if the socket could not be opened.
     func localURL(for remote: String) -> URL? {
@@ -182,6 +209,7 @@ final class StreamProxy: NSObject {
         lock.lock()
         routeSeq += 1
         currentGen += 1
+        dropReadAheadLocked()
         let gen = currentGen
         let token = "\(routeSeq).mp4"
         routes[token] = (remote, gen)
@@ -196,13 +224,17 @@ final class StreamProxy: NSObject {
     // localURL(for:) so any previously playing stream is aborted at the switch moment.
     func hlsURL(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) -> URL? {
         guard videoIndexEnd > 0, audioIndexEnd > 0, start() else { return nil }
+        var key: String?
+        if let v = StreamProxy.headKey(videoURL, indexEnd: videoIndexEnd),
+           let a = StreamProxy.headKey(audioURL, indexEnd: audioIndexEnd) { key = v + "+" + a }
         lock.lock()
         routeSeq += 1
         currentGen += 1
+        dropReadAheadLocked()
         let id = "\(routeSeq)"
         hlsSessions[id] = HLSSession(videoURL: videoURL, audioURL: audioURL,
                                      videoIndexEnd: videoIndexEnd, audioIndexEnd: audioIndexEnd,
-                                     gen: currentGen)
+                                     gen: currentGen, headKey: key)
         lock.unlock()
         return URL(string: "http://127.0.0.1:\(port)/hls/\(id)/index.m3u8")
     }
@@ -220,6 +252,7 @@ final class StreamProxy: NSObject {
         lock.lock()
         routeSeq += 1
         currentGen += 1
+        dropReadAheadLocked()
         let id = "\(routeSeq)"
         hlsSessions[id] = HLSSession(videoURL: "", audioURL: "", videoIndexEnd: 0, audioIndexEnd: 0,
                                      gen: currentGen, localDir: dir)
@@ -247,8 +280,35 @@ final class StreamProxy: NSObject {
         let bumped = currentGen
         for k in routes.keys { routes[k]?.gen = bumped }
         for s in hlsSessions.values { s.gen = bumped }
+        dropReadAheadLocked()
         lock.unlock()
         DebugLog.log("StreamProxy", "closeCurrentStream gen=\(bumped)")
+    }
+
+    // Throw every live read-ahead away. Called, under `lock`, wherever the generation moves:
+    // an in-flight one is about to abort as superseded anyway, and a finished one that nobody
+    // will ask for would otherwise hold a segment's bytes (1.4MB at 720p) for as long as its
+    // session lives, which is the life of the process.
+    private func dropReadAheadLocked() {
+        for s in hlsSessions.values where s.ahead != nil {
+            s.ahead?.abandon()
+            s.ahead = nil
+        }
+    }
+
+    // What identifies the encoded FILE behind a googlevideo url: its itag, byte length and
+    // last-modified stamp, plus the head length we fetch. Every resolve signs a fresh url for
+    // the same bytes, so the url itself can't be the key. nil if any field is missing, which
+    // just means no reuse.
+    private static func headKey(_ url: String, indexEnd: Int64) -> String? {
+        guard let q = url.firstIndex(of: "?") else { return nil }
+        var fields: [String: String] = [:]
+        for pair in String(url[url.index(after: q)...]).components(separatedBy: "&") {
+            guard let eq = pair.firstIndex(of: "=") else { continue }
+            fields[String(pair[..<eq])] = String(pair[pair.index(after: eq)...])
+        }
+        guard let itag = fields["itag"], let clen = fields["clen"], let lmt = fields["lmt"] else { return nil }
+        return "\(itag)/\(clen)/\(lmt)/\(indexEnd)"
     }
 
     // Called by AppDelegate each time the app becomes active. iOS reclaims loopback listening
@@ -455,21 +515,111 @@ final class StreamProxy: NSObject {
 
         guard file.hasPrefix("seg"), file.hasSuffix(".ts"),
               let seg = Int(String(file.dropFirst(3).dropLast(3))),
-              let vr = HLSTransmuxer.videoRange(info, seg: seg),
-              let ar = HLSTransmuxer.audioRange(info, seg: seg) else {
+              seg >= 0, seg < info.segmentCount else {
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
             return
         }
-        guard let vBlob = fetchRange(url: session.videoURL, start: vr.start, end: vr.end, gen: gen),
-              let aBlob = fetchRange(url: session.audioURL, start: ar.start, end: ar.end, gen: gen) else {
-            StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
-            return
-        }
-        guard let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: vBlob, audioBlob: aBlob) else {
+        guard let ts = makeSegment(session, info: info, seg: seg, gen: gen) else {
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
             return
         }
         sendResponse(clientFd, contentType: "video/MP2T", body: ts)
+    }
+
+    // One TS segment: its two DASH fragments, transmuxed. AVPlayer asks for segments one at a
+    // time, and each used to wait out two ranged GETs and the mux, so above 360p on a slow link
+    // the network sat idle in every gap between segments. Now the NEXT segment starts fetching
+    // as soon as this one's bytes are in hand, during the mux, the send and whatever AVPlayer
+    // does before asking again, and is usually there already when it does.
+    //
+    // One segment ahead, no more, and never two fetches at once (as in OfflineDownloader's
+    // PrefetchSlot): a second parallel transfer would split the same link and could cost a fresh
+    // TLS handshake, 1-3 s on an iPhone 4S. A request for any other segment (a seek) drops the
+    // read-ahead without waiting for it.
+    private func makeSegment(_ session: HLSSession, info: HLSStreamInfo, seg: Int, gen: UInt64) -> Data? {
+        guard let vr = HLSTransmuxer.videoRange(info, seg: seg),
+              let ar = HLSTransmuxer.audioRange(info, seg: seg) else { return nil }
+        let wait0 = Date()
+        lock.lock()
+        let ahead = session.ahead
+        session.ahead = nil
+        session.lastAsked = seg
+        lock.unlock()
+
+        var slot: PrefetchSlot?
+        if let a = ahead {
+            if a.seg == seg {
+                slot = a
+            } else {
+                a.abandon()
+                DebugLog.log("StreamProxy", "hls seg \(seg) asked, read-ahead had seg \(a.seg) — dropped")
+            }
+        }
+        var got: (v: Data?, a: Data?) = (nil, nil)
+        if let s = slot { got = s.waitResult() }
+        // Nothing read ahead, or the read-ahead failed (aborted when the stream was closed, then
+        // asked for again by a scrub back): fetch it here, on AVPlayer's time.
+        let wasAhead = got.v != nil && got.a != nil
+        if !wasAhead && !isSuperseded(gen) {
+            let s = PrefetchSlot(seg: seg)
+            s.fill(vURL: session.videoURL, vr: vr, aURL: session.audioURL, ar: ar,
+                   abort: { StreamProxy.shared.isSuperseded(gen) })
+            got = s.waitResult()
+            slot = s
+        }
+        let waitMs = Int(Date().timeIntervalSince(wait0) * 1000)
+        guard let v = got.v, let a = got.a, let done = slot else {
+            DebugLog.log("StreamProxy", "hls seg \(seg)/\(info.segmentCount) FETCH FAILED after \(waitMs)ms"
+                + (isSuperseded(gen) ? " (superseded)" : ""))
+            return nil
+        }
+
+        startReadAhead(session, info: info, after: seg, gen: gen)
+
+        let mux0 = Date()
+        let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: v, audioBlob: a)
+        let muxMs = Int(Date().timeIntervalSince(mux0) * 1000)
+        // wait = how long AVPlayer waited for the bytes, ~0 when the read-ahead was in time.
+        let vt = done.vTiming, at = done.aTiming
+        DebugLog.log("StreamProxy", "hls seg \(seg)/\(info.segmentCount) \(wasAhead ? "ahead" : "inline") "
+            + "wait=\(waitMs)ms (v \(vt.ms)ms\(vt.reusedConnection ? "" : " FRESH tls \(vt.tlsMs)ms"), "
+            + "a \(at.ms)ms\(at.reusedConnection ? "" : " FRESH tls \(at.tlsMs)ms")) "
+            + "mux=\(muxMs)ms \((ts?.count ?? 0) / 1024)KB")
+        return ts
+    }
+
+    // Start fetching the segment after `asked`, for when AVPlayer asks for it. Not if the stream
+    // has been superseded meanwhile: dropReadAheadLocked has already run for that change, and a
+    // slot installed after it would never be dropped.
+    //
+    // Nor if AVPlayer has asked for another segment since `asked`. Starting a video at a saved
+    // position, it asks for seg 0 and seg 1, then jumps while seg 1 is still being made; seg 1's
+    // read-ahead of seg 2 then ran alongside the fetch AVPlayer was actually waiting on, forcing
+    // a second connection: the jump target took 2.0 s instead of ~1 s. The newest request starts
+    // its own read-ahead.
+    private func startReadAhead(_ session: HLSSession, info: HLSStreamInfo, after asked: Int, gen: UInt64) {
+        let seg = asked + 1
+        guard seg < info.segmentCount,
+              let vr = HLSTransmuxer.videoRange(info, seg: seg),
+              let ar = HLSTransmuxer.audioRange(info, seg: seg) else { return }
+        let slot = PrefetchSlot(seg: seg)
+        lock.lock()
+        let latest = session.lastAsked
+        if latest != asked {
+            lock.unlock()
+            DebugLog.log("StreamProxy", "hls seg \(asked) superseded by seg \(latest) — no read-ahead")
+            return
+        }
+        // A second request for the same segment (AVPlayer retrying) finds it already under way.
+        if gen < currentGen || session.ahead?.seg == seg { lock.unlock(); return }
+        session.ahead?.abandon()
+        session.ahead = slot
+        lock.unlock()
+        let vURL = session.videoURL, aURL = session.audioURL
+        StreamProxy.readAheadQueue.async {
+            slot.fill(vURL: vURL, vr: vr, aURL: aURL, ar: ar,
+                      abort: { StreamProxy.shared.isSuperseded(gen) })
+        }
     }
 
     // Serve one file out of a downloaded HLS bundle. The requested name is VALIDATED against
@@ -498,24 +648,51 @@ final class StreamProxy: NSObject {
     // Fetch + parse both streams' init+sidx heads once per session; cache info + playlist.
     // parseLock (NOT the routes lock — network I/O happens inside) serializes AVPlayer's
     // parallel connections so the heads are fetched exactly once.
+    //
+    // A session for files played recently — a recovery reload, reopening the video, switching
+    // back to a quality — takes their heads from headCache instead: the same two ranged GETs,
+    // in turn, before AVPlayer has even seen the segment list.
     private func ensureParsed(_ session: HLSSession, gen: UInt64) -> HLSStreamInfo? {
         session.parseLock.lock()
         defer { session.parseLock.unlock() }
         if let info = session.info { return info }
+        if let key = session.headKey {
+            lock.lock()
+            let hit = headCache.first(where: { $0.key == key })
+            lock.unlock()
+            if let hit = hit {
+                session.info = hit.info
+                session.playlistText = hit.playlist
+                DebugLog.log("StreamProxy", "hls heads reused (\(hit.info.segmentCount) segments)")
+                return hit.info
+            }
+        }
+        let t0 = Date()
         guard let vHead = fetchRange(url: session.videoURL, start: 0, end: session.videoIndexEnd, gen: gen),
               let aHead = fetchRange(url: session.audioURL, start: 0, end: session.audioIndexEnd, gen: gen) else { return nil }
         guard let info = HLSTransmuxer.parse(videoHead: vHead, audioHead: aHead) else {
             return nil
         }
+        let playlist = HLSTransmuxer.playlist(info)
         session.info = info
-        session.playlistText = HLSTransmuxer.playlist(info)
+        session.playlistText = playlist
+        if let key = session.headKey {
+            lock.lock()
+            headCache.removeAll { $0.key == key }
+            headCache.append(CachedHeads(key: key, info: info, playlist: playlist))
+            if headCache.count > StreamProxy.headCacheSize { headCache.removeFirst() }
+            lock.unlock()
+        }
+        DebugLog.log("StreamProxy", "hls heads fetched in \(Int(Date().timeIntervalSince(t0) * 1000))ms "
+            + "(\(info.segmentCount) segments\(session.headKey == nil ? ", no key — not cached" : ""))")
         return info
     }
 
     // Bounded ranged GET, with the superseded-generation abort layered on: if a newer video is
-    // requested while a segment fetch is mid-flight, the progress callback kills it within ~1s
+    // requested while a head fetch is mid-flight, the progress callback kills it within ~1s
     // so it can't hold the feed turnstile. The transfer itself lives in CurlFetcher.rangeFetch,
     // shared with OfflineDownloader (which passes its own cancellation check instead).
+    // Segments are fetched through PrefetchSlot, with the same check (see makeSegment).
     private func fetchRange(url: String, start: Int64, end: Int64, gen: UInt64) -> Data? {
         return CurlFetcher.rangeFetch(url: url, start: start, end: end) {
             StreamProxy.shared.isSuperseded(gen)

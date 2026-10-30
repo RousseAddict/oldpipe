@@ -569,7 +569,10 @@ final class OfflineDownloader {
 // Fetching ahead does NOT mean fetching in parallel: two simultaneous fetches would only split
 // the same link, so the win here comes entirely from overlapping the fetch with the MUX. By
 // construction the loop never fetches while a prefetch is in flight.
-private final class PrefetchSlot {
+//
+// StreamProxy reads live HLS segments ahead with the same slot, one segment past the one
+// AVPlayer last asked for.
+final class PrefetchSlot {
     let seg: Int
     let vTiming = CurlTiming()
     let aTiming = CurlTiming()
@@ -634,6 +637,14 @@ private final class PrefetchSlot {
         lock.unlock()
         sem.wait()
         lock.lock(); consumed = true; vData = nil; aData = nil; lock.unlock()
+    }
+
+    // Stop a prefetch WITHOUT waiting for it: the transfer unwinds by itself within ~1s and its
+    // bytes are freed with the slot. For StreamProxy, where AVPlayer has just asked for some
+    // other segment (a seek) and must not be kept waiting while the wrong one winds down.
+    // Nobody may wait on the slot afterwards.
+    func abandon() {
+        lock.lock(); abandoned = true; lock.unlock()
     }
 }
 
