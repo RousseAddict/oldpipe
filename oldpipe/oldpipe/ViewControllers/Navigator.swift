@@ -26,6 +26,16 @@ extension UINavigationController {
         setViewControllers(stack, animated: true)
     }
 
+    // Plays a playlist in random order. Only the queue is shuffled — the playlist's own order
+    // is untouched — and autoplay walks it like any other queue, stopping at the end.
+    // Tapping a row afterwards seeds the in-order queue again, which is what ends shuffle.
+    func openShuffled(_ videos: [Video]) {
+        guard !videos.isEmpty else { return }
+        let order = videos.shuffled()   // pure stdlib, same as HomeVC's feed shuffle
+        VideoPlayer.shared.setQueue(order, startIndex: 0)
+        openVideo(order[0])
+    }
+
     func openChannel(id: String, name: String) {
         if let existing = viewControllers.first(where: { ($0 as? ChannelVC)?.channelId == id }) {
             popToViewController(existing, animated: true)

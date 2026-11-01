@@ -5,7 +5,7 @@ import UIKit
 // PlaylistDetailVC, but sourced from the innertube API instead of PlaylistManager, with a
 // "Load More" footer while a continuation token exists. Tapping a row seeds the singleton
 // autoplay queue, so playback advances through the playlist. "Save" copies what is currently
-// loaded into a new local playlist.
+// loaded into a new local playlist, and "Shuffle" (table header) plays it in random order.
 
 class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
@@ -22,6 +22,7 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
 
     private var tableView: UITableView!
     private var statusLabel: UILabel!
+    private var shuffleHeader: UIView!
     private var saveItem: UIBarButtonItem!
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
@@ -77,6 +78,32 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
         statusLabel.font = UIFont.systemFont(ofSize: 15)
         statusLabel.text = "Loading..."
         tableView.addSubview(statusLabel)
+
+        shuffleHeader = makeShuffleHeader(width: w)
+    }
+
+    // Same header as PlaylistDetailVC's, so both playlist pages offer Shuffle in one place.
+    private func makeShuffleHeader(width w: CGFloat) -> UIView {
+        let header = UIView(frame: CGRect(x: 0, y: 0, width: w, height: 56))
+        header.backgroundColor = bg
+        let btn = UIButton(type: .custom)
+        btn.frame = CGRect(x: 12, y: 8, width: w - 24, height: 40)
+        btn.autoresizingMask = iPadFlexWidth
+        btn.layer.cornerRadius = 6   // no clipsToBounds: the layer's own background rounds
+        btn.backgroundColor = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
+        btn.setTitle("Shuffle", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.setTitleColor(UIColor(white: 0.5, alpha: 1), for: .highlighted)
+        btn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        btn.addTarget(self, action: #selector(shuffleTapped), for: .touchUpInside)
+        header.addSubview(btn)
+        return header
+    }
+
+    // Shuffles the videos loaded SO FAR, like Save: fetching every page first would mean
+    // dozens of requests for a long playlist on a 4S.
+    @objc private func shuffleTapped() {
+        navigationController?.openShuffled(videos)
     }
 
     // MARK: - Loading
@@ -91,6 +118,8 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
             self.token = next
             self.statusLabel?.isHidden = !vids.isEmpty
             if vids.isEmpty { self.statusLabel?.text = "No videos in this playlist" }
+            // Only once there is something to shuffle — the status label sits under it.
+            if !vids.isEmpty { self.tableView?.tableHeaderView = self.shuffleHeader }
             self.tableView?.reloadData()
             self.updateLoadMoreFooter()
         }

@@ -2,8 +2,9 @@ import UIKit
 
 // MARK: - PlaylistDetailVC
 // Shows the videos in one playlist (reusing VideoRowCell). "Rename" edits the name;
-// Edit/swipe removes a video from the playlist. Tap → VideoPlayerVC. The playlist is
-// re-read from the manager on every appear, so videos added elsewhere show up.
+// Edit/swipe removes a video from the playlist. Tap → VideoPlayerVC. "Shuffle" (table
+// header) plays it in random order. The playlist is re-read from the manager on every
+// appear, so videos added elsewhere show up.
 
 class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate {
 
@@ -14,6 +15,7 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
 
     private var tableView: UITableView!
     private var statusLabel: UILabel!
+    private var shuffleHeader: UIView!
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 
@@ -66,6 +68,35 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         statusLabel.font = UIFont.systemFont(ofSize: 15)
         statusLabel.text = "This playlist is empty"
         tableView.addSubview(statusLabel)
+
+        shuffleHeader = makeShuffleHeader(width: w)
+    }
+
+    // "Shuffle" sits in a table header, not the nav bar: that already carries Back, Rename
+    // and Edit, and a third item truncates the title on a 320pt iPhone.
+    private func makeShuffleHeader(width w: CGFloat) -> UIView {
+        let header = UIView(frame: CGRect(x: 0, y: 0, width: w, height: 56))
+        header.backgroundColor = bg
+        let btn = UIButton(type: .custom)
+        btn.frame = CGRect(x: 12, y: 8, width: w - 24, height: 40)
+        btn.autoresizingMask = iPadFlexWidth
+        btn.layer.cornerRadius = 6   // no clipsToBounds: the layer's own background rounds
+        btn.backgroundColor = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
+        btn.setTitle("Shuffle", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.setTitleColor(UIColor(white: 0.5, alpha: 1), for: .highlighted)
+        btn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        btn.addTarget(self, action: #selector(shuffleTapped), for: .touchUpInside)
+        header.addSubview(btn)
+        return header
+    }
+
+    // The empty-state label sits at y=40 inside the table, under where the header would be,
+    // so the header only exists while there is something to shuffle.
+    private func updateShuffleHeader() {
+        guard let tv = tableView else { return }
+        let header: UIView? = videos.isEmpty ? nil : shuffleHeader
+        if tv.tableHeaderView !== header { tv.tableHeaderView = header }
     }
 
     private func reload() {
@@ -73,7 +104,12 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         videos = playlist?.videos ?? []
         title = playlist?.name ?? "Playlist"
         statusLabel?.isHidden = !videos.isEmpty
+        updateShuffleHeader()
         tableView?.reloadData()
+    }
+
+    @objc private func shuffleTapped() {
+        navigationController?.openShuffled(videos)
     }
 
     override func setEditing(_ editing: Bool, animated: Bool) {
@@ -132,6 +168,7 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         videos.remove(at: indexPath.row)
         tableView.deleteRows(at: [indexPath], with: .automatic)
         statusLabel?.isHidden = !videos.isEmpty
+        updateShuffleHeader()
     }
 
     // MARK: - UITableViewDelegate
