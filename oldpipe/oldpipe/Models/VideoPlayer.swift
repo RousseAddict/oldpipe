@@ -136,6 +136,8 @@ class VideoPlayer {
     func skipToNext(from videoId: String) -> Bool {
         guard nextInQueue(after: videoId) != nil, !isStarting else { return false }
         DebugLog.log("VideoPlayer", "skip to next from id=\(videoId)")
+        // Before the sound stops, which is what lets iOS suspend us — see holdAwake.
+        let hold = holdAwake("skip")
         // A recovery's detached item has no position worth keeping (see checkPlaybackAlive).
         if !recovering { saveResume() }
         cancelRecovery()
@@ -144,8 +146,12 @@ class VideoPlayer {
         // Frees the lane for the next video's requests. Routes stay valid, so playing this
         // one again after a failed skip reconnects.
         if !isLocal { StreamProxy.shared.closeCurrentStream() }
+        // A lock-screen Next can wake the app from a suspension without it ever becoming
+        // active, so AppDelegate's resume check has not run: a listener iOS reclaimed while we
+        // were suspended would take the next video's stream down with it.
+        StreamProxy.shared.resetIfDead()
         updateNowPlayingInfo()
-        advanceQueue()
+        advanceQueue(hold: hold)
         return true
     }
 
@@ -436,6 +442,7 @@ class VideoPlayer {
         saveResume()
         clearQueue()
         cancelRecovery()
+        releaseAwake()
         wantsPlayback = false
         ticker?.invalidate(); ticker = nil
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
@@ -539,9 +546,12 @@ class VideoPlayer {
             // Then tear down as abandonLoad does: a dead item left in place keeps AVPlayer
             // fetching against it and makes isActive() lie to the mini bar and the player VC.
             abandonLoad()
+            releaseAwake()
             onRecovery?(.failed)
             return
         }
+        // The backoff below and the re-resolve both run with the sound stopped.
+        holdAwake("reconnect")
         recovering = true
         recoveryAttempts += 1
         stalledTicks = 0
@@ -623,31 +633,87 @@ class VideoPlayer {
     // exists (stop at the end — no loop).
     private func advanceQueueIfPossible() {
         guard let id = currentVideo?.id, nextInQueue(after: id) != nil else { return }
-        advanceQueue()
+        advanceQueue(hold: holdAwake("autoplay"))
     }
 
-    // Move the queue on by one and start that video. Callers have checked there is one.
-    private func advanceQueue() {
+    // Move the queue on by one and start that video. Callers have checked there is one, and
+    // took `hold` for it; a start that gets nowhere gives it back.
+    private func advanceQueue(hold: Int) {
         queueIndex += 1
         let next = queue[queueIndex]
         StreamResolver.resolve(next) { [weak self] resolved in
             guard let self = self else { return }
             // Bail if the queue changed or was cleared while resolving.
             guard !self.queue.isEmpty, self.queueIndex < self.queue.count,
-                  self.queue[self.queueIndex].id == next.id else { return }
+                  self.queue[self.queueIndex].id == next.id else {
+                self.releaseAwake(hold)
+                return
+            }
             guard let r = resolved else {
                 DebugLog.log("VideoPlayer", "autoplay-advance FAILED to resolve id=\(next.id) — stopping queue")
                 // Back to where the queue was, so it still matches the page and Next can retry.
                 self.queueIndex -= 1
+                self.releaseAwake(hold)
                 self.onAdvanceFailed?()
                 return
             }
             let resume = DownloadManager.position(for: next.id)
             self.load(video: next, url: r.url, isLocal: r.isLocal, resume: resume, artwork: nil)
             // Waiting first, so the page sees isStarting while it swaps its content in.
-            self.waitForReadyThenPlay()
+            self.waitForReadyThenPlay(onFail: { [weak self] in self?.releaseAwake(hold) })
             self.onAdvance?(next)   // let the frontmost VideoPlayerVC swap its content
         }
+    }
+
+    // MARK: - Staying awake through a start (lock screen)
+    // Background audio keeps the app running only while something is PLAYING. A skip, an
+    // end-of-video advance and a reconnect all stop the sound and then go to the network, so on
+    // the lock screen iOS suspended the app mid-resolve and the next video only started once the
+    // phone was unlocked. A background task covers the gap: taken when such a start begins,
+    // given back once the new video is seen playing (its audio holds the app from there) or the
+    // start gets nowhere. iOS 6 grants about ten minutes, iOS 7+ three; a start needs seconds.
+    private var awakeTask = UIBackgroundTaskIdentifier.invalid
+    // The start the hold belongs to — the latest one to ask. A start superseded by a newer one
+    // must not give back the hold the newer one is relying on.
+    private var awakeOwner = 0
+    private var awakeLastSeconds: Double = -1
+    private var awakeMovingTicks = 0
+
+    @discardableResult
+    private func holdAwake(_ why: String) -> Int {
+        awakeOwner += 1
+        awakeLastSeconds = -1
+        awakeMovingTicks = 0
+        if awakeTask == .invalid {
+            awakeTask = UIApplication.shared.beginBackgroundTask(expirationHandler: { [weak self] in
+                DebugLog.log("VideoPlayer", "background hold expired")
+                self?.releaseAwake()
+            })
+            DebugLog.log("VideoPlayer", "background hold taken for \(why) inBackground=\(UIApplication.shared.applicationState == .background)")
+        }
+        return awakeOwner
+    }
+
+    // Without an owner, gives the hold back whoever has it.
+    private func releaseAwake(_ owner: Int? = nil) {
+        guard awakeTask != .invalid, owner == nil || owner == awakeOwner else { return }
+        UIApplication.shared.endBackgroundTask(awakeTask)
+        awakeTask = .invalid
+        DebugLog.log("VideoPlayer", "background hold released")
+    }
+
+    // Once a tick, with the item ready. Playing means the clock moving on two ticks running,
+    // not one: the resume seek moves it once by itself, before any sound has come out.
+    private func releaseAwakeOncePlaying() {
+        guard awakeTask != .invalid else { return }
+        let cur = currentSeconds
+        if isPlaying, awakeLastSeconds >= 0, cur - awakeLastSeconds > 0.1 {
+            awakeMovingTicks += 1
+        } else {
+            awakeMovingTicks = 0
+        }
+        awakeLastSeconds = cur
+        if awakeMovingTicks >= 2 { releaseAwake() }
     }
 
     // Poll the new item's status and begin playback once ready. UI-independent counterpart
@@ -737,6 +803,7 @@ class VideoPlayer {
         if checkPlaybackAlive() { return }
         guard item?.status == .readyToPlay else { return }
         reconcileRate()
+        releaseAwakeOncePlaying()
         refreshNowPlayingElapsed()
         saveResumeThrottled()
     }
