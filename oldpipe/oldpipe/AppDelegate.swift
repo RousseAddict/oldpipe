@@ -154,6 +154,23 @@ enum AppSettings {
 
     private static let debugLoggingKey = "debug_logging_enabled"
 
+    // Player POC switches, both ON by default in this build. Stored inverted so a fresh
+    // install gets FFmpeg + stats without anything written to the defaults first.
+    static var ffmpegPlayer: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ffpoc_use_avplayer") }
+        set {
+            UserDefaults.standard.set(!newValue, forKey: "ffpoc_use_avplayer")
+            UserDefaults.standard.synchronize()
+        }
+    }
+    static var playerStats: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ffpoc_hide_stats") }
+        set {
+            UserDefaults.standard.set(!newValue, forKey: "ffpoc_hide_stats")
+            UserDefaults.standard.synchronize()
+        }
+    }
+
     // Off by default. When on, DebugLog.log(_:_:) records breadcrumbs through the playback
     // pipeline (Home tap -> stream resolution -> proxy -> AVPlayerItem status) so a user
     // hitting "video won't play" can copy a trace from Settings > Debug instead of us having
@@ -242,6 +259,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // would, which lets a video-page crash be chased with nobody at the screen.
     func application(_ application: UIApplication, open url: URL,
                      sourceApplication: String?, annotation: Any) -> Bool {
+        if url.host == "ffplay" { openFFPlayerPOC(url); return true }
+        if url.host == "player" { controlPlayer(url); return true }
         guard url.host == "history", let n = Int(url.lastPathComponent) else { return true }
         let videos = HistoryManager.all()
         guard n >= 0, n < videos.count,
@@ -249,6 +268,61 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         CrashLog.mark("url: opening history #\(n) \(videos[n].id)")
         nav.openVideo(videos[n])
         return true
+    }
+
+    // Player POC, the real video page: oldpipe://player/{play|pause|resume|script|
+    // speed/<x>|seek/<s>|engine/ffmpeg|engine/avplayer}. `play` presses the page's own play
+    // button, so the whole real start path runs (resolve, proxy, load, ready, resume).
+    private func controlPlayer(_ url: URL) {
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard let cmd = parts.first else { return }
+        let arg = parts.count > 1 ? Double(parts[1]) : nil
+        let sp = VideoPlayer.shared
+        CrashLog.mark("url: player " + parts.joined(separator: "/"))
+        switch cmd {
+        case "play":
+            let top = (window?.rootViewController as? UINavigationController)?.topViewController
+            let tap = NSSelectorFromString("playTapped")
+            if let vc = top, vc.responds(to: tap) { vc.perform(tap) }
+        case "pause":  sp.pause()
+        case "resume": sp.play()
+        case "speed":  if let r = arg { sp.setPlaybackRate(Float(r)) }
+        case "seek":   if let t = arg { sp.seek(toSeconds: t) }
+        case "engine": AppSettings.ffmpegPlayer = parts.count > 1 && parts[1] == "ffmpeg"
+        case "script": PlayerScript.shared.start()
+        default: break
+        }
+    }
+
+    // Player POC: oldpipe://ffplay/{id/<videoId>|history/<n>|file/<name>}?itag=&script=1&dump=1
+    // (no NSURLComponents — iOS 7+ — so the query is split by hand).
+    private func openFFPlayerPOC(_ url: URL) {
+        guard let nav = window?.rootViewController as? UINavigationController else { return }
+        var opts: [String: String] = [:]
+        for pair in (url.query ?? "").components(separatedBy: "&") {
+            let kv = pair.components(separatedBy: "=")
+            if kv.count == 2 { opts[kv[0]] = kv[1] }
+        }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        guard parts.count == 2 else { return }
+        let itag = opts["itag"].flatMap { Int($0) }
+        let source: FFPlayerPOCVC.Source
+        switch parts[0] {
+        case "file":
+            source = .file(parts[1])
+        case "history":
+            let videos = HistoryManager.all()
+            guard let n = Int(parts[1]), n >= 0, n < videos.count else { return }
+            source = .video(videos[n], itag: itag)
+        default:
+            source = .video(Video(id: parts[1], title: parts[1], channelName: "", channelId: "",
+                                  thumbnailURL: "", durationText: "", viewCountText: "",
+                                  publishedText: ""), itag: itag)
+        }
+        CrashLog.mark("url: ffplay POC \(url.absoluteString)")
+        // One POC player at a time: popping tears the previous one down.
+        nav.popToRootViewController(animated: false)
+        nav.pushViewController(FFPlayerPOCVC(source: source, options: opts), animated: true)
     }
     #endif
 

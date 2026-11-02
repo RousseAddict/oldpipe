@@ -98,7 +98,7 @@ xcodebuild clean build \
   ONLY_ACTIVE_ARCH=NO \
   OTHER_SWIFT_FLAGS="-D IOS5_TARGET" \
   OTHER_CFLAGS="-DIOS5_TARGET -D_FORTIFY_SOURCE=0" \
-  OTHER_LDFLAGS="-lcurl -lssl -lcrypto -lz -Wl,-ios_version_min,5.0" \
+  OTHER_LDFLAGS="-lcurl -lssl -lcrypto -lz -lavfilter -lavformat -lavcodec -lswresample -lswscale -lavutil -framework AudioToolbox -Wl,-ios_version_min,5.0" \
   CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
   2>&1 | grep -E "(error:|BUILD SUCCEEDED|BUILD FAILED|CompileSwift )" | tail -20
 

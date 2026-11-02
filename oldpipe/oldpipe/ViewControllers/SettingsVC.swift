@@ -224,6 +224,18 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
                      action: #selector(debugSwitchChanged(_:)),
                      at: &y, screenWidth: w, width: contentW, pad: pad)
 
+        addSwitchRow(subtitle: "Proof of concept: plays videos with FFmpeg (software decoding, every speed with the pitch kept) instead of AVPlayer. Applies from the next video.",
+                     label: "FFmpeg Player (POC)",
+                     isOn: AppSettings.ffmpegPlayer,
+                     action: #selector(ffmpegSwitchChanged(_:)),
+                     at: &y, screenWidth: w, width: contentW, pad: pad)
+
+        addSwitchRow(subtitle: "Frame rate, decode cost, drops and effective speed over the video, for either player. Also logged to Documents/ffpoc.log.",
+                     label: "Player Stats",
+                     isOn: AppSettings.playerStats,
+                     action: #selector(statsSwitchChanged(_:)),
+                     at: &y, screenWidth: w, width: contentW, pad: pad)
+
         debugCountLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 20))
         debugCountLabel.backgroundColor = .clear
         debugCountLabel.textColor = UIColor(white: 0.7, alpha: 1)
@@ -337,6 +349,14 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
     @objc private func debugSwitchChanged(_ sender: UISwitch) {
         AppSettings.debugLoggingEnabled = sender.isOn
+    }
+
+    @objc private func ffmpegSwitchChanged(_ sender: UISwitch) {
+        AppSettings.ffmpegPlayer = sender.isOn
+    }
+
+    @objc private func statsSwitchChanged(_ sender: UISwitch) {
+        AppSettings.playerStats = sender.isOn
     }
 
     @objc private func copyDebugTapped() {
