@@ -12,10 +12,12 @@
 		A34363012FD764270064ADE1 /* Default-568h@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = A34363002FD764270064ADE1 /* Default-568h@2x.png */; };
 		BB000001000000000000BE01 /* play.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD01 /* play.png */; };
 		BB000001000000000000BE17 /* playlist.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD17 /* playlist.png */; };
+		BB000001000000000000BE19 /* next.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD19 /* next.png */; };
 		BB000001000000000000BE15 /* share.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD15 /* share.png */; };
 		BB000001000000000000BE13 /* download.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD13 /* download.png */; };
 		BB000001000000000000BE02 /* play@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD02 /* play@2x.png */; };
 		BB000001000000000000BE18 /* playlist@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD18 /* playlist@2x.png */; };
+		BB000001000000000000BE1A /* next@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD1A /* next@2x.png */; };
 		BB000001000000000000BE16 /* share@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD16 /* share@2x.png */; };
 		BB000001000000000000BE14 /* download@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD14 /* download@2x.png */; };
 		BB000001000000000000BE03 /* pause.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD03 /* pause.png */; };
@@ -116,10 +118,12 @@
 		A34363002FD764270064ADE1 /* Default-568h@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Default-568h@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD01 /* play.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "play.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD17 /* playlist.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD19 /* next.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "next.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD15 /* share.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "share.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD13 /* download.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "download.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD02 /* play@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "play@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD18 /* playlist@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD1A /* next@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "next@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD16 /* share@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "share@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD14 /* download@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "download@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD03 /* pause.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "pause.png"; sourceTree = "<group>"; };
@@ -255,10 +259,12 @@
 				A34363002FD764270064ADE1 /* Default-568h@2x.png */,
 				BB000001000000000000BD01 /* play.png */,
 				BB000001000000000000BD17 /* playlist.png */,
+				BB000001000000000000BD19 /* next.png */,
 				BB000001000000000000BD15 /* share.png */,
 				BB000001000000000000BD13 /* download.png */,
 				BB000001000000000000BD02 /* play@2x.png */,
 				BB000001000000000000BD18 /* playlist@2x.png */,
+				BB000001000000000000BD1A /* next@2x.png */,
 				BB000001000000000000BD16 /* share@2x.png */,
 				BB000001000000000000BD14 /* download@2x.png */,
 				BB000001000000000000BD03 /* pause.png */,
@@ -491,10 +497,12 @@
 				A34363012FD764270064ADE1 /* Default-568h@2x.png in Resources */,
 				BB000001000000000000BE01 /* play.png in Resources */,
 				BB000001000000000000BE17 /* playlist.png in Resources */,
+				BB000001000000000000BE19 /* next.png in Resources */,
 				BB000001000000000000BE15 /* share.png in Resources */,
 				BB000001000000000000BE13 /* download.png in Resources */,
 				BB000001000000000000BE02 /* play@2x.png in Resources */,
 				BB000001000000000000BE18 /* playlist@2x.png in Resources */,
+				BB000001000000000000BE1A /* next@2x.png in Resources */,
 				BB000001000000000000BE16 /* share@2x.png in Resources */,
 				BB000001000000000000BE14 /* download@2x.png in Resources */,
 				BB000001000000000000BE03 /* pause.png in Resources */,

@@ -182,6 +182,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var downloadBtn: UIButton?
     private var shareBtn: UIButton?
     private var addPlaylistBtn: UIButton?
+    // "Up next" row under the meta line, shown while this video has a next one in the playlist
+    // queue; a tap skips to it. nextBtn is the same action in the control bar.
+    private var upNextRow: UIButton?
+    private var upNextTitle: UILabel?
+    private var nextBtn: UIButton?
+    // The spinner is up for a start the player is making by itself (Next, a playlist
+    // advance) until that start settles — see handleStartSettled.
+    private var advancePending = false
     private var fsOverlay: UIView?
     // Hosts action sheets while fullscreen is up on iOS 8+ (see ensureSheetWindow).
     private var sheetWindow: UIWindow?
@@ -288,7 +296,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onRateReverted = { [weak self] in self?.handleRateReverted() }
 
         // And for the end of a start the player made by itself, which related waits behind.
-        sp.onStartSettled = { [weak self] in self?.loadRelatedIfIdle() }
+        sp.onStartSettled = { [weak self] in self?.handleStartSettled() }
+        sp.onAdvanceFailed = { [weak self] in self?.handleAdvanceFailed() }
+
+        // The queue may have moved while this page was covered (Shorts replaced it, or a
+        // lock-screen Next), and a start that settled meanwhile was not reported here.
+        refreshUpNext()
+        if advancePending, !sp.isStarting { handleStartSettled() }
 
         // Captions survive a push/pop of another VC (cues stay parsed) — restart the ticker
         // that viewWillDisappear stopped.
@@ -307,6 +321,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onRecovery = nil
         sp.onRateReverted = nil
         sp.onStartSettled = nil
+        sp.onAdvanceFailed = nil
         // A held > tap goes with the page: playback must not start behind the screen pushed
         // over it. The response still lands and leaves "Tap to play" for the way back.
         if playWhenStreamsLoad {
@@ -432,6 +447,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     private func handleAutoAdvance(_ newVideo: Video) {
+        // A Next can land while this page was still starting its own video: that attempt's
+        // poll would otherwise read the new item and play — or abandon — it.
+        cancelPlayAttempt()
+        // The download and Photos polls read `video.id` on every tick, so left running they
+        // would report on the new video (a "Download failed" for one never downloaded). The
+        // transfers themselves carry on in their managers.
+        if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
         video = newVideo
         contentGen += 1   // invalidates every in-flight response for the previous video
         streams = []
@@ -499,14 +522,98 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if !newVideo.thumbnailURL.isEmpty { thumbView?.load(url: newVideo.thumbnailURL) }
 
         updateDownloadButton()
+        if DownloadManager.isDownloading(newVideo.id) {
+            observeDownload()
+        } else if PhotoExporter.shared.isBusy(newVideo.id) {
+            observePhotoExport()
+        }
         showActivePlayback()   // re-attach layer + show controls + resync progress
-        relayout()
+        // Still loading in the player: the thumbnail and a spinner until it settles, rather
+        // than a black frame.
+        if sp.isStarting {
+            advancePending = true
+            thumbView?.isHidden = false
+            showSpinner()
+        }
+        refreshUpNext()
 
         // The new video's description + related, quietly (no status label changes). The
         // player's own answer for it is a moment old, so it is read back, not fetched again;
         // related waits until the new stream has started (sp.isStarting, onStartSettled).
         loadStreams(updateStatus: false, reuse: true)
         loadRelatedIfIdle()
+    }
+
+    // A start the player made by itself (Next, a playlist advance, a recovery reload) has
+    // stopped waiting: it plays, or it gave up. Related waits behind any of them.
+    private func handleStartSettled() {
+        if advancePending {
+            advancePending = false
+            hideSpinner()
+            if sp.isActive(video.id) && sp.isReady {
+                hideThumbForPlayback()
+            } else {
+                // Gave up. Leave what a failed play tap leaves (tryStream), so the play button
+                // retries through startPlay — or Next skips past this video too.
+                if sp.isActive(video.id) {
+                    if sp.isFailed { streamsStale = true }
+                    sp.abandonLoad()
+                }
+                detachLayer()
+                thumbView?.isHidden = false
+                statusLabel?.text = "Playback failed \u{2022} tap to retry"
+                statusLabel?.isHidden = false
+                playBtn?.isHidden = false
+            }
+        }
+        loadRelatedIfIdle()
+    }
+
+    // The next video could not be resolved. Nothing was loaded, the queue is back on this
+    // page's video, and whatever Next paused stays paused.
+    private func handleAdvanceFailed() {
+        advancePending = false
+        hideSpinner()
+        statusLabel?.text = "Couldn't load the next video"
+        statusLabel?.isHidden = false
+        if sp.isActive(video.id) { showControls() } else { playBtn?.isHidden = false }
+        refreshUpNext()
+    }
+
+    @objc private func nextTapped() {
+        // The phone's player sits paused while casting, so a skip would start the next video
+        // here rather than on the TV.
+        if castSession != nil {
+            statusLabel?.text = "Stop casting to skip"
+            statusLabel?.isHidden = false
+            return
+        }
+        // A play tap mid-fade would start this page's video on top of the skip (startPlay runs
+        // when the fade ends). The rest is what skipToNext would refuse.
+        guard !startPending, sp.nextInQueue(after: video.id) != nil, !sp.isStarting else { return }
+        // Set up BEFORE the call: a downloaded next video resolves synchronously, so the swap
+        // (handleAutoAdvance) or the failure report can run inside it.
+        cancelPlayAttempt()
+        playWhenStreamsLoad = false   // nor may this video start when its streams land
+        advancePending = true
+        playBtn?.isHidden = true
+        statusLabel?.isHidden = true
+        showSpinner()
+        sp.skipToNext(from: video.id)
+        refreshUpNext()   // the queue has moved on: no Up next until the new video is in
+    }
+
+    // Stops this page's own play attempt (tryStream / startPlayback) from reporting back.
+    private func cancelPlayAttempt() {
+        if let t = objc_getAssociatedObject(self, &timerKey) as? Timer { t.invalidate() }
+        playAttemptPending = false
+    }
+
+    // The Up next row and the bar's Next button both read the queue each time they are laid
+    // out, since it can move without this page being told.
+    private func refreshUpNext() {
+        relayout()
+        if let bar = controlsView { layoutControls(width: bar.bounds.width) }
     }
 
     // MARK: - Orientation → fullscreen
@@ -822,6 +929,42 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sv.addSubview(addPl)
         addPlaylistBtn = addPl
 
+        // Up next (playlist only; position and visibility set in relayout). Styled and
+        // highlighted like a chapter row; the labels and icon take no touches, so the whole
+        // plate is the button.
+        let rowW = w - padding * 2
+        let rowH: CGFloat = 52
+        let un = UIButton(type: .custom)
+        un.frame = CGRect(x: padding, y: 0, width: rowW, height: rowH)
+        un.backgroundColor = VideoPlayerVC.chapterRowColor
+        un.layer.cornerRadius = 6
+        un.isHidden = true
+        un.addTarget(self, action: #selector(nextTapped), for: .touchUpInside)
+        un.addTarget(self, action: #selector(chapterRowDown(_:)), for: [.touchDown, .touchDragEnter])
+        un.addTarget(self, action: #selector(chapterRowUp(_:)),
+                     for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+        let unLabel = UILabel(frame: CGRect(x: 10, y: 8, width: rowW - 54, height: 14))
+        unLabel.backgroundColor = .clear
+        unLabel.textColor = UIColor(white: 0.55, alpha: 1)
+        unLabel.font = UIFont.boldSystemFont(ofSize: 11)
+        unLabel.text = "Up next"
+        unLabel.autoresizingMask = [.flexibleWidth]
+        un.addSubview(unLabel)
+        let unTitle = UILabel(frame: CGRect(x: 10, y: 24, width: rowW - 54, height: 20))
+        unTitle.backgroundColor = .clear
+        unTitle.textColor = UIColor(white: 0.9, alpha: 1)
+        unTitle.font = UIFont.systemFont(ofSize: 14)
+        unTitle.lineBreakMode = .byTruncatingTail
+        unTitle.autoresizingMask = [.flexibleWidth]
+        un.addSubview(unTitle)
+        let unIcon = UIImageView(image: UIImage(named: "next"))
+        unIcon.frame = CGRect(x: rowW - 34, y: (rowH - 24) / 2, width: 24, height: 24)
+        unIcon.autoresizingMask = [.flexibleLeftMargin]
+        un.addSubview(unIcon)
+        sv.addSubview(un)
+        upNextRow = un
+        upNextTitle = unTitle
+
         relayout()
     }
 
@@ -907,15 +1050,26 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         relayout()
     }
 
-    // Lay out everything below the meta line: description → download button → share row →
-    // related videos. Called from setupUI and whenever async content (description, related)
-    // arrives or the description is expanded/collapsed. Repositions the (already-created)
-    // action buttons and re-lays the async sections, then sizes the scroll content once.
+    // Lay out everything below the meta line: up next → description → download button → share
+    // row → related videos. Called from setupUI and whenever async content (description,
+    // related) arrives or the description is expanded/collapsed. Repositions the
+    // (already-created) action buttons and re-lays the async sections, then sizes the scroll
+    // content once.
     private func relayout() {
         guard let sv = scrollView else { return }
         let w = sv.bounds.width
         let padding: CGFloat = 12
         var y = contentBelowMetaY
+
+        // Up next, while this video has a next one in the playlist queue.
+        if let row = upNextRow, let next = sp.nextInQueue(after: video.id) {
+            upNextTitle?.text = next.title
+            row.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: row.bounds.height)
+            row.isHidden = false
+            y += row.bounds.height + 12
+        } else {
+            upNextRow?.isHidden = true
+        }
 
         // Chapters, then the description (directly under the meta line).
         y = layoutDescSection(startY: y, width: w)
@@ -2142,6 +2296,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(pp)
         playPauseBtn = pp
 
+        // Next — shown by layoutControls only in a playlist, and only on a bar wide enough.
+        let nx = UIButton(type: .custom)
+        nx.setImage(UIImage(named: "next"), for: .normal)
+        nx.addTarget(self, action: #selector(nextTapped), for: .touchUpInside)
+        nx.isHidden = true
+        bar.addSubview(nx)
+        nextBtn = nx
+
         // Elapsed time — left-aligned so it hugs the play button (no dead gap between them).
         let cur = UILabel()
         cur.backgroundColor = .clear
@@ -2205,20 +2367,29 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Position the control bar's children for a given bar width (bar frame set by caller).
-    // Layout: [play 36][cur 46] ===slider=== [dur 46][hd 36][cast 36][fullscreen 36]
+    // Layout: [play 36]([next 36])[cur 46] ===slider=== [dur 46][hd 36][cast 36][fullscreen 36]
     // Times are left/right-aligned so they hug the adjacent buttons — spacing is uniform
     // on both ends and the slider is centered between them.
+    // Next appears only from minBarWidthForNext up — landscape fullscreen, or iPad — because
+    // the inline bar on a 320pt iPhone leaves the slider 84pt, and one more button cuts it to
+    // 48. There the Up next row under the video does the job.
+    private static let minBarWidthForNext: CGFloat = 400
+
     private func layoutControls(width w: CGFloat) {
         let barH: CGFloat = 40
         let btnW: CGFloat = 36
         let timeW: CGFloat = 46
+        let showNext = w >= VideoPlayerVC.minBarWidthForNext && sp.nextInQueue(after: video.id) != nil
+        let nextW: CGFloat = showNext ? btnW : 0
         playPauseBtn?.frame = CGRect(x: 0, y: 0, width: btnW, height: barH)
-        currentTimeLabel?.frame = CGRect(x: btnW, y: 0, width: timeW, height: barH)
+        nextBtn?.frame = CGRect(x: btnW, y: 0, width: btnW, height: barH)
+        nextBtn?.isHidden = !showNext
+        currentTimeLabel?.frame = CGRect(x: btnW + nextW, y: 0, width: timeW, height: barH)
         fsButton?.frame = CGRect(x: w - btnW, y: 0, width: btnW, height: barH)
         castBtn?.frame = CGRect(x: w - btnW * 2, y: 0, width: btnW, height: barH)
         hdBtn?.frame = CGRect(x: w - btnW * 3, y: 0, width: btnW, height: barH)
         durationLabel?.frame = CGRect(x: w - btnW * 3 - timeW, y: 0, width: timeW, height: barH)
-        let leftEdge = btnW + timeW
+        let leftEdge = btnW + nextW + timeW
         let rightEdge = btnW * 3 + timeW
         // A UISlider reserves ~half its thumb width of empty space at each end of its frame
         // before the visible track begins, so the track looks like it has more padding than

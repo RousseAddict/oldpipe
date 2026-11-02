@@ -97,6 +97,9 @@ class VideoPlayer {
     private(set) var queue: [Video] = []
     private(set) var queueIndex = 0
     var onAdvance: ((Video) -> Void)?
+    // The next video could not be resolved, so nothing was loaded and the queue is back where
+    // it was. Set by the frontmost VideoPlayerVC, like onAdvance.
+    var onAdvanceFailed: (() -> Void)?
     private var advanceWaitTimer: Timer?
 
     // True while the player is starting a video on its own — a queue advance or a recovery
@@ -115,6 +118,35 @@ class VideoPlayer {
         queue = []
         queueIndex = 0
         advanceWaitTimer?.invalidate(); advanceWaitTimer = nil
+    }
+
+    // The video queued after `videoId`, when `videoId` is the queue's current entry.
+    func nextInQueue(after videoId: String) -> Video? {
+        guard queueIndex >= 0, queueIndex + 1 < queue.count,
+              queue[queueIndex].id == videoId else { return nil }
+        return queue[queueIndex + 1]
+    }
+
+    // The Next button and the lock screen's next track. `videoId` is the video the caller is
+    // showing, which is not always the one in the player: a page opened from a playlist can be
+    // skipped before its own video has started, or after it failed to. Whatever IS playing
+    // keeps its position, as on a pause. Refused while a start the player made by itself is
+    // still waiting, so a double tap skips once.
+    @discardableResult
+    func skipToNext(from videoId: String) -> Bool {
+        guard nextInQueue(after: videoId) != nil, !isStarting else { return false }
+        DebugLog.log("VideoPlayer", "skip to next from id=\(videoId)")
+        // A recovery's detached item has no position worth keeping (see checkPlaybackAlive).
+        if !recovering { saveResume() }
+        cancelRecovery()
+        wantsPlayback = false
+        player?.pause()
+        // Frees the lane for the next video's requests. Routes stay valid, so playing this
+        // one again after a failed skip reconnects.
+        if !isLocal { StreamProxy.shared.closeCurrentStream() }
+        updateNowPlayingInfo()
+        advanceQueue()
+        return true
     }
 
     // MARK: - Load / state
@@ -590,10 +622,12 @@ class VideoPlayer {
     // queue item (guards against having navigated to a non-queue video) and a next item
     // exists (stop at the end — no loop).
     private func advanceQueueIfPossible() {
-        guard !queue.isEmpty,
-              queueIndex >= 0, queueIndex < queue.count,
-              currentVideo?.id == queue[queueIndex].id,
-              queueIndex + 1 < queue.count else { return }
+        guard let id = currentVideo?.id, nextInQueue(after: id) != nil else { return }
+        advanceQueue()
+    }
+
+    // Move the queue on by one and start that video. Callers have checked there is one.
+    private func advanceQueue() {
         queueIndex += 1
         let next = queue[queueIndex]
         StreamResolver.resolve(next) { [weak self] resolved in
@@ -603,7 +637,10 @@ class VideoPlayer {
                   self.queue[self.queueIndex].id == next.id else { return }
             guard let r = resolved else {
                 DebugLog.log("VideoPlayer", "autoplay-advance FAILED to resolve id=\(next.id) — stopping queue")
-                return   // couldn't resolve — stop the chain
+                // Back to where the queue was, so it still matches the page and Next can retry.
+                self.queueIndex -= 1
+                self.onAdvanceFailed?()
+                return
             }
             let resume = DownloadManager.position(for: next.id)
             self.load(video: next, url: r.url, isLocal: r.isLocal, resume: resume, artwork: nil)
@@ -765,6 +802,8 @@ class VideoPlayer {
         case .remoteControlPlay:            play()
         case .remoteControlPause:           pause()
         case .remoteControlTogglePlayPause: togglePlayPause()
+        // Lock screen and headphone remote. Does nothing outside a playlist.
+        case .remoteControlNextTrack:       if let id = currentVideo?.id { skipToNext(from: id) }
         default: break
         }
     }
