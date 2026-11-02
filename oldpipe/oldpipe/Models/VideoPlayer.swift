@@ -15,7 +15,8 @@ class VideoPlayer {
 
     // Persistent layer — each VideoPlayerVC reattaches it into its own video container
     // (and the fullscreen overlay). Removing it from a superlayer does NOT stop audio.
-    let layer = AVPlayerLayer()
+    // A PlayerLayer so it can show the FFmpeg engine's frames as well as AVPlayer's picture.
+    let layer = PlayerLayer()
 
     private(set) var player: AVPlayer?
     private(set) var item: AVPlayerItem?
@@ -31,6 +32,16 @@ class VideoPlayer {
     private var endObserver: NSObjectProtocol?   // AVPlayerItemDidPlayToEndTime for the current item
     private var lastLoadWasHLS = false           // content type of the last load() — see type-switch note in load()
     private var needsFreshPlayer = false         // an item failed on the current AVPlayer — see dead-player note in load()
+
+    // MARK: - FFmpeg engine (player POC)
+    // With Settings > Debug > FFmpeg Player on, load() hands the URL to ffplayer.c (FFmpeg
+    // demux + software decode, AudioQueue output, integer time stretch) instead of making an
+    // AVPlayerItem. Every member below asks `ff` first, so the page, the mini bar, Shorts and
+    // the watchdog drive either engine without knowing which one is playing. Frames go into
+    // layer.frameLayer, pulled once per screen refresh by ffLink.
+    private var ff: OpaquePointer?
+    private var ffLink: CADisplayLink?
+    private var ffEndHandled = false
 
     // MARK: - Playback watchdog
     // A streamed video can die mid-playback: googlevideo drops the transfer, or the network
@@ -143,6 +154,7 @@ class VideoPlayer {
         cancelRecovery()
         wantsPlayback = false
         player?.pause()
+        if let f = ff { ffp_pause(f) }
         // Frees the lane for the next video's requests. Routes stay valid, so playing this
         // one again after a failed skip reconnects.
         if !isLocal { StreamProxy.shared.closeCurrentStream() }
@@ -169,6 +181,48 @@ class VideoPlayer {
         let t0 = CFAbsoluteTimeGetCurrent()
         configureAudioSession()
         let tAudio = CFAbsoluteTimeGetCurrent()
+        // Whichever engine the previous video used is shut first, so a stale frame never
+        // shows under the new one and two engines never play at once.
+        stopFFmpeg()
+        if AppSettings.ffmpegPlayer {
+            // AVPlayer gives its item up so it neither plays nor fetches behind FFmpeg.
+            player?.pause()
+            player?.replaceCurrentItem(with: nil)
+            item = nil
+            if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
+            startFFmpeg(url: url)
+        } else {
+            loadAVPlayerItem(url: url, t0: t0, tAudio: tAudio)
+        }
+        currentVideo = video
+        self.isLocal = isLocal
+        self.artwork = artwork
+        pendingResume = resume
+        didApplyResume = false
+        lastSavedPos = resume
+        markedWatched = false
+        // Watchdog state is per-load, except the attempt counter during a recovery — that one
+        // has to survive the reload it is driving, or every attempt would look like the first.
+        // Loading a *different* video supersedes a recovery outright.
+        if recovering, !isSameVideo { cancelRecovery() }
+        // A quality or caption track chosen in the player UI belongs to the video it was
+        // chosen for.
+        if !isSameVideo {
+            activeItag = nil
+            activeCaptionKey = nil
+            activeCaptionCues = []
+        }
+        wantsPlayback = false
+        lastTickSeconds = -1
+        stalledTicks = 0
+        rateZeroTicks = 0
+        if !recovering { recoveryAttempts = 0 }
+        updateNowPlayingInfo()
+        startTicker()
+    }
+
+    // The AVPlayer half of load(), unchanged.
+    private func loadAVPlayerItem(url: URL, t0: CFAbsoluteTime, tAudio: CFAbsoluteTime) {
         // iOS 6 AVPlayer cannot replaceCurrentItem across content types (progressive MP4
         // <-> HLS): the new HLS item probes the playlist then fails with bare -11800
         // without ever requesting a segment. Recreate the player on a type switch.
@@ -209,44 +263,63 @@ class VideoPlayer {
             forName: .AVPlayerItemDidPlayToEndTime, object: newItem, queue: OperationQueue.main) { [weak self] _ in
             self?.handlePlaybackEnded()
         }
-        currentVideo = video
-        self.isLocal = isLocal
-        self.artwork = artwork
-        pendingResume = resume
-        didApplyResume = false
-        lastSavedPos = resume
-        markedWatched = false
-        // Watchdog state is per-load, except the attempt counter during a recovery — that one
-        // has to survive the reload it is driving, or every attempt would look like the first.
-        // Loading a *different* video supersedes a recovery outright.
-        if recovering, !isSameVideo { cancelRecovery() }
-        // A quality or caption track chosen in the player UI belongs to the video it was
-        // chosen for.
-        if !isSameVideo {
-            activeItag = nil
-            activeCaptionKey = nil
-            activeCaptionCues = []
-        }
-        wantsPlayback = false
-        lastTickSeconds = -1
-        stalledTicks = 0
-        rateZeroTicks = 0
-        if !recovering { recoveryAttempts = 0 }
-        updateNowPlayingInfo()
-        startTicker()
     }
 
-    var isReady: Bool { return item?.status == .readyToPlay }
-    var isFailed: Bool { return item?.status == .failed }
+    private func startFFmpeg(url: URL) {
+        VideoPlayer.openStatsLog()
+        let p = ffp_create()
+        ffp_set_speed(p, Double(playbackRate))
+        ffp_open(p, url.isFileURL ? url.path : url.absoluteString)
+        ff = p
+        ffEndHandled = false
+        let l = CADisplayLink(target: TickProxy { [weak self] in self?.pullFrame() },
+                              selector: #selector(TickProxy.fire))
+        l.add(to: RunLoop.main, forMode: .common)
+        ffLink = l
+        ffp_log_line("[VideoPlayer] FFmpeg load " + url.absoluteString)
+    }
+
+    private func stopFFmpeg() {
+        ffLink?.invalidate(); ffLink = nil
+        if let p = ff { ffp_destroy(p) }
+        ff = nil
+        layer.frameLayer.contents = nil
+        layer.statsLayer.isHidden = true
+    }
+
+    private func pullFrame() {
+        guard let p = ff, let img = ffp_copy_frame(p) else { return }
+        if layer.frameLayer.bounds.size != layer.bounds.size { layer.setNeedsLayout() }
+        layer.frameLayer.contents = img
+    }
+
+    var isReady: Bool {
+        if let p = ff {
+            let st = Int(ffp_state(p))
+            return st == FFP_READY || st == FFP_PLAYING || st == FFP_PAUSED || st == FFP_ENDED
+        }
+        return item?.status == .readyToPlay
+    }
+    var isFailed: Bool {
+        if let p = ff { return Int(ffp_state(p)) == FFP_FAILED }
+        return item?.status == .failed
+    }
     // The AVPlayerItem's error, when status == .failed. AVPlayerItem failures otherwise surface
     // nowhere in the UI (silent on iOS 6) — this is what DebugLog call sites report.
-    var currentItemError: Error? { return item?.error }
+    var currentItemError: Error? {
+        if let p = ff, isFailed {
+            return NSError(domain: "ffplayer", code: 1,
+                           userInfo: [NSLocalizedDescriptionKey: String(cString: ffp_error(p))])
+        }
+        return item?.error
+    }
 
     // Everything AVFoundation will say about a failure, for DebugLog. localizedDescription
     // alone ("Cannot Complete Action") is the same string for every -11800, so it cannot tell
     // a dead player from a bad stream; the statuses, codes, underlying error and the item's
     // error log can.
     var failureDiagnostics: String {
+        if let p = ff { return "engine=FFmpeg state=\(ffp_state(p)) error=\(String(cString: ffp_error(p)))" }
         var parts = ["playerStatus=\(player.map { String($0.status.rawValue) } ?? "nil")",
                      "itemStatus=\(item.map { String($0.status.rawValue) } ?? "nil")",
                      "playerError=\(VideoPlayer.describe(player?.error))",
@@ -269,15 +342,38 @@ class VideoPlayer {
     // Uses the asset track's naturalSize + preferredTransform — iOS 4+ safe, unlike
     // AVPlayerItem.presentationSize / AVPlayerLayer.videoRect (both iOS 7+).
     var isPortraitVideo: Bool {
+        if let p = ff {
+            var w: Int32 = 0, h: Int32 = 0
+            ffp_video_size(p, &w, &h)
+            return h > w
+        }
         guard let track = item?.asset.tracks(withMediaType: AVMediaType.video).first else { return false }
         let size = track.naturalSize.applying(track.preferredTransform)
         return abs(size.height) > abs(size.width)
     }
-    func isActive(_ videoId: String) -> Bool { return currentVideo?.id == videoId && item != nil }
-    var isPlaying: Bool { return (player?.rate ?? 0) > 0 }
+    func isActive(_ videoId: String) -> Bool { return currentVideo?.id == videoId && (item != nil || ff != nil) }
+    var isPlaying: Bool {
+        if let p = ff { return Int(ffp_state(p)) == FFP_PLAYING }
+        return (player?.rate ?? 0) > 0
+    }
+    // What the lock screen is told: AVPlayer's own rate, or the chosen speed while FFmpeg plays.
+    private var currentRate: Float { return ff != nil ? (isPlaying ? playbackRate : 0) : (player?.rate ?? 0) }
 
     // Seek to the saved resume point (once) and begin playback. Call when isReady.
     func applyResumeAndPlay() {
+        if let f = ff {
+            if !didApplyResume {
+                didApplyResume = true
+                let dur = durationSeconds
+                if pendingResume > 5, !(dur > 0 && pendingResume >= dur - 5) { ffp_seek(f, pendingResume) }
+                if let v = currentVideo { HistoryManager.record(v) }
+            }
+            wantsPlayback = true
+            ffp_set_speed(f, Double(playbackRate))
+            ffp_play(f)
+            updateNowPlayingInfo()
+            return
+        }
         guard let p = player, let it = item else { return }
         if !didApplyResume {
             didApplyResume = true
@@ -292,8 +388,17 @@ class VideoPlayer {
         updateNowPlayingInfo()
     }
 
-    func play() { wantsPlayback = true; player?.rate = playbackRate; updateNowPlayingInfo() }
-    func pause() { wantsPlayback = false; player?.pause(); saveResume(); updateNowPlayingInfo() }
+    func play() {
+        wantsPlayback = true
+        if let f = ff { ffp_play(f) } else { player?.rate = playbackRate }
+        updateNowPlayingInfo()
+    }
+    func pause() {
+        wantsPlayback = false
+        if let f = ff { ffp_pause(f) } else { player?.pause() }
+        saveResume()
+        updateNowPlayingInfo()
+    }
     func togglePlayPause() { if isPlaying { pause() } else { play() } }
 
     // MARK: - Playback speed
@@ -323,6 +428,7 @@ class VideoPlayer {
     // options, so that one still decides.
     // Before the item is ready neither flag is meaningful, so assume it is allowed.
     func supportsRate(_ rate: Float) -> Bool {
+        if ff != nil { return true }   // the time stretch takes any rate in 0.5...4
         guard let it = item, it.status == .readyToPlay else { return true }
         #if IOS5_TARGET
         // Both flags are iOS 6 selectors on an iOS 4 class, so the signature is legal on every
@@ -348,8 +454,9 @@ class VideoPlayer {
         }
         playbackRate = rate
         // Only push it to the player when something is actually running — assigning a rate to
-        // a paused player would start playback behind the user's back.
-        if isPlaying { player?.rate = rate }
+        // a paused player would start playback behind the user's back. FFmpeg keeps speed and
+        // play state apart, so it takes the speed either way.
+        if let f = ff { ffp_set_speed(f, Double(rate)) } else if isPlaying { player?.rate = rate }
         updateNowPlayingInfo()
         return true
     }
@@ -368,7 +475,7 @@ class VideoPlayer {
     private static let rateZeroGraceTicks = 5
 
     private func reconcileRate() {
-        guard playbackRate != 1.0, wantsPlayback, let p = player else { rateZeroTicks = 0; return }
+        guard ff == nil, playbackRate != 1.0, wantsPlayback, let p = player else { rateZeroTicks = 0; return }
         if p.rate == 0 {
             rateZeroTicks += 1
             guard rateZeroTicks >= VideoPlayer.rateZeroGraceTicks else { return }
@@ -391,6 +498,11 @@ class VideoPlayer {
     }
 
     func seek(toFraction f: Double) {
+        if let p = ff {
+            if durationSeconds > 0 { ffp_seek(p, f * durationSeconds) }
+            updateNowPlayingInfo()
+            return
+        }
         guard let it = item else { return }
         let dur = CMTimeGetSeconds(it.duration)
         guard dur.isFinite, dur > 0 else { return }
@@ -415,6 +527,11 @@ class VideoPlayer {
         var target = t
         if target < 0 { target = 0 }
         if dur > 0, target > dur { target = dur }
+        if let p = ff {
+            ffp_seek(p, target)
+            updateNowPlayingInfo()
+            return
+        }
         player?.seek(to: CMTimeMakeWithSeconds(target, preferredTimescale: 600),
                      toleranceBefore: CMTime.zero, toleranceAfter: CMTime.zero)
         updateNowPlayingInfo()
@@ -427,11 +544,13 @@ class VideoPlayer {
     }
 
     var currentSeconds: Double {
+        if let p = ff { return ffp_position(p) }
         guard let it = item else { return 0 }
         let c = CMTimeGetSeconds(it.currentTime())
         return c.isFinite ? c : 0
     }
     var durationSeconds: Double {
+        if let p = ff { return ffp_duration(p) }
         guard let it = item else { return 0 }
         let d = CMTimeGetSeconds(it.duration)
         return d.isFinite ? d : 0
@@ -448,6 +567,7 @@ class VideoPlayer {
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
         player?.pause()
         player?.replaceCurrentItem(with: nil)
+        stopFFmpeg()
         layer.removeFromSuperlayer()
         StreamProxy.shared.closeCurrentStream()   // abort the libcurl transfer promptly
         item = nil
@@ -470,6 +590,7 @@ class VideoPlayer {
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
         player?.pause()
         player?.replaceCurrentItem(with: nil)
+        stopFFmpeg()
         StreamProxy.shared.closeCurrentStream()   // abort in-flight proxy/HLS transfers promptly
         // The failed item is dropped right here, so load() could no longer see it — remember.
         if item?.status == .failed || player?.status == .failed { needsFreshPlayer = true }
@@ -505,7 +626,7 @@ class VideoPlayer {
         // must not be mined for a resume position — report "handled" so the tick stops there.
         if recovering { return true }
         // Only streams can drop: a local file cannot, and a paused video is not expected to advance.
-        guard wantsPlayback, !isLocal, item != nil, currentVideo != nil else {
+        guard wantsPlayback, !isLocal, item != nil || ff != nil, currentVideo != nil else {
             lastTickSeconds = -1
             stalledTicks = 0
             return false
@@ -521,7 +642,9 @@ class VideoPlayer {
         // otherwise rewinding would look like a stall until playback caught up again.
         // Scaled by the playback speed: at 0.5x a healthy second of playback only advances
         // the clock half a second, which a fixed 0.25s floor would read as a stall.
-        let threshold = 0.25 * Double(min(playbackRate, 1.0))
+        // FFmpeg's clock only stops when its audio runs dry, so a slow device that plays at a
+        // fraction of real time is not taken for a dead stream.
+        let threshold = (ff != nil ? 0.05 : 0.25) * Double(min(playbackRate, 1.0))
         let moved = lastTickSeconds < 0 || abs(cur - lastTickSeconds) > threshold
         lastTickSeconds = cur
         if moved {
@@ -569,6 +692,7 @@ class VideoPlayer {
         // would make the mini bar and the player VC think playback had been closed.
         player?.pause()
         player?.replaceCurrentItem(with: nil)
+        if let f = ff { ffp_pause(f) }   // kept, so isActive holds; the reload replaces it
         StreamProxy.shared.closeCurrentStream()
         let delay = VideoPlayer.recoveryDelays[min(attempt - 1, VideoPlayer.recoveryDelays.count - 1)]
         recoveryTimer?.invalidate()
@@ -800,8 +924,15 @@ class VideoPlayer {
     }
 
     private func tick() {
+        updateStats()
+        // AVPlayer reports its end by notification; FFmpeg's end is read off its state.
+        if let f = ff, !ffEndHandled, Int(ffp_state(f)) == FFP_ENDED {
+            ffEndHandled = true
+            handlePlaybackEnded()
+            return
+        }
         if checkPlaybackAlive() { return }
-        guard item?.status == .readyToPlay else { return }
+        guard isReady else { return }
         reconcileRate()
         releaseAwakeOncePlaying()
         refreshNowPlayingElapsed()
@@ -850,7 +981,7 @@ class VideoPlayer {
         info[MPMediaItemPropertyArtist] = v.channelName
         if durationSeconds > 0 { info[MPMediaItemPropertyPlaybackDuration] = durationSeconds }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentSeconds
-        info[MPNowPlayingInfoPropertyPlaybackRate] = (player?.rate ?? 0)
+        info[MPNowPlayingInfoPropertyPlaybackRate] = currentRate
         if let img = artwork { info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(image: img) }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
@@ -858,8 +989,54 @@ class VideoPlayer {
     private func refreshNowPlayingElapsed() {
         guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo else { return }
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentSeconds
-        info[MPNowPlayingInfoPropertyPlaybackRate] = (player?.rate ?? 0)
+        info[MPNowPlayingInfoPropertyPlaybackRate] = currentRate
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    // MARK: - Measurements (player POC)
+    // One line a second to Documents/ffpoc.log for whichever engine is playing, and the same
+    // over the video when Settings > Debug > Player Stats is on. AVPlayer decodes outside the
+    // app (in mediaserverd), so for it only position, speed and the app's own CPU are known.
+    private var statsPrevPos: Double = -1
+    private var statsPrevWall: Double = 0
+    private var statsPrevCPU: Double = 0
+    private static var statsLogOpen = false
+
+    static func openStatsLog() {
+        guard !statsLogOpen else { return }
+        statsLogOpen = true
+        let docs = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0]
+        ffp_set_log_file(docs + "/ffpoc.log")
+    }
+
+    private func updateStats() {
+        var lines: [String]
+        if let p = ff {
+            var buf = [CChar](repeating: 0, count: 700)
+            ffp_stats_line(p, &buf, Int32(buf.count))
+            let line = String(cString: buf)
+            ffp_log_line("[FFmpeg] " + line)
+            lines = ["FFmpeg"] + line.components(separatedBy: " | ")
+        } else {
+            guard item != nil else { layer.statsLayer.isHidden = true; return }
+            VideoPlayer.openStatsLog()
+            var ru = rusage()
+            getrusage(RUSAGE_SELF, &ru)
+            let cpu = Double(ru.ru_utime.tv_sec) + Double(ru.ru_utime.tv_usec) / 1e6
+                    + Double(ru.ru_stime.tv_sec) + Double(ru.ru_stime.tv_usec) / 1e6
+            let wall = CFAbsoluteTimeGetCurrent(), pos = currentSeconds, dt = wall - statsPrevWall
+            let eff = statsPrevPos >= 0 && dt > 0 && isPlaying ? (pos - statsPrevPos) / dt : 0
+            let load = statsPrevWall > 0 && dt > 0 ? (cpu - statsPrevCPU) / dt * 100 : 0
+            statsPrevPos = pos; statsPrevWall = wall; statsPrevCPU = cpu
+            let line = String(format: "pos=%.2f/%.0f spd=%.2f eff=%.2fx rate=%.2f", pos, durationSeconds,
+                              Double(playbackRate), eff, Double(player?.rate ?? 0))
+                + (isReady ? " ready" : " loading")
+                + String(format: " | app cpu %.0f%% (decoding happens in mediaserverd)", load)
+            ffp_log_line("[AVPlayer] " + line)
+            lines = ["AVPlayer"] + line.components(separatedBy: " | ")
+        }
+        layer.statsLayer.isHidden = !AppSettings.playerStats
+        if AppSettings.playerStats { layer.statsLayer.string = lines.joined(separator: "\n") }
     }
 
     // MARK: - Remote control (forwarded from PlayerWindow / AppDelegate)
@@ -873,6 +1050,44 @@ class VideoPlayer {
         case .remoteControlNextTrack:       if let id = currentVideo?.id { skipToNext(from: id) }
         default: break
         }
+    }
+}
+
+// The layer every screen hosts for video. As an AVPlayerLayer it shows AVPlayer's picture;
+// frameLayer shows the FFmpeg engine's frames (handed over as images) and statsLayer the POC
+// measurements. Screens only ever set its frame, gravity and superlayer, so they carry both
+// engines without knowing which one is playing.
+final class PlayerLayer: AVPlayerLayer {
+    let frameLayer = CALayer()
+    let statsLayer = CATextLayer()
+
+    override init() {
+        super.init()
+        // No implicit animations: a new frame must replace the last one, not cross-fade 0.25s.
+        let still: [String: CAAction] = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(),
+                                         "hidden": NSNull(), "string": NSNull()]
+        frameLayer.actions = still
+        frameLayer.zPosition = 1
+        addSublayer(frameLayer)
+        statsLayer.actions = still
+        statsLayer.zPosition = 2
+        statsLayer.fontSize = 9
+        statsLayer.foregroundColor = UIColor.white.cgColor
+        statsLayer.backgroundColor = UIColor(white: 0, alpha: 0.55).cgColor
+        statsLayer.isWrapped = true
+        statsLayer.contentsScale = UIScreen.main.scale
+        statsLayer.isHidden = true
+        addSublayer(statsLayer)
+    }
+
+    override init(layer: Any) { super.init(layer: layer) }
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    override func layoutSublayers() {
+        super.layoutSublayers()
+        frameLayer.frame = bounds
+        frameLayer.contentsGravity = videoGravity == .resizeAspectFill ? .resizeAspectFill : .resizeAspect
+        statsLayer.frame = CGRect(x: 4, y: 4, width: max(bounds.width - 8, 0), height: min(80, max(bounds.height - 8, 0)))
     }
 }
 
