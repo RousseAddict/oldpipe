@@ -120,17 +120,24 @@ final class OfflineDownloader {
     // HLS bundle rather than a copied .m4a, because the DASH audio stream is FRAGMENTED MP4 and
     // iOS 6 AVPlayer cannot play fMP4 at all — and because a playlist gives an exact duration,
     // which a raw ADTS .aac would not (the scrubber and the premature-EOF watchdog need it).
+    //
+    // `dir` + `cancelKey` work exactly as in start(), and for the same reason: AudioExporter
+    // fetches a bundle that is NOT a download, into its own temp dir and under its own key.
     static func startAudio(video: Video, audioStream: VideoStream,
                            captions: [CaptionTrack] = [],
+                           into dir: String? = nil, cancelKey: String? = nil,
                            progress: @escaping (Float) -> Void,
                            completion: @escaping (Bool) -> Void) {
-        clearCancel(video.id)
+        let key = cancelKey ?? video.id
+        let dir = dir ?? DownloadManager.bundleDir(for: video.id)
+        clearCancel(key)
         queue.async {
             saveCaptions(captions, for: video.id)
-            let ok = runAudio(video: video, aStream: audioStream, progress: progress)
+            let ok = runAudio(video: video, aStream: audioStream,
+                              dir: dir, key: key, progress: progress)
             AppQueue.main.async {
-                let cancelled = isCancelled(video.id)   // as in start()
-                clearCancel(video.id)
+                let cancelled = isCancelled(key)   // as in start()
+                clearCancel(key)
                 completion(ok && !cancelled)
             }
         }
@@ -338,18 +345,18 @@ final class OfflineDownloader {
     // Audio-only twin of run(). One segment per audio fragment, so there is no video range to
     // fetch and no window to trim — see HLSTransmuxer.muxAudioSegment.
     private static func runAudio(video: Video, aStream: VideoStream,
+                                 dir: String, key: String,
                                  progress: @escaping (Float) -> Void) -> Bool {
-        let dir = DownloadManager.bundleDir(for: video.id)
         guard ensureDir(dir) else {
             DebugLog.log("Offline", "id=\(video.id) FAILED — cannot create \(dir)")
             return false
         }
 
         var aURL = aStream.url
-        var parsed = audioHead(aURL, end: aStream.indexEnd, videoId: video.id)
+        var parsed = audioHead(aURL, end: aStream.indexEnd, key: key)
         if parsed == nil, let a = refreshAudio(video.id, aItag: aStream.itag) {
             aURL = a.url
-            parsed = audioHead(aURL, end: a.indexEnd, videoId: video.id)
+            parsed = audioHead(aURL, end: a.indexEnd, key: key)
         }
         guard let info = parsed else {
             DebugLog.log("Offline", "id=\(video.id) FAILED — could not parse audio head")
@@ -378,7 +385,7 @@ final class OfflineDownloader {
         var pending: PrefetchSlot?
         defer { pending?.abandonAndDrain() }
         while seg < total {
-            if isCancelled(video.id) {
+            if isCancelled(key) {
                 DebugLog.log("Offline", "id=\(video.id) audio cancelled at seg \(seg)/\(total)")
                 return false
             }
@@ -395,7 +402,7 @@ final class OfflineDownloader {
                 return false
             }
 
-            let abort: () -> Bool = { isCancelled(video.id) }
+            let abort: () -> Bool = { isCancelled(key) }
             let stall0 = Date()
             let slot: PrefetchSlot
             if let p = pending, p.seg == seg {
@@ -412,7 +419,7 @@ final class OfflineDownloader {
             let aTime = slot.aTiming
 
             guard let blob = fetched else {
-                if isCancelled(video.id) { return false }
+                if isCancelled(key) { return false }
                 guard refreshesLeft > 0, let a = refreshAudio(video.id, aItag: aStream.itag) else {
                     DebugLog.log("Offline", "id=\(video.id) FAILED — audio seg \(seg) unfetchable")
                     return false
@@ -424,7 +431,7 @@ final class OfflineDownloader {
             }
 
             // Fetch the next segment while this one is muxed and written.
-            if seg + 1 < total, !isCancelled(video.id),
+            if seg + 1 < total, !isCancelled(key),
                fileSize((dir as NSString).appendingPathComponent("seg\(seg + 1).ts")) == 0,
                let nar = HLSTransmuxer.audioRange(info, seg: seg + 1) {
                 let next = PrefetchSlot(seg: seg + 1)
@@ -466,10 +473,10 @@ final class OfflineDownloader {
 
     // MARK: - Helpers
 
-    private static func audioHead(_ aURL: String, end: Int64, videoId: String) -> HLSStreamInfo? {
+    private static func audioHead(_ aURL: String, end: Int64, key: String) -> HLSStreamInfo? {
         guard end > 0,
               let head = CurlFetcher.rangeFetch(url: aURL, start: 0, end: end,
-                                                shouldAbort: { isCancelled(videoId) })
+                                                shouldAbort: { isCancelled(key) })
         else { return nil }
         return HLSTransmuxer.parseAudioOnly(audioHead: head)
     }

@@ -6,6 +6,10 @@ import Foundation
 // UISaveVideoAtPathToSavedPhotosAlbum only takes a single MP4/MOV file, and every download
 // above the muxed 360p is stored as index.m3u8 + seg<i>.ts (see DownloadManager).
 //
+// With `audioOnly` the same machinery writes a single-track .m4a from an audio-only bundle,
+// which is what AudioExporter hands to iTunes File Sharing. Only the container differs: the
+// AAC frames take the identical path either way.
+//
 // The input is ALWAYS a bundle written by HLSTransmuxer, so this only has to read what its
 // TSWriter produces:
 //   video — one PES per access unit, PTS+DTS, Annex-B: an AUD first, the avcC's SPS/PPS
@@ -42,7 +46,13 @@ final class MP4Remuxer {
     // compatibility probe converts only the first segment. `progress(done, total)` runs on the
     // calling thread after each segment. Returns nil on success, otherwise a short reason for
     // the debug log; a failed or cancelled run leaves no file behind.
+    //
+    // `audioOnly` reads a bundle HLSTransmuxer wrote with no video track (an audio-only
+    // download) and writes a single-track .m4a instead of a two-track .mp4. `title`/`artist`
+    // become the iTunes metadata a music player reads; without them an exported file shows up
+    // under its own file name with no artist at all.
     static func remux(bundleDir: String, outPath: String, maxSegments: Int = Int.max,
+                      audioOnly: Bool = false, title: String? = nil, artist: String? = nil,
                       progress: ((Int, Int) -> Void)? = nil,
                       shouldAbort: () -> Bool = { false }) -> String? {
         let total = min(segmentCount(bundleDir: bundleDir), maxSegments)
@@ -50,7 +60,7 @@ final class MP4Remuxer {
         let part = outPath + ".part"
         unlink(part)
         guard let file = MP4File(path: part) else { return "cannot create output" }
-        let session = RemuxSession(file: file)
+        let session = RemuxSession(file: file, audioOnly: audioOnly, title: title, artist: artist)
 
         var failure: String?
         for i in 0..<total {
@@ -132,6 +142,15 @@ private struct BoxBuilder {
         fourCC(type)
     }
 
+    // The iTunes metadata atoms are named with a single 0xA9 byte, which is NOT what "©"
+    // encodes to in UTF-8 (0xC2 0xA9) — going through fourCC would give a five-byte name and
+    // an unreadable box. They need their name as raw bytes.
+    mutating func begin(_ type: [UInt8]) {
+        open.append(bytes.count)
+        u32(0)
+        raw(type)
+    }
+
     mutating func beginFull(_ type: String, version: Int = 0, flags: Int = 0) {
         begin(type)
         u8(version); u8(flags >> 16); u8(flags >> 8); u8(flags)
@@ -165,6 +184,12 @@ private final class RemuxSession {
     private let file: MP4File
     private let mdatOffset: Int64
 
+    // No video track at all: a single soun trak, an M4A brand, and none of the video/audio
+    // alignment (there is nothing to align to).
+    private let audioOnly: Bool
+    private let title: String?
+    private let artist: String?
+
     // Read from the PAT/PMT rather than assuming TSWriter's 256/257.
     private var pmtPID = -1, videoPID = -1, audioPID = -1
 
@@ -191,12 +216,23 @@ private final class RemuxSession {
     private var segV: [UInt8] = [], segA: [UInt8] = []
     private var segVSamples: [VideoSample] = [], segAFrames: [AudioFrame] = []
 
-    init(file: MP4File) {
+    init(file: MP4File, audioOnly: Bool = false, title: String? = nil, artist: String? = nil) {
         self.file = file
+        self.audioOnly = audioOnly
+        self.title = title
+        self.artist = artist
         var b = BoxBuilder()
-        b.begin("ftyp")   // byte-for-byte what AVAssetExportSession writes
-        b.fourCC("mp42"); b.u32(1)
-        b.fourCC("isom"); b.fourCC("mp41"); b.fourCC("mp42")
+        b.begin("ftyp")
+        if audioOnly {
+            // What iTunes stamps on an .m4a. The mp42 brand below would describe the same
+            // bytes, but a music player reads the brand to decide whether a file is music,
+            // and an audio track under a video brand is treated as a video with no picture.
+            b.fourCC("M4A "); b.u32(0x200)
+            b.fourCC("M4A "); b.fourCC("mp42"); b.fourCC("isom")
+        } else {
+            b.fourCC("mp42"); b.u32(1)   // byte-for-byte what AVAssetExportSession writes
+            b.fourCC("isom"); b.fourCC("mp41"); b.fourCC("mp42")
+        }
         b.end()
         file.write(b.bytes)
         mdatOffset = file.position
@@ -222,7 +258,11 @@ private final class RemuxSession {
         if failure == nil { failure = flushVideo() }
         if failure == nil { failure = flushAudio() }
         if let f = failure { return "seg\(index): \(f)" }
-        guard !segVSamples.isEmpty else { return "seg\(index): no video" }
+        if audioOnly {
+            guard !segAFrames.isEmpty else { return "seg\(index): no audio" }
+        } else {
+            guard !segVSamples.isEmpty else { return "seg\(index): no video" }
+        }
         if !started {
             if let f = alignStart() { return "seg\(index): \(f)" }
             started = true
@@ -398,6 +438,12 @@ private final class RemuxSession {
     // exported file gets the original sync back.)
     private func alignStart() -> String? {
         guard let first = segAFrames.first else { return "no audio" }
+        // Nothing to line up against without a video track: the first audio frame IS time
+        // zero, so neither the empty edit nor the sub-frame trim below applies.
+        if audioOnly {
+            aFirstPTS = first.pts
+            return nil
+        }
         let rate = aacRates[aFreqIndex]
         let origin = segVSamples[0].dts
         aFirstPTS = first.pts
@@ -426,7 +472,8 @@ private final class RemuxSession {
     private func writeInterleaved() -> String? {
         let rate = aacRates[aFreqIndex]
         var vi = 0, ai = 0, vByte = 0, aByte = 0
-        var windowEnd = segVSamples[0].dts + 90000
+        // Audio-only has no video sample to open the first window from.
+        var windowEnd = (audioOnly ? segAFrames[0].pts : segVSamples[0].dts) + 90000
         while vi < segVSamples.count || ai < segAFrames.count {
             let v0 = vi, vb0 = vByte
             while vi < segVSamples.count && segVSamples[vi].dts < windowEnd {
@@ -478,9 +525,18 @@ private final class RemuxSession {
 
     func finish() -> String? {
         let vCount = vSizes.count, aCount = aSizes.count
-        guard vCount > 0, aCount > 0, let sps0 = sps.first, sps0.count >= 4, !pps.isEmpty
-        else { return "nothing to write" }
-        guard let dims = spsDimensions(sps0) else { return "unreadable SPS" }
+        guard aCount > 0 else { return "nothing to write" }
+        // The video track is optional. Everything it needs is gathered here so the rest of
+        // the method can stay one code path for both kinds of file.
+        var sps0: [UInt8] = []
+        var dims = (width: 0, height: 0)
+        if !audioOnly {
+            guard vCount > 0, let s = sps.first, s.count >= 4, !pps.isEmpty
+            else { return "nothing to write" }
+            guard let d = spsDimensions(s) else { return "unreadable SPS" }
+            sps0 = s
+            dims = d
+        }
 
         let mdatSize = file.position - mdatOffset
         guard mdatSize <= Int64(UInt32.max) else { return "over 4 GB" }
@@ -488,25 +544,28 @@ private final class RemuxSession {
 
         // Video timing, 90 kHz. The last frame repeats the previous frame's duration.
         var deltas = [Int64](repeating: 0, count: vCount)
-        for i in 0..<vCount {
-            if i + 1 < vCount { deltas[i] = vDTS[i + 1] - vDTS[i] }
-            else { deltas[i] = vCount > 1 ? deltas[i - 1] : 3000 }
+        var cttsShift: Int64 = 0, vMediaTime: Int64 = 0, vMediaDur: Int64 = 0, vEditDur: Int64 = 0
+        if !audioOnly {
+            for i in 0..<vCount {
+                if i + 1 < vCount { deltas[i] = vDTS[i + 1] - vDTS[i] }
+                else { deltas[i] = vCount > 1 ? deltas[i - 1] : 3000 }
+            }
+            vMediaDur = vDTS[vCount - 1] - vDTS[0] + deltas[vCount - 1]
+            var minOffset = Int64.max, minPTS = Int64.max, maxPTS = Int64.min
+            for i in 0..<vCount {
+                minOffset = min(minOffset, vPTS[i] - vDTS[i])
+                minPTS = min(minPTS, vPTS[i])
+                maxPTS = max(maxPTS, vPTS[i])
+            }
+            // ctts v0 is unsigned (negative offsets are not safe on iOS 5): shift them all up
+            // and let the edit list absorb the shift.
+            cttsShift = max(0, -minOffset)
+            vMediaTime = minPTS - vDTS[0] + cttsShift
+            // First displayed frame to the end of the last one. With B-frames this reaches past
+            // Σstts by the reorder delay — YouTube's own DASH edit list does exactly the same.
+            let vPresented = maxPTS + deltas[vCount - 1] - minPTS
+            vEditDur = vPresented * movieTimescale / 90000
         }
-        let vMediaDur = vDTS[vCount - 1] - vDTS[0] + deltas[vCount - 1]
-        var minOffset = Int64.max, minPTS = Int64.max, maxPTS = Int64.min
-        for i in 0..<vCount {
-            minOffset = min(minOffset, vPTS[i] - vDTS[i])
-            minPTS = min(minPTS, vPTS[i])
-            maxPTS = max(maxPTS, vPTS[i])
-        }
-        // ctts v0 is unsigned (negative offsets are not safe on iOS 5): shift them all up and
-        // let the edit list absorb the shift.
-        let cttsShift = max(0, -minOffset)
-        let vMediaTime = minPTS - vDTS[0] + cttsShift
-        // First displayed frame to the end of the last one. With B-frames this reaches past
-        // Σstts by the reorder delay — YouTube's own DASH edit list does exactly the same.
-        let vPresented = maxPTS + deltas[vCount - 1] - minPTS
-        let vEditDur = vPresented * movieTimescale / 90000
 
         // Audio timing, in samples.
         let rate = aacRates[aFreqIndex]
@@ -514,7 +573,7 @@ private final class RemuxSession {
         let aEmptyDur = aEmptyEdit90 * movieTimescale / 90000
         let aEditDur = (aMediaDur - aMediaTime) * movieTimescale / rate
         let aTotal = aEmptyDur + aEditDur
-        let movieDur = max(vEditDur, aTotal)
+        let movieDur = audioOnly ? aTotal : max(vEditDur, aTotal)
 
         // Structural self-check: tables that disagree play on a Mac and fail on old iOS.
         var vInChunks = 0, aInChunks = 0
@@ -522,8 +581,8 @@ private final class RemuxSession {
         for c in aChunks { aInChunks += c.count }
         let dataEnd = mdatOffset + mdatSize
         let offsetsOK = (vChunks + aChunks).allSatisfy { $0.offset >= mdatOffset + 8 && $0.offset < dataEnd }
-        guard vInChunks == vCount, aInChunks == aCount, offsetsOK,
-              vSyncNumbers.first == 1, vMediaTime >= 0, vEditDur > 0, aEditDur > 0
+        guard vInChunks == vCount, aInChunks == aCount, offsetsOK, aEditDur > 0,
+              audioOnly || (vSyncNumbers.first == 1 && vMediaTime >= 0 && vEditDur > 0)
         else { return "inconsistent sample tables" }
 
         let now = Int64(Date().timeIntervalSince1970) + 2_082_844_800   // seconds since 1904
@@ -534,53 +593,55 @@ private final class RemuxSession {
         m.u32(now); m.u32(now); m.u32(movieTimescale); m.u32(movieDur)
         m.u32(0x0001_0000); m.u16(0x0100); m.zeros(10)
         m.identityMatrix()
-        m.zeros(24); m.u32(3)
+        m.zeros(24); m.u32(audioOnly ? 2 : 3)
         m.end()
 
-        // Video track
-        m.begin("trak")
-        writeTkhd(&m, id: 1, duration: vEditDur, audio: false, width: dims.width, height: dims.height, now: now)
-        writeEdts(&m, emptyDur: 0, editDur: vEditDur, mediaTime: vMediaTime)
-        m.begin("mdia")
-        writeMdhd(&m, timescale: 90000, duration: vMediaDur, now: now)
-        writeHdlr(&m, type: "vide", name: "VideoHandler")
-        m.begin("minf")
-        m.beginFull("vmhd", flags: 1); m.zeros(8); m.end()
-        writeDinf(&m)
-        m.begin("stbl")
-        m.beginFull("stsd"); m.u32(1)
-        m.begin("avc1")
-        m.zeros(6); m.u16(1); m.zeros(16)
-        m.u16(dims.width); m.u16(dims.height)
-        m.u32(0x0048_0000); m.u32(0x0048_0000); m.u32(0)
-        m.u16(1); m.zeros(32); m.u16(0x0018); m.u16(0xFFFF)
-        m.begin("avcC")   // no High-profile extension bytes: older readers predate them
-        m.u8(1); m.u8(Int(sps0[1])); m.u8(Int(sps0[2])); m.u8(Int(sps0[3])); m.u8(0xFF)
-        m.u8(0xE0 | sps.count)
-        for s in sps { m.u16(s.count); m.raw(s) }
-        m.u8(pps.count)
-        for p in pps { m.u16(p.count); m.raw(p) }
-        m.end()
-        m.end()   // avc1
-        m.end()   // stsd
-        writeRuns(&m, "stts", deltas)
-        var offsets = [Int64](repeating: 0, count: vCount)
-        var anyOffset = false
-        for i in 0..<vCount {
-            offsets[i] = vPTS[i] - vDTS[i] + cttsShift
-            if offsets[i] != 0 { anyOffset = true }
+        // Video track (absent from an audio-only file, which carries the soun trak alone)
+        if !audioOnly {
+            m.begin("trak")
+            writeTkhd(&m, id: 1, duration: vEditDur, audio: false, width: dims.width, height: dims.height, now: now)
+            writeEdts(&m, emptyDur: 0, editDur: vEditDur, mediaTime: vMediaTime)
+            m.begin("mdia")
+            writeMdhd(&m, timescale: 90000, duration: vMediaDur, now: now)
+            writeHdlr(&m, type: "vide", name: "VideoHandler")
+            m.begin("minf")
+            m.beginFull("vmhd", flags: 1); m.zeros(8); m.end()
+            writeDinf(&m)
+            m.begin("stbl")
+            m.beginFull("stsd"); m.u32(1)
+            m.begin("avc1")
+            m.zeros(6); m.u16(1); m.zeros(16)
+            m.u16(dims.width); m.u16(dims.height)
+            m.u32(0x0048_0000); m.u32(0x0048_0000); m.u32(0)
+            m.u16(1); m.zeros(32); m.u16(0x0018); m.u16(0xFFFF)
+            m.begin("avcC")   // no High-profile extension bytes: older readers predate them
+            m.u8(1); m.u8(Int(sps0[1])); m.u8(Int(sps0[2])); m.u8(Int(sps0[3])); m.u8(0xFF)
+            m.u8(0xE0 | sps.count)
+            for s in sps { m.u16(s.count); m.raw(s) }
+            m.u8(pps.count)
+            for p in pps { m.u16(p.count); m.raw(p) }
+            m.end()
+            m.end()   // avc1
+            m.end()   // stsd
+            writeRuns(&m, "stts", deltas)
+            var offsets = [Int64](repeating: 0, count: vCount)
+            var anyOffset = false
+            for i in 0..<vCount {
+                offsets[i] = vPTS[i] - vDTS[i] + cttsShift
+                if offsets[i] != 0 { anyOffset = true }
+            }
+            if anyOffset { writeRuns(&m, "ctts", offsets) }
+            m.beginFull("stss"); m.u32(Int64(vSyncNumbers.count))
+            for n in vSyncNumbers { m.u32(n) }
+            m.end()
+            writeChunkTables(&m, sizes: vSizes, chunks: vChunks)
+            m.end(); m.end(); m.end()   // stbl, minf, mdia
+            m.end()   // trak
         }
-        if anyOffset { writeRuns(&m, "ctts", offsets) }
-        m.beginFull("stss"); m.u32(Int64(vSyncNumbers.count))
-        for n in vSyncNumbers { m.u32(n) }
-        m.end()
-        writeChunkTables(&m, sizes: vSizes, chunks: vChunks)
-        m.end(); m.end(); m.end()   // stbl, minf, mdia
-        m.end()   // trak
 
-        // Audio track
+        // Audio track — the only one in an .m4a, hence track id 1 there.
         m.begin("trak")
-        writeTkhd(&m, id: 2, duration: aTotal, audio: true, width: 0, height: 0, now: now)
+        writeTkhd(&m, id: audioOnly ? 1 : 2, duration: aTotal, audio: true, width: 0, height: 0, now: now)
         writeEdts(&m, emptyDur: aEmptyDur, editDur: aEditDur, mediaTime: aMediaTime)
         m.begin("mdia")
         writeMdhd(&m, timescale: rate, duration: aMediaDur, now: now)
@@ -614,9 +675,47 @@ private final class RemuxSession {
         m.end(); m.end(); m.end()   // stbl, minf, mdia
         m.end()   // trak
 
+        writeMeta(&m)
         m.end()   // moov
         file.write(m.bytes)
         return file.failed ? "write failed (disk full?)" : nil
+    }
+
+    // iTunes-style metadata, so an exported file shows a title and an artist in a music player
+    // instead of just its file name. moov/udta/meta/ilst, laid out the way iTunes writes it.
+    private func writeMeta(_ m: inout BoxBuilder) {
+        guard title != nil || artist != nil else { return }
+        m.begin("udta")
+        m.beginFull("meta")
+        // The metadata handler. 'appl' sits in the first 4 of the 12 reserved bytes, then an
+        // empty null-terminated name — not writeHdlr's layout, which zeroes all 12.
+        m.beginFull("hdlr")
+        m.u32(0); m.fourCC("mdir"); m.fourCC("appl"); m.zeros(8); m.u8(0)
+        m.end()
+        m.begin("ilst")
+        if let t = title { writeTextAtom(&m, "nam", t) }
+        if let a = artist {
+            writeTextAtom(&m, "ART", a)
+            // Album as well as artist: a music player groups by album, so one channel's
+            // tracks land together instead of as a pile of one-track albums.
+            writeTextAtom(&m, "alb", a)
+        }
+        writeTextAtom(&m, "too", "oldpipe")
+        m.end()   // ilst
+        m.end()   // meta
+        m.end()   // udta
+    }
+
+    private func writeTextAtom(_ m: inout BoxBuilder, _ name: String, _ value: String) {
+        let payload = Array(value.utf8)
+        let n = Array(name.utf8)
+        guard !payload.isEmpty, n.count == 3 else { return }
+        m.begin([0xA9] + n)
+        m.beginFull("data", flags: 1)   // flags 1 = the payload is UTF-8 text
+        m.u32(0)                        // locale
+        m.raw(payload)
+        m.end()   // data
+        m.end()   // the atom
     }
 
     private func writeTkhd(_ m: inout BoxBuilder, id: Int64, duration: Int64, audio: Bool,

@@ -27,11 +27,24 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var captionSizeBtn: UIButton?
     private var copyDebugBtn: UIButton?
     private var copyCrashBtn: UIButton?
+    private var copyIdHint: UILabel?
     private var didSetupUI = false
     private var loadingSpinner: UIActivityIndicatorView?
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
     private let fieldBg = UIColor(white: 0.12, alpha: 1)
+
+    // The container id is different on every install, so the path is read at runtime — there is
+    // nowhere it could be written down. Resolved once: it cannot change while the app runs.
+    private static let documentsDir: String =
+        NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first ?? ""
+
+    // Just the container directory name — the only unguessable part of the path; everything
+    // around it is fixed per OS version. Taking the parent of Documents gets it on both
+    // layouts: /var/mobile/Applications/<id>/Documents on iOS 5-7, and
+    // /var/mobile/Containers/Data/Application/<id>/Documents on iOS 8.
+    private static let containerId: String =
+        ((documentsDir as NSString).deletingLastPathComponent as NSString).lastPathComponent
 
     // The two slow bits of loading Settings — serializing every subscription/playlist to JSON
     // and scanning the on-disk thumbnail cache to sum its size — run here off the main thread
@@ -263,6 +276,31 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         copyCrashBtn = copyCrash
         y += 44 + 28
 
+        // ── App folder id ──────────────────────────────────────────────────────────
+        // A bare footer rather than a section: this is a reference you come looking for once,
+        // not a setting, and it earns its place only because the container id is unguessable
+        // and changes on every reinstall — it is what you type into Filza to find the saved
+        // M4A files and the oldpipe-launch*.log the crash hint above asks for.
+        //
+        // Tapped through a transparent button covering the three lines, NOT a
+        // UITapGestureRecognizer: the scroll view already carries one for keyboard dismissal,
+        // and stacking a second gesture over tappable content is the iOS 6 conflict this
+        // project has been bitten by before (see MiniPlayerBar).
+        if !SettingsVC.containerId.isEmpty {
+            let top = y
+            addFooterLabel("App folder", at: &y, width: contentW, pad: pad, mono: false)
+            addFooterLabel(SettingsVC.containerId, at: &y, width: contentW, pad: pad, mono: true)
+            copyIdHint = addFooterLabel("tap to copy", at: &y, width: contentW, pad: pad, mono: false)
+
+            let hit = UIButton(type: .custom)
+            hit.frame = CGRect(x: pad, y: top, width: contentW, height: y - top)
+            hit.backgroundColor = .clear
+            hit.autoresizingMask = iPadFlexWidth
+            hit.addTarget(self, action: #selector(copyIdTapped), for: .touchUpInside)
+            scrollView.addSubview(hit)
+            y += 26
+        }
+
         scrollView.contentSize = CGSize(width: w, height: y + 80)   // +80 covers mini player bar
     }
 
@@ -349,6 +387,18 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         flash(copyCrashBtn, "Copied \u{2713}", revertTo: "Copy Crash Log")
     }
 
+    // Copies exactly what is on screen — the id, not the whole path. Tapping something that
+    // shows an id and silently getting a path instead is the kind of mismatch that wastes a
+    // paste. The hint line doubles as the confirmation, so the footer needs no extra chrome.
+    @objc private func copyIdTapped() {
+        UIPasteboard.general.string = SettingsVC.containerId
+        copyIdHint?.text = "copied \u{2713}"
+        let t = Timer(timeInterval: 1.5, target: SettingsBlockTarget { [weak self] in
+            self?.copyIdHint?.text = "tap to copy"
+        }, selector: #selector(SettingsBlockTarget.fire), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+    }
+
     @objc private func clearDebugTapped() {
         DebugLog.clear()
         debugCountLabel.text = "0 log entries"
@@ -426,6 +476,25 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         l.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(l)
         y += rowH + 12
+    }
+
+    // One line of the footer at the bottom of the form. `mono` is the id itself — Courier so
+    // the hex groups line up and 0/O are tellable apart; the lines around it are the form's
+    // dimmest grey so the block reads as a footnote, not a control.
+    @discardableResult
+    private func addFooterLabel(_ text: String, at y: inout CGFloat, width: CGFloat,
+                                pad: CGFloat, mono: Bool) -> UILabel {
+        let h: CGFloat = mono ? 16 : 14
+        let l = UILabel(frame: CGRect(x: pad, y: y, width: width, height: h))
+        l.backgroundColor = .clear
+        l.textColor = UIColor(white: mono ? 0.7 : 0.45, alpha: 1)
+        l.font = mono ? (UIFont(name: "Courier", size: 11) ?? UIFont.systemFont(ofSize: 11))
+                      : UIFont.systemFont(ofSize: 11)
+        l.autoresizingMask = iPadFlexWidth
+        l.text = text
+        scrollView.addSubview(l)
+        y += h + 2
+        return l
     }
 
     private func addHeader(_ text: String, at y: CGFloat, width: CGFloat, pad: CGFloat) -> CGFloat {
