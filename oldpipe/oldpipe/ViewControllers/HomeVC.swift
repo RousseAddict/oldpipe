@@ -2,7 +2,7 @@ import UIKit
 
 // MARK: - HomeVC
 // Root VC. A feed of the latest videos from subscribed channels.
-// Top-right "Search" button pushes SearchVC. Top-left "Menu" opens a slide-in
+// Top-right Search icon pushes SearchVC. Top-left menu icon opens a slide-in
 // side menu with Subscriptions + Downloads. Empty state when no subscriptions.
 //
 // Also serves as a channel GROUP feed: init(groupId:) narrows every feed path to that
@@ -124,11 +124,12 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             title = ChannelGroupManager.group(id: gid)?.name ?? "Group"
         } else {
             title = "oldpipe"
+            // Phosphor icons, matching the Home / Search items on the other pages (QuickExits).
             navigationItem.leftBarButtonItem = UIBarButtonItem(
-                title: "Menu", style: .plain, target: self, action: #selector(toggleMenu))
+                image: UIImage(named: "menu"), style: .plain, target: self, action: #selector(toggleMenu))
         }
         navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "Search", style: .plain, target: self, action: #selector(showSearch))
+            image: UIImage(named: "search"), style: .plain, target: self, action: #selector(showSearch))
     }
 
     override func viewDidAppear(_ animated: Bool) {

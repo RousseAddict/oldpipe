@@ -40,7 +40,8 @@ class YTPlaylistVC: UIViewController, UITableViewDataSource, UITableViewDelegate
         title = playlistTitle.isEmpty ? "Playlist" : playlistTitle
         view.backgroundColor = bg
         saveItem = UIBarButtonItem(title: "Save", style: .plain, target: self, action: #selector(saveTapped))
-        navigationItem.rightBarButtonItem = saveItem
+        // No Search here: Save, Home and Search would squeeze the playlist title off the bar.
+        navigationItem.rightBarButtonItems = [saveItem] + QuickExits.items(search: false)
     }
 
     override func viewDidAppear(_ animated: Bool) {

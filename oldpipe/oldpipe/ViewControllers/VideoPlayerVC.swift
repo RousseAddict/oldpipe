@@ -9,7 +9,7 @@ import AVFoundation
 
 class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegate {
 
-    private var video: Video
+    private(set) var video: Video   // read by Navigator to find this page in the stack
     private var streams: [VideoStream] = []
     private var didRequestStreams = false
     // True while a player request is in flight. An empty `streams` alone can't tell "still
@@ -223,6 +223,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         super.viewDidLoad()
         title = "Video"
         view.backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.05, alpha: 1)
+        navigationItem.rightBarButtonItems = QuickExits.items()
     }
 
     // Show the cast glyph (idle, or active where a tap stops the session); stops the spinner.

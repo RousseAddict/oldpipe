@@ -7,6 +7,11 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
     private var didSetupUI = false
     private var isLoading = false
 
+    // Set by Navigator's Search button. An empty page brings the keyboard up; one still
+    // holding results is shown as it was, keyboard down, since iOS 6 has no way to put the
+    // keyboard away by scrolling the results.
+    var focusOnAppear = false
+
     // lazy so creation is deferred to viewDidAppear — avoids work during push animation
     private lazy var searchBar: UISearchBar = {
         let sb = UISearchBar()
@@ -48,9 +53,14 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard !didSetupUI else { return }
-        didSetupUI = true
-        setupUI()
+        if !didSetupUI {
+            didSetupUI = true
+            setupUI()
+        }
+        if focusOnAppear {
+            focusOnAppear = false
+            if results.isEmpty && !isLoading { searchBar.becomeFirstResponder() }
+        }
     }
 
     private func setupUI() {

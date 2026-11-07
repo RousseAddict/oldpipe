@@ -76,6 +76,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         super.viewDidLoad()
         title = channelName.isEmpty ? "Channel" : channelName
         view.backgroundColor = bg
+        navigationItem.rightBarButtonItems = QuickExits.items()
     }
 
     override func viewDidAppear(_ animated: Bool) {
