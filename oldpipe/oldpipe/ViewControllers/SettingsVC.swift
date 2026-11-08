@@ -249,6 +249,12 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
                      action: #selector(debugSwitchChanged(_:)),
                      at: &y, screenWidth: w, width: contentW, pad: pad)
 
+        addSwitchRow(subtitle: "Experiment: plays a downloaded 480p-1080p video as one MP4 file instead of HLS, to test playback speed. Converts on first play, using as much space as the download.",
+                     label: "Play HD Downloads as MP4",
+                     isOn: AppSettings.mp4SpeedTestEnabled,
+                     action: #selector(mp4TestSwitchChanged(_:)),
+                     at: &y, screenWidth: w, width: contentW, pad: pad)
+
         debugCountLabel = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 20))
         debugCountLabel.backgroundColor = .clear
         debugCountLabel.textColor = UIColor(white: 0.7, alpha: 1)
@@ -407,6 +413,10 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
     @objc private func debugSwitchChanged(_ sender: UISwitch) {
         AppSettings.debugLoggingEnabled = sender.isOn
+    }
+
+    @objc private func mp4TestSwitchChanged(_ sender: UISwitch) {
+        AppSettings.mp4SpeedTestEnabled = sender.isOn
     }
 
     @objc private func copyDebugTapped() {

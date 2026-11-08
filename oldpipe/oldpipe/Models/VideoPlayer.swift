@@ -276,6 +276,7 @@ class VideoPlayer {
         lastTickSeconds = -1
         stalledTicks = 0
         rateZeroTicks = 0
+        speedWindow = nil
         if !recovering { recoveryAttempts = 0 }
         updateNowPlayingInfo()
         startTicker()
@@ -331,6 +332,7 @@ class VideoPlayer {
                 p.seek(to: CMTimeMakeWithSeconds(pendingResume, preferredTimescale: 600))
             }
             if let v = currentVideo { HistoryManager.record(v) }
+            DebugLog.log("VideoPlayer", "rate caps on ready: \(rateCapsText())")
         }
         wantsPlayback = true
         p.rate = effectiveRate
@@ -388,6 +390,9 @@ class VideoPlayer {
     // 1080p, where reconcileRate never fired). So the fast side is allowed up to 2.0 and the
     // flag is consulted only past it. canPlaySlowForward IS the right property for the sub-1.0
     // options, so that one still decides.
+    // QA1772 only holds from iOS 7 on, though: before it, canPlayFastForward covers EVERY rate
+    // above 1.0 (AVPlayerItem.h), so on iOS 5/6 a false is a real refusal. Not acted on yet —
+    // the "rate caps" debug lines below record what each item says until a device settles it.
     // Before the item is ready neither flag is meaningful, so assume it is allowed.
     func supportsRate(_ rate: Float) -> Bool {
         guard let it = item, it.status == .readyToPlay else { return true }
@@ -409,6 +414,7 @@ class VideoPlayer {
 
     @discardableResult
     func setPlaybackRate(_ rate: Float) -> Bool {
+        DebugLog.log("VideoPlayer", "speed " + String(format: "%.2f", rate) + " asked, rate caps: \(rateCapsText())")
         guard supportsRate(rate) else {
             DebugLog.log("VideoPlayer", "rate \(rate) unsupported by item (hls=\(lastLoadWasHLS))")
             return false
@@ -418,6 +424,7 @@ class VideoPlayer {
         // a paused player would start playback behind the user's back.
         if isPlaying { player?.rate = effectiveRate }
         updateNowPlayingInfo()
+        measureSpeed()
         return true
     }
 
@@ -450,6 +457,7 @@ class VideoPlayer {
         p.rate = VideoPlayer.boostRate
         DebugLog.log("VideoPlayer", "boost on (from \(playbackRate), hls=\(lastLoadWasHLS))")
         updateNowPlayingInfo()
+        measureSpeed()
         return true
     }
 
@@ -462,6 +470,7 @@ class VideoPlayer {
         if isPlaying { player?.rate = playbackRate }
         DebugLog.log("VideoPlayer", "boost off (released)")
         updateNowPlayingInfo()
+        measureSpeed()
     }
 
     // The player ends the boost by itself. Quietly: no alert, the chosen speed is untouched,
@@ -471,6 +480,7 @@ class VideoPlayer {
         rateZeroTicks = 0
         DebugLog.log("VideoPlayer", "boost dropped (\(why), hls=\(lastLoadWasHLS))")
         updateNowPlayingInfo()
+        measureSpeed()
         onBoostEnded?()
     }
 
@@ -520,6 +530,52 @@ class VideoPlayer {
         rateZeroTicks = 0
         updateNowPlayingInfo()
         onRateReverted?()
+    }
+
+    // What the current item says about off-speed playback, for the debug log. Each flag is
+    // asked only if the item answers to it: iOS 5.1.1 has already shown it lacks
+    // canPlaySlowForward, so nothing here is sent blind on any target.
+    private func rateCapsText() -> String {
+        guard let it = item else { return "no item" }
+        let fast = it.responds(to: #selector(getter: AVPlayerItem.canPlayFastForward))
+            ? (it.canPlayFastForward ? "yes" : "no") : "n/a"
+        let slow = it.responds(to: #selector(getter: AVPlayerItem.canPlaySlowForward))
+            ? (it.canPlaySlowForward ? "yes" : "no") : "n/a"
+        var s = "canPlayFastForward=\(fast) canPlaySlowForward=\(slow) hls=\(lastLoadWasHLS) local=\(isLocal) iOS \(UIDevice.current.systemVersion)"
+        // An HLS asset exposes no tracks, so only a file says what it holds.
+        if let track = it.asset.tracks(withMediaType: AVMediaType.video).first {
+            s += String(format: " video=%.0fx%.0f@%.2ffps", Double(track.naturalSize.width),
+                        Double(track.naturalSize.height), Double(track.nominalFrameRate))
+        }
+        return s
+    }
+
+    // player.rate only says what was accepted. Whether the item really plays that fast is what
+    // the media clock does against the wall clock, so while an off-speed rate is in effect (a
+    // hold to 2x included) this logs the ratio every 5 s: a healthy 2x reads ~2.0, and stalls
+    // count against it. A seek inside a window skews that one line.
+    private var speedWindow: (wall: CFAbsoluteTime, media: Double, asked: Float)?
+    private static let speedWindowSeconds: CFAbsoluteTime = 5
+
+    // Runs every tick, and right after anything that changes the asked speed, which closes the
+    // window there: a hold is shorter than 5 s, and a window spanning two speeds reads neither.
+    private func measureSpeed() {
+        let asked: Float = (wantsPlayback && player != nil) ? effectiveRate : 1.0
+        let now = CFAbsoluteTimeGetCurrent(), media = currentSeconds
+        if let w = speedWindow {
+            let wall = now - w.wall
+            let cut = w.asked != asked
+            guard cut || wall >= VideoPlayer.speedWindowSeconds else { return }
+            if wall >= 1 {
+                let moved = media - w.media
+                let end = cut ? "speed changed" : String(format: "player=%.2f", Double(player?.rate ?? 0))
+                DebugLog.log("VideoPlayer", String(format: "speed check asked=%.2f media/wall=%.2f (%.1fs in %.1fs) ",
+                                                   Double(w.asked), moved / wall, moved, wall)
+                             + end + " hls=\(lastLoadWasHLS)")
+            }
+            speedWindow = nil
+        }
+        if asked != 1.0 { speedWindow = (now, media, asked) }
     }
 
     func seek(toFraction f: Double) {
@@ -1007,6 +1063,7 @@ class VideoPlayer {
         guard item?.status == .readyToPlay else { return }
         if checkStuckAtEnd() { return }
         reconcileRate()
+        measureSpeed()
         releaseAwakeOncePlaying()
         refreshNowPlayingElapsed()
         saveResumeThrottled()

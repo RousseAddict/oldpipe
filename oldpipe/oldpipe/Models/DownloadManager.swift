@@ -133,6 +133,7 @@ class DownloadManager {
     private static func removeFiles(_ videoId: String) {
         try? FileManager.default.removeItem(atPath: filePath(for: videoId))
         try? FileManager.default.removeItem(atPath: bundleDir(for: videoId))
+        MP4SpeedTest.remove(videoId)   // a flat copy of the bundle just deleted
     }
 
     static func remove(_ videoId: String) {
@@ -420,5 +421,73 @@ class DownloadManager {
 
     private static func rawList() -> [[String: Any]] {
         return (UserDefaults.standard.array(forKey: defaultsKey) as? [[String: Any]]) ?? []
+    }
+}
+
+// MARK: - MP4SpeedTest (experiment)
+// Before iOS 7, AVPlayerItem.canPlayFastForward decides whether an item may play above 1.0 at
+// all (AVPlayerItem.h; iOS 7 opened 1.0...2.0 to every ready item). On iOS 5/6 speed works at
+// 360p and not above it, but the two differ in container as well as resolution: 360p is one
+// progressive MP4, every higher tier is local HLS. This separates the two without touching the
+// streaming path. A finished HD download's bundle is remuxed by MP4Remuxer — the original DASH
+// samples, nothing re-encoded — into one flat .mp4, and the video page plays that file while
+// Settings > Debug > "Play HD Downloads as MP4" is on. Switched off, the same download plays as
+// HLS again, so both forms of the same media can be compared on one device.
+enum MP4SpeedTest {
+
+    // Caches, not Documents: a test copy the OS may purge, and nothing iTunes should back up.
+    private static let dir: String = {
+        let caches = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true)[0]
+        return (caches as NSString).appendingPathComponent("mp4-speed-test")
+    }()
+
+    // One conversion at a time, like PhotoExporter's. Serial is also what makes the
+    // exists-or-convert check below safe against a second tap on a reopened page.
+    private static let queue = AppQueue(label: "com.oldpipe.mp4speedtest")
+
+    private static func path(for videoId: String) -> String {
+        return (dir as NSString).appendingPathComponent("\(videoId).mp4")
+    }
+
+    // Whether the video page takes this path: the switch is on and the download is a finished
+    // video bundle. A 360p download already is a flat .mp4, and an audio-only one has no
+    // picture to test.
+    static func applies(to videoId: String) -> Bool {
+        return AppSettings.mp4SpeedTestEnabled
+            && DownloadManager.isDownloaded(videoId)
+            && DownloadManager.kind(for: videoId) == .hls
+            && !DownloadManager.isAudioOnly(videoId)
+    }
+
+    // The flat copy's file URL, converting the bundle first when there is none yet. Both
+    // callbacks run on the main thread; done(nil) = the conversion failed, and the caller
+    // plays the bundle as usual. A conversion keeps going if the page is left, so the file is
+    // there the next time the video is opened.
+    static func prepare(_ videoId: String, progress: @escaping (Int) -> Void,
+                        done: @escaping (URL?) -> Void) {
+        let bundle = DownloadManager.bundleDir(for: videoId)
+        let out = path(for: videoId)
+        queue.async {
+            if FileManager.default.fileExists(atPath: out) {
+                AppQueue.main.async { done(URL(fileURLWithPath: out)) }
+                return
+            }
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                     attributes: nil)
+            let started = Date()
+            let reason = MP4Remuxer.remux(bundleDir: bundle, outPath: out, progress: { n, total in
+                let pct = n * 100 / max(total, 1)
+                AppQueue.main.async { progress(pct) }
+            })
+            let ms = Int(Date().timeIntervalSince(started) * 1000)
+            DebugLog.log("MP4Test", "id=\(videoId) remux \(reason ?? "ok") in \(ms)ms")
+            AppQueue.main.async { done(reason == nil ? URL(fileURLWithPath: out) : nil) }
+        }
+    }
+
+    // With its download (DownloadManager.removeFiles): a deleted or re-downloaded video must
+    // not keep playing an old copy.
+    static func remove(_ videoId: String) {
+        unlink(path(for: videoId))
     }
 }

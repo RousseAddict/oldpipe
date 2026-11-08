@@ -228,6 +228,19 @@ enum AppSettings {
             UserDefaults.standard.synchronize()
         }
     }
+
+    private static let mp4SpeedTestKey = "mp4_speed_test_enabled"
+
+    // Experiment, off by default: plays a >360p download as one flat .mp4 instead of its HLS
+    // bundle (see MP4SpeedTest), to find out whether iOS 5/6 AVPlayer will run the same HD
+    // media off-speed once it is no longer HLS.
+    static var mp4SpeedTestEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: mp4SpeedTestKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: mp4SpeedTestKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
 }
 
 @UIApplicationMain

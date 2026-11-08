@@ -3687,6 +3687,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
 
+        // Experiment: an HD download played as one flat .mp4 instead of its bundle.
+        if MP4SpeedTest.applies(to: video.id) {
+            playAsFlatMP4()
+            return
+        }
+
         // Offline copy takes priority. A progressive download plays off disk; an HLS bundle
         // is served back through StreamProxy (AVPlayer won't open a file:// playlist) — still
         // local either way, so isLocal: true and no reconnect watchdog.
@@ -4071,6 +4077,31 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
         observeDownload()
+    }
+
+    // MP4SpeedTest: converted on first play, then the file plays off disk like a 360p download.
+    // A failed conversion falls back to the bundle, so the switch can never make a download
+    // unplayable.
+    private func playAsFlatMP4() {
+        let id = video.id
+        playBtn?.isHidden = true
+        statusLabel?.text = "Converting to MP4..."
+        statusLabel?.isHidden = false
+        showSpinner()
+        MP4SpeedTest.prepare(id, progress: { [weak self] pct in
+            guard let self = self, self.video.id == id else { return }
+            self.statusLabel?.text = "Converting to MP4 \(pct)%"
+        }, done: { [weak self] url in
+            guard let self = self, self.video.id == id else { return }
+            if let url = url ?? DownloadManager.playbackURL(for: id) {
+                self.statusLabel?.text = "Loading..."
+                self.startPlayback(url: url, isLocal: true)
+            } else {
+                self.hideSpinner()
+                self.statusLabel?.text = "Playback failed \u{2022} tap to retry"
+                self.playBtn?.isHidden = false
+            }
+        })
     }
 
     // Load a URL into the singleton, attach the shared layer, and play once ready.
