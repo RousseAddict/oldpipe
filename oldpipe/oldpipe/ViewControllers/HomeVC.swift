@@ -21,6 +21,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     private var tableView: UITableView!
     private var statusLabel: UILabel!
+    private var emptyView: FeedEmptyView?        // no channels to draw from (see showNoChannels)
     #if !IOS5_TARGET
     private var refreshControl: UIRefreshControl?
     #endif
@@ -51,6 +52,7 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
     private var shortsLoading = false
     private var shortsTable: UITableView?
     private var shortsStatus: UILabel?
+    private var shortsEmptyView: FeedEmptyView?
     private var shortsReloadTimer: Timer?
 
     // Continuous (infinite-scroll) Shorts pagination. The home Shorts feed is MERGED across
@@ -336,13 +338,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         if subs.isEmpty {
             shorts = []
             shortsBuiltChannelIds = []
-            shortsStatus?.text = groupId != nil
-                ? "No channels in this group."
-                : "No subscriptions yet.\nSubscribe to channels to see their Shorts."
-            shortsStatus?.isHidden = false
+            showNoShortsChannels(true)
             shortsTable?.reloadData()
             return
         }
+        showNoShortsChannels(false)
 
         if shorts.isEmpty || ids != shortsBuiltChannelIds {
             shortsBuiltChannelIds = ids
@@ -451,7 +451,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         }
         shortsSeen = seen
         shorts = merged
-        if merged.isEmpty {
+        if merged.isEmpty && subs.isEmpty {
+            showNoShortsChannels(true)   // the last channel went while a load was in flight
+        } else if merged.isEmpty {
             shortsStatus?.text = shortsLoading ? "Loading shorts..." : "No recent Shorts from your subscriptions."
             shortsStatus?.isHidden = false
         } else {
@@ -672,13 +674,11 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         if subs.isEmpty {
             videos = []
             builtChannelIds = []
-            statusLabel?.text = groupId != nil
-                ? "No channels in this group."
-                : "No subscriptions yet.\nTap Search, open a channel, and tap Subscribe."
-            statusLabel?.isHidden = false
+            showNoChannels(true)
             tableView?.reloadData()
             return
         }
+        showNoChannels(false)
 
         // Render instantly from the per-channel cache (any age) when the view is empty or
         // the sub set changed — e.g. a channel was just added: every other channel shows at
@@ -795,7 +795,9 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         // on every comparison, and compared texts captured at different times.
         merged.sort { $0.publishedTimestamp > $1.publishedTimestamp }
         videos = merged
-        if merged.isEmpty {
+        if merged.isEmpty && subs.isEmpty {
+            showNoChannels(true)   // the last channel went while a load was in flight
+        } else if merged.isEmpty {
             let emptyText = groupId != nil
                 ? "No recent videos from this group."
                 : "No recent videos from your subscriptions."
@@ -805,6 +807,51 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             statusLabel?.isHidden = true
         }
         tableView?.reloadData()
+    }
+
+    // MARK: - No-channels screen
+    // With no channels to draw from, the feed shows a centred screen with the app's mark and
+    // (on the root feed) a way into Search, in place of the status label. Every other empty or
+    // loading state — channels with no recent videos, a load in progress — stays a line of text.
+
+    private func showNoChannels(_ show: Bool) {
+        emptyView = placeEmptyView(emptyView, shown: show, over: tableView, shorts: false)
+        if show { statusLabel?.isHidden = true }
+    }
+
+    private func showNoShortsChannels(_ show: Bool) {
+        shortsEmptyView = placeEmptyView(shortsEmptyView, shown: show, over: shortsTable, shorts: true)
+        if show { shortsStatus?.isHidden = true }
+    }
+
+    // Built on first use, then only shown and hidden. Resized to the table every time it is
+    // shown, since the Shorts tab bar changes the table's height.
+    private func placeEmptyView(_ current: FeedEmptyView?, shown show: Bool,
+                                over table: UITableView?, shorts: Bool) -> FeedEmptyView? {
+        guard show, let table = table else {
+            current?.isHidden = true
+            return current
+        }
+        let v = current ?? makeEmptyView(shorts: shorts)
+        if v.superview == nil { table.addSubview(v) }
+        v.frame = CGRect(x: 0, y: 0, width: table.bounds.width, height: table.bounds.height)
+        v.isHidden = false
+        return v
+    }
+
+    private func makeEmptyView(shorts: Bool) -> FeedEmptyView {
+        if groupId != nil {
+            return FeedEmptyView(title: "This group is empty",
+                                 body: "Channels you add to this group will show up here.",
+                                 buttonTitle: nil)
+        }
+        let v = FeedEmptyView(title: "Your feed is empty",
+                              body: shorts
+                                ? "Subscribe to a few channels and their newest Shorts will show up here."
+                                : "Subscribe to a few channels and their newest videos will show up here.",
+                              buttonTitle: "Find channels")
+        v.onButton = { [weak self] in self?.showSearch() }
+        return v
     }
 
     // MARK: - UITableViewDataSource
@@ -1196,5 +1243,125 @@ private class ShortGridCell: UITableViewCell {
         let cardH = thumbH + 6 + 34
         left.frame = CGRect(x: pad, y: pad, width: cardW, height: cardH)
         right.frame = CGRect(x: pad * 2 + cardW, y: pad, width: cardW, height: cardH)
+    }
+}
+
+// MARK: - No-channels screen (see HomeVC.showNoChannels)
+// Full-size over its feed table and clear, so it can centre its content itself in the space
+// above the mini player bar: the app's mark, a title, a line of explanation and an optional
+// button. Not a separate file — mirrors the ShortGridCell pattern of a VC-local view.
+
+private class FeedEmptyView: UIView {
+    private let mark = LogoMarkView()
+    private let titleLabel = UILabel()
+    private let bodyLabel = UILabel()
+    private var button: UIButton?
+    var onButton: (() -> Void)?
+
+    private static let markSize: CGFloat = 88
+    private static let buttonSize = CGSize(width: 200, height: 44)
+    private static let miniPlayerH: CGFloat = 60
+
+    init(title: String, body: String, buttonTitle: String?) {
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        autoresizingMask = iPadFlexWidthHeight
+        addSubview(mark)
+
+        titleLabel.backgroundColor = .clear
+        titleLabel.textColor = UIColor(white: 0.95, alpha: 1)
+        titleLabel.font = UIFont.boldSystemFont(ofSize: 20)
+        titleLabel.textAlignment = .center
+        titleLabel.text = title
+        addSubview(titleLabel)
+
+        bodyLabel.backgroundColor = .clear
+        bodyLabel.textColor = UIColor(white: 0.55, alpha: 1)
+        bodyLabel.font = UIFont.systemFont(ofSize: 15)
+        bodyLabel.textAlignment = .center
+        bodyLabel.numberOfLines = 0
+        bodyLabel.text = body
+        addSubview(bodyLabel)
+
+        if let t = buttonTitle {
+            let b = UIButton(type: .custom)
+            b.layer.cornerRadius = 6   // no clipsToBounds: the layer's own background rounds
+            b.backgroundColor = Theme.accent
+            b.setImage(UIImage(named: "search"), for: .normal)
+            b.setTitle(t, for: .normal)
+            b.setTitleColor(.white, for: .normal)
+            b.setTitleColor(UIColor(white: 1, alpha: 0.6), for: .highlighted)
+            b.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+            // 8pt between the glyph and the title, the pair still centred as one.
+            b.imageEdgeInsets = UIEdgeInsets(top: 0, left: -4, bottom: 0, right: 4)
+            b.titleEdgeInsets = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: -4)
+            b.addTarget(self, action: #selector(buttonTapped), for: .touchUpInside)
+            addSubview(b)
+            button = b
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let w = bounds.width
+        let textW = min(w - 64, 280)
+        let markS = FeedEmptyView.markSize
+        let titleH = ceil(titleLabel.font.lineHeight)
+        let bodyH = ceil(bodyLabel.sizeThatFits(CGSize(width: textW, height: .greatestFiniteMagnitude)).height)
+        let btn = FeedEmptyView.buttonSize
+        var total = markS + 20 + titleH + 8 + bodyH
+        if button != nil { total += 28 + btn.height }
+
+        // Centred above the mini player bar, then lifted a little: dead centre reads low.
+        let avail = bounds.height - FeedEmptyView.miniPlayerH
+        var y = max(16, floor((avail - total) / 2) - 16)
+        mark.frame = CGRect(x: floor((w - markS) / 2), y: y, width: markS, height: markS)
+        y += markS + 20
+        titleLabel.frame = CGRect(x: floor((w - textW) / 2), y: y, width: textW, height: titleH)
+        y += titleH + 8
+        bodyLabel.frame = CGRect(x: floor((w - textW) / 2), y: y, width: textW, height: bodyH)
+        y += bodyH + 28
+        button?.frame = CGRect(x: floor((w - btn.width) / 2), y: y, width: btn.width, height: btn.height)
+    }
+
+    @objc private func buttonTapped() { onButton?() }
+}
+
+// The play glyph from the app icon in the accent colour, on a faint disc. Drawn from the icon
+// SVG's own path (assets/oldpipe_icon_ios.svg), so it needs no image asset and stays sharp at
+// any scale.
+private class LogoMarkView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        contentMode = .redraw
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    override func draw(_ rect: CGRect) {
+        let s = min(bounds.width, bounds.height)
+        UIColor(white: 1, alpha: 0.06).setFill()
+        UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: s, height: s)).fill()
+
+        // The SVG draws the glyph in a 192-unit box whose disc spans 8...184; map that disc
+        // onto ours.
+        let k = s / 176
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { return CGPoint(x: (x - 8) * k, y: (y - 8) * k) }
+        let glyph = UIBezierPath()
+        glyph.move(to: p(62.04, 154.85))
+        glyph.addLine(to: p(79.89, 143.47))
+        glyph.addLine(to: p(80.26, 68.07))
+        glyph.addLine(to: p(126.18, 95.33))
+        glyph.addLine(to: p(92.95, 114.50))
+        glyph.addLine(to: p(92.95, 136.42))
+        glyph.addLine(to: p(161.98, 95.33))
+        glyph.addLine(to: p(61.94, 36.54))
+        glyph.close()
+        Theme.accent.setFill()
+        glyph.fill()
     }
 }
