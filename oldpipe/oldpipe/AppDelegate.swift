@@ -240,8 +240,32 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // Emulator test hook. Only the iOS 5 build registers the oldpipe:// scheme (build-ios5.sh),
     // so `uiopen oldpipe://history/0` over SSH opens History's newest video the way a tap
     // would, which lets a video-page crash be chased with nobody at the screen.
+    //   oldpipe://snapshot              the screen as Documents/snapshot.png
+    //   oldpipe://scroll/<y>, oldpipe://back   scroll the top page / pop it
+    //   oldpipe://cast/start/<ip>       cast History's newest video to a receiver at <ip>
+    //   oldpipe://cast/<toggle|stop|next|queue>, cast/seek/<s>, cast/volume/<0-1>
+    // The cast ones drive CastController the way the page's buttons do, against a stand-in
+    // receiver, since the emulator can neither tap nor reach a real Chromecast.
     func application(_ application: UIApplication, open url: URL,
                      sourceApplication: String?, annotation: Any) -> Bool {
+        if url.host == "snapshot" {
+            saveSnapshot()
+            return true
+        }
+        if url.host == "scroll", let y = Double(url.lastPathComponent),
+           let nav = window?.rootViewController as? UINavigationController,
+           let sv = nav.topViewController?.view.subviews.first(where: { $0 is UIScrollView }) as? UIScrollView {
+            sv.setContentOffset(CGPoint(x: 0, y: y), animated: false)
+            return true
+        }
+        if url.host == "back" {
+            (window?.rootViewController as? UINavigationController)?.popViewController(animated: false)
+            return true
+        }
+        if url.host == "cast" {
+            castHook(Array(url.pathComponents.dropFirst()))   // drop the leading "/"
+            return true
+        }
         guard url.host == "history", let n = Int(url.lastPathComponent) else { return true }
         let videos = HistoryManager.all()
         guard n >= 0, n < videos.count,
@@ -249,6 +273,38 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         CrashLog.mark("url: opening history #\(n) \(videos[n].id)")
         nav.openVideo(videos[n])
         return true
+    }
+
+    private func saveSnapshot() {
+        guard let win = window else { return }
+        UIGraphicsBeginImageContextWithOptions(win.bounds.size, true, 0)
+        defer { UIGraphicsEndImageContext() }
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        win.layer.render(in: ctx)
+        guard let img = UIGraphicsGetImageFromCurrentImageContext(),
+              let png = img.pngData() else { return }
+        let docs = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0]
+        (png as NSData).write(toFile: docs + "/snapshot.png", atomically: true)
+    }
+
+    private func castHook(_ args: [String]) {
+        let cast = CastController.shared
+        CrashLog.mark("url: cast \(args.joined(separator: " "))")
+        switch args.first ?? "" {
+        case "start":
+            guard args.count > 1, let v = HistoryManager.all().first else { return }
+            cast.cast(v, on: CastDevice(name: "FakeTV", host: args[1], port: 8009))
+        case "queue":
+            // History as a playlist queue, the way PlaylistDetailVC seeds one: autoplay and
+            // Next then walk it.
+            VideoPlayer.shared.setQueue(HistoryManager.all(), startIndex: 0)
+        case "toggle": cast.togglePlayPause()
+        case "stop": cast.stop()
+        case "next": if let v = cast.video { cast.skipToNext(from: v.id) }
+        case "seek": if args.count > 1, let s = Double(args[1]) { cast.seek(to: s) }
+        case "volume": if args.count > 1, let l = Double(args[1]) { cast.setVolume(l) }
+        default: break
+        }
     }
     #endif
 
@@ -261,6 +317,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         DebugLog.log("App", "applicationDidBecomeActive — checking proxy listener + reactivating audio session")
         StreamProxy.shared.resetIfDead()
         VideoPlayer.shared.reactivateSession()
+        // The Chromecast connection rarely survives a suspension: rejoin what the TV is playing
+        // (or, on a cold launch, the cast that was on when iOS killed the app).
+        CastController.shared.appDidBecomeActive()
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        CastController.shared.appDidEnterBackground()
     }
 
     // Chain-endpoint fallback for remote-control events (PlayerWindow handles them first).

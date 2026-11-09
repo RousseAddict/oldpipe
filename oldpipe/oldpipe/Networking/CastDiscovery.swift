@@ -9,6 +9,9 @@ struct CastDevice {
     let name: String
     let host: String   // dotted IPv4
     let port: Int
+    // The Bonjour instance name ("Chromecast-1a2b…"), which is what a removal reports; `name`
+    // is the friendly one from the TXT record.
+    var serviceName = ""
 }
 
 class CastDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
@@ -25,8 +28,10 @@ class CastDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
         browser.delegate = self
     }
 
+    // Devices found by an earlier browse are kept, so the cast picker can open at once on a
+    // page that has only just started browsing. One that has since gone away is only noticed
+    // when connecting to it fails.
     func start() {
-        devices.removeAll()
         resolving.removeAll()
         browser.searchForServices(ofType: "_googlecast._tcp.", inDomain: "local.")
     }
@@ -45,7 +50,7 @@ class CastDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
     }
 
     func netServiceBrowser(_ b: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
-        devices.removeAll { $0.name == service.name }
+        devices.removeAll { $0.serviceName == service.name }
         resolving.removeAll { $0 == service }
         onUpdate?(devices)
     }
@@ -57,8 +62,15 @@ class CastDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
         for data in addrs {
             if let ip = CastDiscovery.ipv4String(from: data) {
                 // Chromecast control port is always 8009 (the Bonjour port is the HTTP one).
-                let dev = CastDevice(name: friendlyName(service), host: ip, port: 8009)
-                if !devices.contains(where: { $0.name == dev.name }) {
+                let dev = CastDevice(name: friendlyName(service), host: ip, port: 8009,
+                                     serviceName: service.name)
+                if let i = devices.firstIndex(where: { $0.name == dev.name }) {
+                    // Same TV, possibly a new address from DHCP since it was last seen.
+                    if devices[i].host != dev.host {
+                        devices[i] = dev
+                        onUpdate?(devices)
+                    }
+                } else {
                     devices.append(dev)
                     onUpdate?(devices)
                 }

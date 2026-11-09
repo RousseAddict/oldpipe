@@ -6,6 +6,10 @@ import UIKit
 // title / thumbnail / play state. Tapping the title area reopens VideoPlayerVC; the close
 // button tears playback down. It auto-hides when there is no active video or when a
 // VideoPlayerVC is already on screen (avoids a double player).
+//
+// While casting it is the TV's remote instead: the video on the TV with "Playing on <TV>",
+// play/pause acting on the TV, and close stopping the cast. The phone's own player is stopped
+// in cast mode, so there is never a local video competing for the bar.
 
 class MiniPlayerBar: UIView {
 
@@ -24,6 +28,8 @@ class MiniPlayerBar: UIView {
     private let progressLine = UIView()
 
     private var shownVideoId: String?
+    // Whether the labels currently describe a cast rather than local playback.
+    private var shownCast = false
     private var pollTimer: Timer?
 
     override init(frame: CGRect) {
@@ -127,14 +133,20 @@ class MiniPlayerBar: UIView {
         let sp = VideoPlayer.shared
         let top = navProvider?()?.topViewController
         let topIsPlayer = (top is VideoPlayerVC) || (top is ShortsPlayerVC)
-        guard let video = sp.currentVideo, !topIsPlayer else {
+        let cast = CastController.shared
+        if cast.isActive, let video = cast.video, !topIsPlayer {
+            pollCast(cast, video)
+            return
+        }
+        guard let video = sp.currentVideo, !topIsPlayer, !cast.isActive else {
             if !isHidden { isHidden = true }
             return
         }
         if isHidden { isHidden = false }
 
-        if shownVideoId != video.id {
+        if shownVideoId != video.id || shownCast {
             shownVideoId = video.id
+            shownCast = false
             titleLabel.text = video.title
             channelLabel.text = video.channelName
             if !video.thumbnailURL.isEmpty { thumbView.load(url: video.thumbnailURL) }
@@ -147,18 +159,49 @@ class MiniPlayerBar: UIView {
         progressLine.frame = CGRect(x: 0, y: 0, width: bounds.width * max(0, min(1, frac)), height: 2)
     }
 
+    private func pollCast(_ cast: CastController, _ video: Video) {
+        if isHidden { isHidden = false }
+        if shownVideoId != video.id || !shownCast {
+            shownVideoId = video.id
+            shownCast = true
+            titleLabel.text = video.title
+            if !video.thumbnailURL.isEmpty { thumbView.load(url: video.thumbnailURL) }
+        }
+        // Rewritten only on change: assigning the same text still relayouts the label twice a second.
+        let status = cast.statusText
+        if channelLabel.text != status { channelLabel.text = status }
+
+        playPauseBtn.setImage(UIImage(named: cast.isPlaying ? "pause" : "play"), for: .normal)
+
+        let frac = cast.duration > 0 ? CGFloat(cast.position / cast.duration) : 0
+        progressLine.frame = CGRect(x: 0, y: 0, width: bounds.width * max(0, min(1, frac)), height: 2)
+    }
+
     // MARK: - Actions
 
-    @objc private func playPauseTapped() { VideoPlayer.shared.togglePlayPause(); poll() }
+    @objc private func playPauseTapped() {
+        if CastController.shared.isActive {
+            CastController.shared.togglePlayPause()
+        } else {
+            VideoPlayer.shared.togglePlayPause()
+        }
+        poll()
+    }
 
+    // While casting, close stops the cast (the TV goes back to its own screen).
     @objc private func closeTapped() {
-        VideoPlayer.shared.stop()
+        if CastController.shared.isActive {
+            CastController.shared.stop()
+        } else {
+            VideoPlayer.shared.stop()
+        }
         shownVideoId = nil
         isHidden = true
     }
 
     @objc private func openTapped() {
-        guard let video = VideoPlayer.shared.currentVideo else { return }
+        let cast = CastController.shared
+        guard let video = cast.isActive ? cast.video : VideoPlayer.shared.currentVideo else { return }
         onOpen?(video)
     }
 }
