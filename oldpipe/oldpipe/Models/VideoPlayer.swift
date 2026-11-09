@@ -127,6 +127,14 @@ class VideoPlayer {
         return queue[queueIndex + 1]
     }
 
+    // Moves the queue on without playing anything here — CastController plays the video on the
+    // TV instead. nil when `videoId` is not the queue's current entry or nothing follows it.
+    func takeNextInQueue(after videoId: String) -> Video? {
+        guard let next = nextInQueue(after: videoId) else { return nil }
+        queueIndex += 1
+        return next
+    }
+
     // The Next button and the lock screen's next track. `videoId` is the video the caller is
     // showing, which is not always the one in the player: a page opened from a playlist can be
     // skipped before its own video has started, or after it failed to. Whatever IS playing
@@ -437,10 +445,11 @@ class VideoPlayer {
         return d.isFinite ? d : 0
     }
 
-    // Full teardown — used by the mini bar's close button.
-    func stop() {
+    // Full teardown — used by the mini bar's close button. Casting tears the phone's player
+    // down the same way but keeps the queue, which goes on driving Next and autoplay on the TV.
+    func stop(keepQueue: Bool = false) {
         saveResume()
-        clearQueue()
+        if !keepQueue { clearQueue() }
         cancelRecovery()
         releaseAwake()
         wantsPlayback = false

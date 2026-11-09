@@ -32,26 +32,34 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Add-to-playlist chooser state (index → playlist mapping for the action sheet).
     private var pendingPlaylists: [Playlist] = []
 
-    // Chromecast spike: LAN discovery + one live session. castDevices maps the picker
-    // action-sheet indices to discovered devices.
-    private var castDiscovery: CastDiscovery?
-    private var castSession: CastSession?
+    // Chromecast. The connection and cast mode belong to CastController.shared; this page only
+    // shows them. castDevices maps the picker action-sheet indices to devices.
+    private var cast: CastController { return CastController.shared }
     private var castDevices: [CastDevice] = []
-    // Cast control panel overlaid on the video area while a session is live.
+    // Cast control panel overlaid on the video area while this page's video is on the TV.
     private var castPanel: UIView?
+    private var castIcon: UIImageView?
     private var castTitleLabel: UILabel?
+    private var castStopBtn: UIButton?
     private var castPlayPauseBtn: UIButton?
+    private var castRewindBtn: UIButton?
+    private var castForwardBtn: UIButton?
+    private var castPanelSpinner: UIActivityIndicatorView?
+    private var castVolumeIcon: UIImageView?
+    private var castVolume: UISlider?
+    private var castBar: UIView?
     private var castScrubber: UISlider?
     private var castCurLabel: UILabel?
     private var castDurLabel: UILabel?
-    private var castDuration: Double = 0
     private var castIsScrubbing = false
-    private var castIsPlaying = false
-    // Cast button lives in the bottom control bar, just before the fullscreen button (so it
-    // rides along into fullscreen with the bar); a spinner sits centered in it while device
-    // discovery is running.
+    private var castVolumeDragging = false
+    // Cast button: a square beside Download, filled icon while casting. A spinner sits in it
+    // while the first device search runs.
     private var castBtn: UIButton?
     private var castBtnSpinner: UIActivityIndicatorView?
+    private var castPickerPending = false
+    // Which glyph the cast button shows (nil = the spinner or not set yet).
+    private var castBtnShowsOn: Bool?
     // Quality picker (HLS transmux): "hd" button in the control bar + the HLS-capable
     // video-only streams backing the last-shown sheet (index-aligned with its buttons).
     private var hdBtn: UIButton?
@@ -226,15 +234,19 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         navigationItem.rightBarButtonItems = QuickExits.items()
     }
 
-    // Show the cast glyph (idle, or active where a tap stops the session); stops the spinner.
-    private func showCastGlyph() {
+    // The cast glyph: outlined, or filled while the app is casting. Stops the search spinner.
+    // Set only on a change — castDidChange runs about once a second while a video plays.
+    private func updateCastButton() {
         castBtnSpinner?.stopAnimating()
-        castBtn?.setImage(UIImage(named: "cast"), for: .normal)
-        castBtn?.isHidden = false
+        let on = cast.isActive
+        guard castBtnShowsOn != on else { return }
+        castBtnShowsOn = on
+        castBtn?.setImage(UIImage(named: on ? "cast-on" : "cast"), for: .normal)
     }
 
-    // Swap the cast glyph for a spinning indicator while cast discovery runs.
+    // Swap the cast glyph for a spinning indicator while the first device search runs.
     private func showCastSpinner() {
+        castBtnShowsOn = nil
         castBtn?.setImage(nil, for: .normal)
         castBtnSpinner?.startAnimating()
     }
@@ -249,12 +261,31 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         NotificationCenter.default.addObserver(
             self, selector: #selector(appDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(castDidChange),
+            name: CastController.didChange, object: nil)
 
         if scrollView == nil { setupUI() }
 
-        // If the singleton is already playing this video (reopened from the mini bar, or
-        // returning from a pushed VC), reattach onto the live playback. Otherwise load.
-        if sp.isActive(video.id) {
+        // Look for TVs while the page is up, so the cast picker can open straight away.
+        cast.startDiscovery()
+        // The TV moving on to the next queued video swaps this page, as a local advance does.
+        cast.onAdvance = { [weak self] from, to in
+            guard let self = self, self.video.id == from else { return }
+            self.handleAutoAdvance(to)
+        }
+        updateCastButton()
+
+        // The cast this page was showing ended while another page was in front.
+        if !cast.isCasting(video.id), !(castPanel?.isHidden ?? true) { hideCastPanel() }
+
+        // This video is on the TV (cast from here earlier, or reopened from the mini bar): show
+        // the cast panel. Otherwise, if the phone's player has it, reattach onto that. Else load.
+        if cast.isCasting(video.id) {
+            showCastPanel()
+            loadRelatedIfIdle()
+            if !didRequestStreams { loadStreams(updateStatus: false, reuse: true) }
+        } else if sp.isActive(video.id) {
             showActivePlayback()
             // Already playing, so nothing waits on the lane: related goes ahead of the
             // description refetch below rather than behind its two player requests.
@@ -323,6 +354,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onRateReverted = nil
         sp.onStartSettled = nil
         sp.onAdvanceFailed = nil
+        cast.onAdvance = nil
+        cast.stopDiscovery()
         // A held > tap goes with the page: playback must not start behind the screen pushed
         // over it. The response still lands and leaves "Tap to play" for the way back.
         if playWhenStreamsLoad {
@@ -530,13 +563,18 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         } else if PhotoExporter.shared.isBusy(newVideo.id) {
             observePhotoExport()
         }
-        showActivePlayback()   // re-attach layer + show controls + resync progress
-        // Still loading in the player: the thumbnail and a spinner until it settles, rather
-        // than a black frame.
-        if sp.isStarting {
-            advancePending = true
-            thumbView?.isHidden = false
-            showSpinner()
+        if cast.isCasting(newVideo.id) {
+            // The TV moved on (CastController.onAdvance): the panel follows it.
+            showCastPanel()
+        } else {
+            showActivePlayback()   // re-attach layer + show controls + resync progress
+            // Still loading in the player: the thumbnail and a spinner until it settles, rather
+            // than a black frame.
+            if sp.isStarting {
+                advancePending = true
+                thumbView?.isHidden = false
+                showSpinner()
+            }
         }
         refreshUpNext()
 
@@ -584,11 +622,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     @objc private func nextTapped() {
-        // The phone's player sits paused while casting, so a skip would start the next video
-        // here rather than on the TV.
-        if castSession != nil {
-            statusLabel?.text = "Stop casting to skip"
-            statusLabel?.isHidden = false
+        // Cast mode: the next video plays on the TV, and onAdvance swaps this page to it.
+        if cast.isActive {
+            cast.skipToNext(from: video.id)
             return
         }
         // A play tap mid-fade would start this page's video on top of the skip (startPlay runs
@@ -747,6 +783,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         contentBelowMetaY = y
 
         layoutCaptionPlate()
+        layoutCastPanel()
         relayout()
     }
     #endif
@@ -907,6 +944,22 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         // Share + Add-to-playlist row (two equal buttons; frames set in relayout).
         let secondaryBg = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
+
+        // Cast: a square beside Download, here rather than in the video's control bar so it
+        // is one tap away before anything has played (frame set in relayout).
+        let castB = UIButton(type: .custom)
+        castB.layer.cornerRadius = 6
+        castB.backgroundColor = secondaryBg
+        castB.setImage(UIImage(named: "cast"), for: .normal)
+        castB.addTarget(self, action: #selector(castTapped), for: .touchUpInside)
+        sv.addSubview(castB)
+        castBtn = castB
+        let castSpin = UIActivityIndicatorView(style: .white)
+        castSpin.hidesWhenStopped = true
+        castSpin.isUserInteractionEnabled = false
+        castSpin.center = CGPoint(x: 22, y: 22)
+        castB.addSubview(castSpin)
+        castBtnSpinner = castSpin
 
         let share = UIButton(type: .custom)
         share.layer.cornerRadius = 6
@@ -1077,12 +1130,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // Chapters, then the description (directly under the meta line).
         y = layoutDescSection(startY: y, width: w)
 
-        // Download button.
-        downloadBtn?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 44)
+        // Download button, with the square cast button on its right.
+        let gap: CGFloat = 10
+        let castW: CGFloat = 44
+        downloadBtn?.frame = CGRect(x: padding, y: y, width: w - padding * 2 - castW - gap, height: 44)
+        castBtn?.frame = CGRect(x: w - padding - castW, y: y, width: castW, height: 44)
         y += 44 + 12
 
         // Share + add-to-playlist row.
-        let gap: CGFloat = 10
         let halfW = (w - padding * 2 - gap) / 2
         shareBtn?.frame = CGRect(x: padding, y: y, width: halfW, height: 44)
         addPlaylistBtn?.frame = CGRect(x: padding + halfW + gap, y: y, width: halfW, height: 44)
@@ -1121,8 +1176,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let i = sender.tag
         guard i >= 0, i < chapters.count else { return }
         let target = chapters[i].startSeconds
-        if castSession != nil {
-            castSession?.seek(to: target)
+        if cast.isCasting(video.id) {
+            cast.seek(to: target)
             return
         }
         guard sp.isActive(video.id) else { return }
@@ -2067,8 +2122,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 promptNewPlaylist()
             }
         } else if actionSheet.tag == 3 {
-            if buttonIndex < castDevices.count {
+            if buttonIndex >= 0, buttonIndex < castDevices.count {
                 startCasting(to: castDevices[buttonIndex])
+            }
+        } else if actionSheet.tag == VideoPlayerVC.castSessionSheetTag {
+            switch actionSheet.buttonTitle(at: buttonIndex) {
+            case "Stop Casting":
+                cast.stop()
+            case "Play This Video on TV":
+                playTapped()
+            default:
+                break
             }
         } else if actionSheet.tag == 4 {
             // Playback menu: each row opens a submenu. Present it only after this sheet has
@@ -2124,27 +2188,38 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         flash(addPlaylistBtn, "Added \u{2713}", revertTo: "Playlist")
     }
 
-    // MARK: - Chromecast (discovery + handshake spike)
+    // MARK: - Chromecast
+    // Cast mode and the connection live in CastController.shared. This page offers the cast
+    // button, shows the cast panel while its own video is on the TV, and routes a play tap to
+    // the TV while cast mode is on (startPlay).
+
+    private static let castSessionSheetTag = 10   // UIActionSheet: the cast button while casting
 
     @objc private func castTapped() {
-        if castSession != nil { stopCast(); return }
+        if cast.isActive {
+            showCastSessionSheet()
+            return
+        }
+        // Browsing started with the page, so the TVs are usually known already.
+        if !cast.devices.isEmpty {
+            showCastPicker()
+            return
+        }
+        guard !castPickerPending else { return }
+        castPickerPending = true
         showCastSpinner()
-
-        let disco = CastDiscovery()
-        castDiscovery = disco
-        disco.onUpdate = { [weak self] devices in self?.castDevices = devices }
-        disco.start()
-
         // Give mDNS a couple of seconds to resolve, then present whatever we found.
         let t = Timer(timeInterval: 2.5, target: BlockTarget { [weak self] in
-            self?.showCastPicker()
+            guard let self = self else { return }
+            self.castPickerPending = false
+            self.updateCastButton()
+            self.showCastPicker()
         }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
         RunLoop.main.add(t, forMode: .common)
     }
 
     private func showCastPicker() {
-        castDiscovery?.stop()
-        showCastGlyph()   // stop the spinner regardless of outcome
+        castDevices = cast.devices
         guard !castDevices.isEmpty else {
             let alert = UIAlertView()
             alert.title = "No Chromecast found"
@@ -2161,129 +2236,160 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 3
-        // Cast sits in the control bar, so this sheet can be raised from fullscreen too.
-        sheet.show(in: sheetHost)
+        sheet.show(in: view)
     }
 
+    // The cast button while casting: which TV, and the way out.
+    private func showCastSessionSheet() {
+        let sheet = UIActionSheet()
+        sheet.delegate = self
+        sheet.title = "Casting to \(cast.device?.name ?? "TV")"
+        // Cast mode plays every video on the TV, so a page showing another one can send it
+        // there from here as well as with its own play button.
+        if !cast.isCasting(video.id) { sheet.addButton(withTitle: "Play This Video on TV") }
+        sheet.destructiveButtonIndex = sheet.addButton(withTitle: "Stop Casting")
+        sheet.cancelButtonIndex = sheet.addButton(withTitle: "Cancel")
+        sheet.tag = VideoPlayerVC.castSessionSheetTag
+        sheet.show(in: view)
+    }
+
+    // Picked a TV: this page's video starts there, and cast mode is on.
     private func startCasting(to device: CastDevice) {
-        // A Chromecast fetches the URL itself, so it needs a self-contained muxed file — it can
-        // neither reach the local transmux proxy nor mux two adaptive tracks on its own.
-        guard let preferred = preferredStream() else {
-            statusLabel?.text = streamsLoading ? "No stream to cast yet"
-                              : streams.isEmpty ? noStreamsMessage
-                              : "This video can't be cast (no muxed stream)"
-            statusLabel?.isHidden = false
-            return
-        }
-        // Playback moves to the TV — stop the local player so audio doesn't double up.
-        sp.pause()
-
-        // Hand the Chromecast the direct googlevideo MP4 (itag 18/22 = H.264+AAC, which the
-        // Default Media Receiver plays natively).
-        let session = CastSession(device: device)
-        castSession = session
-        session.onState = { [weak self] state in
-            self?.castTitleLabel?.text = "Casting to \(device.name) — \(state)"
-        }
-        session.onProgress = { [weak self] cur, dur, playing in
-            self?.updateCastProgress(current: cur, duration: dur, playing: playing)
-        }
-        session.start(mediaURL: preferred.url, contentType: "video/mp4")
-        // The glyph stays; while a session is live a tap on it stops casting.
-        showCastGlyph()
-        showCastPanel(deviceName: device.name)
+        cast.cast(video, on: device, streams: streams.isEmpty ? nil : streams)
     }
 
-    @objc private func stopCastTapped() { stopCast() }
+    @objc private func stopCastTapped() { cast.stop() }
 
-    private func stopCast() {
-        castSession?.stop()
-        castSession = nil
-        castDiscovery?.stop()
+    // Everything CastController reports lands here: connection state, progress about once a
+    // second, the end of cast mode.
+    @objc private func castDidChange() {
+        if !castPickerPending { updateCastButton() }
+        if cast.isCasting(video.id) {
+            if castPanel?.isHidden ?? true { showCastPanel() } else { refreshCastPanel() }
+        } else if !(castPanel?.isHidden ?? true) {
+            hideCastPanel()
+            // Why it ended, when that is news ("Lost connection to …").
+            if !cast.endMessage.isEmpty {
+                statusLabel?.text = cast.endMessage
+                statusLabel?.isHidden = false
+            }
+        }
+    }
+
+    // MARK: Cast control panel (overlaid on the video area while this video is on the TV)
+
+    private func showCastPanel() {
+        guard let container = videoContainer else { return }
+        // A start this page made on the phone must not report back over the panel.
+        cancelPlayAttempt()
+        controlsView?.isHidden = true
+        playBtn?.isHidden = true
+        hideSpinner()
+        statusLabel?.isHidden = true
+        thumbView?.isHidden = false   // the artwork shows through the panel's tint
+
+        if castPanel == nil { buildCastPanel(in: container) }
+        castPanel?.isHidden = false
+        container.bringSubviewToFront(castPanel!)
+        layoutCaptionPlate()   // captions are not cast: the plate hides
+        refreshCastPanel()
+    }
+
+    // Back to the phone: the big play button over the thumbnail, local controls hidden. A play
+    // tap resumes where the TV was (CastController saves the position).
+    private func hideCastPanel() {
         castPanel?.isHidden = true
-        showCastGlyph()
-        // Restore the pre-cast state so the video can be replayed on-device immediately:
-        // the big play button over the thumbnail, local controls hidden.
+        castPanelSpinner?.stopAnimating()
         controlsView?.isHidden = true
         thumbView?.isHidden = false
         playBtn?.isHidden = false
+        hideSpinner()
         statusLabel?.isHidden = true
-    }
-
-    // MARK: Cast control panel (overlaid on the video area while casting)
-
-    private func showCastPanel(deviceName: String) {
-        guard let container = videoContainer else { return }
-        // Hide the local playback affordances behind the cast overlay.
-        controlsView?.isHidden = true
-        playBtn?.isHidden = true
-        spinner?.stopAnimating()
-        statusLabel?.isHidden = true
-
-        if castPanel == nil { buildCastPanel(in: container) }
-        castTitleLabel?.text = "Casting to \(deviceName)\u{2026}"
-        castIsPlaying = true
-        castPlayPauseBtn?.setImage(UIImage(named: "pause"), for: .normal)
-        castScrubber?.value = 0
-        castCurLabel?.text = "0:00"
-        castDurLabel?.text = "0:00"
-        castPanel?.isHidden = false
-        container.bringSubviewToFront(castPanel!)
+        layoutCaptionPlate()
     }
 
     private func buildCastPanel(in container: UIView) {
-        let w = container.bounds.width
-        let hgt = container.bounds.height
         let panel = UIView(frame: container.bounds)
         panel.backgroundColor = UIColor(white: 0, alpha: 0.85)
         container.addSubview(panel)
         castPanel = panel
 
-        // "Cast" glyph — the bundled cast PNG, scaled up to fill the 44pt badge.
-        let icon = UIImageView(image: UIImage(named: "cast"))
+        let icon = UIImageView(image: UIImage(named: "cast-on"))
         icon.contentMode = .scaleAspectFit
-        icon.frame = CGRect(x: (w - 44) / 2, y: hgt / 2 - 46, width: 44, height: 44)
         panel.addSubview(icon)
+        castIcon = icon
 
+        // "Playing on Living Room TV" — CastController.statusText.
         let title = UILabel()
         title.backgroundColor = .clear
         title.textColor = .white
-        title.textAlignment = .center
         title.font = UIFont.systemFont(ofSize: 13)
         title.numberOfLines = 2
-        title.frame = CGRect(x: 8, y: hgt / 2, width: w - 16, height: 34)
         panel.addSubview(title)
         castTitleLabel = title
 
-        // Stop-casting button, top-right of the panel — replaces the old floating cast glyph
-        // (now that the cast icon lives in the auto-hiding control bar, the panel needs its
-        // own always-visible stop affordance).
+        // Stop casting, top-right.
         let stop = UIButton(type: .custom)
-        stop.frame = CGRect(x: w - 40, y: 4, width: 36, height: 36)
         stop.setImage(UIImage(named: "close"), for: .normal)
         stop.addTarget(self, action: #selector(stopCastTapped), for: .touchUpInside)
         panel.addSubview(stop)
+        castStopBtn = stop
 
-        // Bottom control bar: [play/pause 44][cur 44] ==slider== [dur 44]
-        let barH: CGFloat = 40
-        let bar = UIView(frame: CGRect(x: 0, y: hgt - barH, width: w, height: barH))
-        bar.backgroundColor = UIColor(white: 0, alpha: 0.4)
-        panel.addSubview(bar)
+        // [-15s]  ( play/pause )  [+15s] across the middle — the TV's transport, large enough
+        // to hit without looking.
+        let rew = UIButton(type: .custom)
+        rew.setImage(UIImage(named: "rewind"), for: .normal)
+        rew.addTarget(self, action: #selector(castRewindTapped), for: .touchUpInside)
+        panel.addSubview(rew)
+        castRewindBtn = rew
 
         let pp = UIButton(type: .custom)
-        pp.frame = CGRect(x: 0, y: 0, width: 44, height: barH)
+        pp.backgroundColor = Theme.accent.withAlphaComponent(0.9)
         pp.setImage(UIImage(named: "pause"), for: .normal)
         pp.addTarget(self, action: #selector(castTogglePlayPause), for: .touchUpInside)
-        bar.addSubview(pp)
+        panel.addSubview(pp)
         castPlayPauseBtn = pp
+
+        let fwd = UIButton(type: .custom)
+        fwd.setImage(UIImage(named: "forward"), for: .normal)
+        fwd.addTarget(self, action: #selector(castForwardTapped), for: .touchUpInside)
+        panel.addSubview(fwd)
+        castForwardBtn = fwd
+
+        // Stands in for the play button while the TV is connecting or loading.
+        let spin = UIActivityIndicatorView(style: .whiteLarge)
+        spin.hidesWhenStopped = true
+        spin.isUserInteractionEnabled = false
+        panel.addSubview(spin)
+        castPanelSpinner = spin
+
+        // TV volume.
+        let volIcon = UIImageView(image: UIImage(named: "volume"))
+        volIcon.contentMode = .scaleAspectFit
+        panel.addSubview(volIcon)
+        castVolumeIcon = volIcon
+
+        let vol = UISlider()
+        vol.minimumValue = 0
+        vol.maximumValue = 1
+        vol.minimumTrackTintColor = UIColor(white: 0.85, alpha: 1)
+        vol.addTarget(self, action: #selector(castVolumeTouchDown), for: .touchDown)
+        vol.addTarget(self, action: #selector(castVolumeTouchUp), for: [.touchUpInside, .touchUpOutside])
+        panel.addSubview(vol)
+        castVolume = vol
+
+        // Bottom bar: [cur] ==slider== [dur]
+        let bar = UIView()
+        bar.backgroundColor = UIColor(white: 0, alpha: 0.4)
+        panel.addSubview(bar)
+        castBar = bar
 
         let cur = UILabel()
         cur.backgroundColor = .clear
         cur.textColor = .white
         cur.font = UIFont.systemFont(ofSize: 11)
-        cur.textAlignment = .center
+        cur.textAlignment = .left
         cur.text = "0:00"
-        cur.frame = CGRect(x: 44, y: 0, width: 44, height: barH)
         bar.addSubview(cur)
         castCurLabel = cur
 
@@ -2291,45 +2397,120 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         dur.backgroundColor = .clear
         dur.textColor = .white
         dur.font = UIFont.systemFont(ofSize: 11)
-        dur.textAlignment = .center
+        dur.textAlignment = .right
         dur.text = "0:00"
-        dur.frame = CGRect(x: w - 44, y: 0, width: 44, height: barH)
         bar.addSubview(dur)
         castDurLabel = dur
 
-        let sl = UISlider(frame: CGRect(x: 88, y: 0, width: w - 88 - 44, height: barH))
+        let sl = UISlider()
         sl.minimumValue = 0
         sl.maximumValue = 1
         sl.value = 0
         sl.minimumTrackTintColor = Theme.accent
+        sl.addTarget(self, action: #selector(castScrubChanged), for: .valueChanged)
         sl.addTarget(self, action: #selector(castScrubTouchDown), for: .touchDown)
         sl.addTarget(self, action: #selector(castScrubTouchUp), for: [.touchUpInside, .touchUpOutside])
         bar.addSubview(sl)
         castScrubber = sl
+
+        layoutCastPanel()
     }
 
-    private func updateCastProgress(current: Double, duration: Double, playing: Bool) {
-        if duration > 0 { castDuration = duration; castDurLabel?.text = timeString(duration) }
-        castCurLabel?.text = timeString(current)
-        if castDuration > 0 && !castIsScrubbing {
-            castScrubber?.value = Float(current / castDuration)
+    // Frames from the container's current size (the iPad build reflows on rotation). On a
+    // 320pt iPhone the panel is 180pt tall: header 0-44, transport 48-104, volume 108-138,
+    // bar 140-180.
+    private func layoutCastPanel() {
+        guard let panel = castPanel, let container = videoContainer else { return }
+        panel.frame = container.bounds
+        let w = panel.bounds.width
+        let h = panel.bounds.height
+        let barH: CGFloat = 40
+        let timeW: CGFloat = 40
+        let inset: CGFloat = 12
+
+        castIcon?.frame = CGRect(x: 12, y: 10, width: 24, height: 24)
+        castTitleLabel?.frame = CGRect(x: 44, y: 4, width: w - 44 - 48, height: 36)
+        castStopBtn?.frame = CGRect(x: w - 44, y: 0, width: 44, height: 44)
+
+        let cy = floor((44 + (h - barH - 36)) / 2)
+        let ppSize: CGFloat = 56
+        castPlayPauseBtn?.frame = CGRect(x: (w - ppSize) / 2, y: cy - ppSize / 2, width: ppSize, height: ppSize)
+        castPlayPauseBtn?.layer.cornerRadius = ppSize / 2
+        castPanelSpinner?.center = CGPoint(x: w / 2, y: cy)
+        castRewindBtn?.frame = CGRect(x: w / 2 - ppSize / 2 - 24 - 44, y: cy - 22, width: 44, height: 44)
+        castForwardBtn?.frame = CGRect(x: w / 2 + ppSize / 2 + 24, y: cy - 22, width: 44, height: 44)
+
+        let volY = h - barH - 32
+        castVolumeIcon?.frame = CGRect(x: 12, y: volY + 4, width: 20, height: 20)
+        castVolume?.frame = CGRect(x: 44, y: volY, width: w - 44 - 16, height: 28)
+
+        // Times hug the panel's edges (same 12pt margin as the icon and volume row); the slider
+        // is bled outward by its thumb inset, as in layoutControls, so the track stops just
+        // short of each label instead of running into "10:00".
+        castBar?.frame = CGRect(x: 0, y: h - barH, width: w, height: barH)
+        castCurLabel?.frame = CGRect(x: inset, y: 0, width: timeW, height: barH)
+        castDurLabel?.frame = CGRect(x: w - inset - timeW, y: 0, width: timeW, height: barH)
+        let thumbInset: CGFloat = 12
+        let edge = inset + timeW + 6
+        castScrubber?.frame = CGRect(x: edge - thumbInset, y: 0,
+                                     width: w - edge * 2 + thumbInset * 2, height: barH)
+    }
+
+    private func refreshCastPanel() {
+        guard castPanel != nil else { return }
+        castTitleLabel?.text = cast.statusText
+        let busy = cast.state == .connecting || cast.state == .reconnecting || cast.phase == .loading
+        if busy {
+            castPanelSpinner?.startAnimating()
+            castPlayPauseBtn?.isHidden = true
+        } else {
+            castPanelSpinner?.stopAnimating()
+            castPlayPauseBtn?.isHidden = false
+            castPlayPauseBtn?.setImage(UIImage(named: cast.isPlaying ? "pause" : "play"), for: .normal)
         }
-        castIsPlaying = playing
-        castPlayPauseBtn?.setImage(UIImage(named: playing ? "pause" : "play"), for: .normal)
+        let canSeek = !busy && cast.phase != .finished && cast.phase != .failed
+        castRewindBtn?.isEnabled = canSeek
+        castForwardBtn?.isEnabled = canSeek
+        castScrubber?.isEnabled = canSeek && cast.duration > 0
+
+        let dur = cast.duration
+        castDurLabel?.text = timeString(dur)
+        if !castIsScrubbing {
+            castCurLabel?.text = timeString(cast.position)
+            castScrubber?.value = dur > 0 ? Float(cast.position / dur) : 0
+        }
+        if !castVolumeDragging {
+            castVolume?.isEnabled = cast.volume >= 0
+            castVolume?.value = Float(max(0, cast.volume))
+        }
     }
 
     @objc private func castTogglePlayPause() {
-        if castIsPlaying { castSession?.pause() } else { castSession?.play() }
-        castIsPlaying = !castIsPlaying
-        castPlayPauseBtn?.setImage(UIImage(named: castIsPlaying ? "pause" : "play"), for: .normal)
+        cast.togglePlayPause()
     }
+
+    @objc private func castRewindTapped() { cast.seek(by: -15) }
+    @objc private func castForwardTapped() { cast.seek(by: 15) }
 
     @objc private func castScrubTouchDown() { castIsScrubbing = true }
 
+    @objc private func castScrubChanged() {
+        guard cast.duration > 0, let v = castScrubber?.value else { return }
+        castCurLabel?.text = timeString(Double(v) * cast.duration)
+    }
+
     @objc private func castScrubTouchUp() {
         castIsScrubbing = false
-        guard castDuration > 0, let v = castScrubber?.value else { return }
-        castSession?.seek(to: Double(v) * castDuration)
+        guard cast.duration > 0, let v = castScrubber?.value else { return }
+        cast.seek(to: Double(v) * cast.duration)
+    }
+
+    @objc private func castVolumeTouchDown() { castVolumeDragging = true }
+
+    // Sent on release only: each change is a round trip to the TV.
+    @objc private func castVolumeTouchUp() {
+        castVolumeDragging = false
+        if let v = castVolume?.value { cast.setVolume(Double(v)) }
     }
 
     // MARK: - Playback controls UI
@@ -2369,7 +2550,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(cur)
         currentTimeLabel = cur
 
-        // Total time — right-aligned so it hugs the cast/fullscreen buttons (mirrors the left).
+        // Total time — right-aligned so it hugs the settings/fullscreen buttons (mirrors the left).
         let dur = UILabel()
         dur.backgroundColor = .clear
         dur.textColor = .white
@@ -2390,27 +2571,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(sl)
         scrubber = sl
 
-        // Cast button — lives in the bar just before the fullscreen button.
-        let cast = UIButton(type: .custom)
-        cast.setImage(UIImage(named: "cast"), for: .normal)
-        cast.addTarget(self, action: #selector(castTapped), for: .touchUpInside)
-        bar.addSubview(cast)
-        castBtn = cast
-
-        // Spinner shown in place of the cast glyph while discovery runs (subview of the button).
-        let castSpin = UIActivityIndicatorView(style: .white)
-        castSpin.hidesWhenStopped = true
-        castSpin.center = CGPoint(x: 18, y: barH / 2)
-        cast.addSubview(castSpin)
-        castBtnSpinner = castSpin
-
         let fs = UIButton(type: .custom)
         fs.setImage(UIImage(named: "fullscreen"), for: .normal)
         fs.addTarget(self, action: #selector(fullscreenTapped), for: .touchUpInside)
         bar.addSubview(fs)
         fsButton = fs
 
-        // Settings button — opens the quality + captions sheet. Left of the cast button.
+        // Settings button — opens the quality + captions sheet. Left of the fullscreen button.
         // A gear, not an "hd" glyph: the sheet now hosts captions as well as quality.
         let hd = UIButton(type: .custom)
         hd.setImage(UIImage(named: "gear"), for: .normal)
@@ -2422,12 +2589,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Position the control bar's children for a given bar width (bar frame set by caller).
-    // Layout: [play 36]([next 36])[cur 46] ===slider=== [dur 46][hd 36][cast 36][fullscreen 36]
+    // Layout: [play 36]([next 36])[cur 46] ===slider=== [dur 46][hd 36][fullscreen 36]
+    // (Cast is not here: it sits beside Download, reachable before anything has played.)
     // Times are left/right-aligned so they hug the adjacent buttons — spacing is uniform
     // on both ends and the slider is centered between them.
     // Next appears only from minBarWidthForNext up — landscape fullscreen, or iPad — because
-    // the inline bar on a 320pt iPhone leaves the slider 84pt, and one more button cuts it to
-    // 48. There the Up next row under the video does the job.
+    // the inline bar on a 320pt iPhone leaves the slider 120pt, and one more button cuts it to
+    // 84. There the Up next row under the video does the job.
     private static let minBarWidthForNext: CGFloat = 400
 
     private func layoutControls(width w: CGFloat) {
@@ -2441,11 +2609,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         nextBtn?.isHidden = !showNext
         currentTimeLabel?.frame = CGRect(x: btnW + nextW, y: 0, width: timeW, height: barH)
         fsButton?.frame = CGRect(x: w - btnW, y: 0, width: btnW, height: barH)
-        castBtn?.frame = CGRect(x: w - btnW * 2, y: 0, width: btnW, height: barH)
-        hdBtn?.frame = CGRect(x: w - btnW * 3, y: 0, width: btnW, height: barH)
-        durationLabel?.frame = CGRect(x: w - btnW * 3 - timeW, y: 0, width: timeW, height: barH)
+        hdBtn?.frame = CGRect(x: w - btnW * 2, y: 0, width: btnW, height: barH)
+        durationLabel?.frame = CGRect(x: w - btnW * 2 - timeW, y: 0, width: timeW, height: barH)
         let leftEdge = btnW + nextW + timeW
-        let rightEdge = btnW * 3 + timeW
+        let rightEdge = btnW * 2 + timeW
         // A UISlider reserves ~half its thumb width of empty space at each end of its frame
         // before the visible track begins, so the track looks like it has more padding than
         // the tight play/time gaps. Bleed the slider frame outward by that inset so the
@@ -2476,7 +2643,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Toggle the bar on a tap anywhere on the video (only while a video is loaded and not
     // casting — the cast panel has its own controls).
     @objc private func videoAreaTapped() {
-        guard sp.isActive(video.id), castSession == nil else { return }
+        guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
         if controlsView?.isHidden ?? true {
             showControls()
         } else {
@@ -2486,14 +2653,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Double-tap left/right → skip 15s back/forward, with a fading on-screen indicator.
     @objc private func seekBackwardTapped() {
-        guard sp.isActive(video.id), castSession == nil else { return }
+        guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
         sp.seek(bySeconds: -15)
         showSeekIndicator(forward: false)
         showControls()
     }
 
     @objc private func seekForwardTapped() {
-        guard sp.isActive(video.id), castSession == nil else { return }
+        guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
         sp.seek(bySeconds: 15)
         showSeekIndicator(forward: true)
         showControls()
@@ -2657,7 +2824,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             self.captionTracks = captions
             DebugLog.log("Player", "getStreams result id=\(self.video.id) formats=\(streams.count) itags=\(streams.map { $0.itag }) failure=\"\(failure)\"")
             if updateStatus {
-                self.statusLabel?.text = streams.isEmpty ? self.noStreamsMessage : "Tap to play"
+                self.statusLabel?.text = streams.isEmpty ? self.noStreamsMessage : self.playHint
             }
             if !desc.isEmpty {
                 self.descriptionText = desc
@@ -2675,6 +2842,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             }
             self.loadRelatedIfIdle()
         }
+    }
+
+    // Where a play tap will go.
+    private var playHint: String {
+        guard let d = cast.device, cast.isActive else { return "Tap to play" }
+        return "Tap to play on \(d.name)"
     }
 
     // Shown when the player response has nothing to play. YouTube's own explanation (bot
@@ -3027,7 +3200,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         guard let plate = captionPlate, let lbl = captionLabel,
               let host = fsOverlay ?? videoContainer else { return }
         let text = lbl.text ?? ""
-        guard !text.isEmpty, castSession == nil else { plate.isHidden = true; return }
+        guard !text.isEmpty, !cast.isCasting(video.id) else { plate.isHidden = true; return }
         // Re-read the setting here rather than only at creation: the plate outlives a trip to
         // Settings, and under "auto" the size also has to follow the host (entering fullscreen
         // triples the width). Assigning a font forces a label relayout, hence the comparison.
@@ -3136,6 +3309,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     private func startPlay() {
+        // Cast mode: every play goes to the TV — a downloaded video too, since the TV cannot
+        // read the phone's files (CastController fetches its streams when the page has none).
+        // A tap that beat the player response waits for it, as below, rather than asking twice.
+        if cast.isActive {
+            if streamsLoading {
+                playWhenStreamsLoad = true
+                return
+            }
+            let stale = streamsStale
+            streamsStale = false
+            cast.cast(video, streams: (stale || streams.isEmpty) ? nil : streams, fresh: stale)
+            return
+        }
+
         // Offline copy takes priority. A progressive download plays off disk; an HLS bundle
         // is served back through StreamProxy (AVPlayer won't open a file:// playlist) — still
         // local either way, so isLocal: true and no reconnect watchdog.
