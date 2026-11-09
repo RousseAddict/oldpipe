@@ -242,6 +242,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // would, which lets a video-page crash be chased with nobody at the screen.
     //   oldpipe://snapshot              the screen as Documents/snapshot.png
     //   oldpipe://scroll/<y>, oldpipe://back   scroll the top page / pop it
+    //   oldpipe://search[/<query>]      open Search as its bar button does, optionally running <query>
     //   oldpipe://cast/start/<ip>       cast History's newest video to a receiver at <ip>
     //   oldpipe://cast/<toggle|stop|next|queue>, cast/seek/<s>, cast/volume/<0-1>
     // The cast ones drive CastController the way the page's buttons do, against a stand-in
@@ -260,6 +261,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         if url.host == "back" {
             (window?.rootViewController as? UINavigationController)?.popViewController(animated: false)
+            return true
+        }
+        if url.host == "search", let nav = window?.rootViewController as? UINavigationController {
+            nav.goSearch()
+            if url.pathComponents.count > 1, let page = nav.viewControllers.last as? SearchVC {
+                page.search(for: url.lastPathComponent)
+            }
             return true
         }
         if url.host == "cast" {

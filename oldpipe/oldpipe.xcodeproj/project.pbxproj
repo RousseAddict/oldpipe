@@ -100,6 +100,7 @@
 		BB000001000000000000BC11 /* VideoRowCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB11 /* VideoRowCell.swift */; };
 		BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB13 /* MiniPlayerBar.swift */; };
 		BB000001000000000000BC2B /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2B /* Theme.swift */; };
+		BB000001000000000000BC38 /* EmptyStateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB38 /* EmptyStateView.swift */; };
 		BB000001000000000000BC2C /* TableViewCompat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2C /* TableViewCompat.swift */; };
 		BB000001000000000000BC2D /* ios5_start.S in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB2D /* ios5_start.S */; };
 		BB000001000000000000BC30 /* DownloadOptionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB30 /* DownloadOptionsView.swift */; };
@@ -220,6 +221,7 @@
 		BB000001000000000000BB11 /* VideoRowCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoRowCell.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB13 /* MiniPlayerBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniPlayerBar.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2B /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB38 /* EmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateView.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2C /* TableViewCompat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableViewCompat.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB2D /* ios5_start.S */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; path = ios5_start.S; sourceTree = "<group>"; };
 		BB000001000000000000BB30 /* DownloadOptionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadOptionsView.swift; sourceTree = "<group>"; };
@@ -397,6 +399,7 @@
 				BB000001000000000000BB11 /* VideoRowCell.swift */,
 				BB000001000000000000BB13 /* MiniPlayerBar.swift */,
 				BB000001000000000000BB2B /* Theme.swift */,
+				BB000001000000000000BB38 /* EmptyStateView.swift */,
 				BB000001000000000000BB2C /* TableViewCompat.swift */,
 				BB000001000000000000BB30 /* DownloadOptionsView.swift */,
 			);
@@ -641,6 +644,7 @@
 				BB000001000000000000BC11 /* VideoRowCell.swift in Sources */,
 				BB000001000000000000BC13 /* MiniPlayerBar.swift in Sources */,
 				BB000001000000000000BC2B /* Theme.swift in Sources */,
+				BB000001000000000000BC38 /* EmptyStateView.swift in Sources */,
 				BB000001000000000000BC2C /* TableViewCompat.swift in Sources */,
 				BB000001000000000000BC2D /* ios5_start.S in Sources */,
 				A34362D62FD764210064ADE1 /* ViewController.swift in Sources */,
