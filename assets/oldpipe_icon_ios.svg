@@ -25,10 +25,12 @@
     </radialGradient>
   </defs>
 
-  <!-- iOS-style squircle background card. Full bleed to the 1024 edge;
-       Apple's own mask will round this at render time, but the gradient
-       card gives it a polished "icon on a tile" look even before masking. -->
-  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#bgGradient)"/>
+  <!-- Background card: a full-bleed SQUARE, deliberately not rounded.
+       iOS applies its own corner mask, and fills any transparent icon pixel
+       with black first — so rounded corners baked in here show up as black
+       wedges wherever the system mask is less rounded than ours. Every icon
+       PNG must be fully opaque. -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#bgGradient)"/>
 
   <!-- Original logo, uniformly scaled and centered.
        Original art occupies a 192x192 box; place it within a safe area
