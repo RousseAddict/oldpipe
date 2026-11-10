@@ -5,13 +5,13 @@
 <h1 align="center">oldpipe</h1>
 
 <p align="center">
-  A lightweight, ad-free, account-free YouTube client for <b>iOS 6 through 12</b>.<br>
+  A lightweight, ad-free, account-free YouTube client for <b>iOS 5 through 12</b>.<br>
   Written in Swift, built for hardware Google gave up on more than a decade ago.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="GPL-3.0">
-  <img src="https://img.shields.io/badge/iOS-6.0%2B-lightgrey.svg" alt="iOS 6.0+">
+  <img src="https://img.shields.io/badge/iOS-5.0%2B-lightgrey.svg" alt="iOS 5.0+">
   <img src="https://img.shields.io/badge/Swift-5-orange.svg" alt="Swift 5">
 </p>
 
@@ -23,7 +23,8 @@ oldpipe follows the same principles as [NewPipe](https://newpipe.net) on Android
 
 - **No ads.** Not blocked, not skipped — never requested in the first place.
 - **No account, no sign-in.** You cannot log in, so there is nothing to log in *to*.
-- **No tracking.** No analytics SDK, no crash reporter, no telemetry, no phone-home.
+- **No tracking.** No analytics SDK, no crash reporter, no telemetry, no phone-home. The
+  app's own crash log stays on the device.
 - **No Google frameworks.** The app talks to YouTube's own internal `innertube` endpoints
   directly over HTTPS. No YouTube SDK, no Play Services, no API key, no quota.
 - **Your data stays on your device.** Subscriptions, playlists, watch history and
@@ -38,15 +39,15 @@ oldpipe follows the same principles as [NewPipe](https://newpipe.net) on Android
 
 ## Screenshots
 
-### iPhone 4S — iOS 6
+### iPhone 4 — iOS 5 / 6
 
 | Search | Video | Playing |
 |---|---|---|
-| <img src="screenshots/ios6-search.png" width="220"> | <img src="screenshots/ios6-video.png" width="220"> | <img src="screenshots/ios6-playing.png" width="220"> |
+| <img src="screenshots/ios5-search.png" width="220"> | <img src="screenshots/ios5-video.png" width="220"> | <img src="screenshots/ios5-playing.png" width="220"> |
 
 | Channel | Menu |
 |---|---|
-| <img src="screenshots/ios6-channel.png" width="220"> | <img src="screenshots/ios6-menu.png" width="220"> |
+| <img src="screenshots/ios5-channel.png" width="220"> | <img src="screenshots/ios5-menu.png" width="220"> |
 
 ### iPhone 5 — iOS 7
 
@@ -56,45 +57,54 @@ oldpipe follows the same principles as [NewPipe](https://newpipe.net) on Android
 
 ### iPad mini — iOS 8 (rotation + reflow)
 
-| Search (landscape) | Video (portrait) | Video (landscape) |
+| Home | Search | Results |
 |---|---|---|
-| <img src="screenshots/ios8-ipad-search.jpg" width="260"> | <img src="screenshots/ios8-ipad-video.jpg" width="200"> | <img src="screenshots/ios8-ipad-landscape.jpg" width="260"> |
+| <img src="screenshots/ios8-ipad-home.png" width="220"> | <img src="screenshots/ios8-ipad-search.png" width="220"> | <img src="screenshots/ios8-ipad-results.png" width="220"> |
+
+| Video (portrait) | Video (landscape) |
+|---|---|
+| <img src="screenshots/ios8-ipad-video.png" width="220"> | <img src="screenshots/ios8-ipad-landscape.png" width="390"> |
 
 ---
 
 ## Features
 
 **Browsing**
-- Search videos and channels
-- Trending feed
-- Channel pages — Videos / Shorts / About, with subscribe
-- Subscriptions feed on the home screen
+- Search videos
+- Channel pages — Videos / Shorts / Playlists / About, with subscribe
+- YouTube playlists, opened from a channel's Playlists tab
+- Subscriptions feed on the home screen, plus a feed per channel group
 - Shorts in a TikTok-style vertical pager
 - Related videos and comments, side by side in tabs on the video page
 - Comments load in batches, with replies expandable inline
 
 **Playback**
-- Quality selection up to 1080p, on iOS 6 included
+- Quality selection up to 1080p, 60 fps included, on iOS 5 and 6 too
+- A 30 / 60 fps preference for videos that offer both
+- Chapters
 - Playback speed from 0.5x to 2x
 - Captions / subtitles
-- Background audio with lock-screen controls and artwork
+- Background audio with lock-screen controls, artwork and Next
 - Persistent mini player bar that survives navigation
 - Double-tap the left/right edge to seek ±15s
-- Resume where you left off ("Continue watching")
-- Autoplay-next through playlists
+- Resume where you left off, with each video's progress shown in History
+- Autoplay-next through playlists, in order or shuffled
 - Fullscreen with rotation
 
 **Beyond the app**
-- Download videos for offline playback
+- Download videos for offline playback — any quality or audio only, captions included
 - Save any video to the Photos gallery, at any quality
-- Chromecast
+- Save the audio as an M4A file, reachable through iTunes File Sharing
+- Chromecast, with a remote in the mini player that picks the session back up after the
+  phone sleeps
 - Share links out to any app
 
 **Library (all local)**
-- Subscriptions
+- Subscriptions, sortable into channel groups
 - Playlists
 - Watch history
 - Downloads
+- Backup and restore of subscriptions and playlists, as plain text
 
 ---
 
@@ -108,8 +118,9 @@ Add this source:
 https://cydia.rousseaddict.online
 ```
 
-The repo page also exposes a direct **OTA install link**, so you can install straight from
-Safari on the device without a package manager.
+It carries every build below, iOS 5 included. The repo page also exposes a direct
+**OTA install link**, so you can install straight from Safari on the device without a
+package manager.
 
 ### Manual — sideload the IPA
 
@@ -117,6 +128,7 @@ Prebuilt IPAs live in [`build/`](build/). Pick the one that matches the device:
 
 | File | Target | Notes |
 |---|---|---|
+| `build/oldpipe_ios5.ipa` | iOS 5 | Portrait-locked, armv7 only, about a third of the size. Ships its own Swift runtime (see [Building](#building)). |
 | `build/oldpipe_ios6.ipa` | iOS 6 – 7 | Portrait-locked. The baseline build. |
 | `build/oldpipe_ios7.ipa` | iOS 7 | Same as above, plus the layout fix for the translucent iOS 7 navigation bar. |
 | `build/oldpipe_ios8.ipa` | iOS 8 – 12 | Adds iPad rotation and layout reflow. Tested as far up as iOS 12. |
@@ -131,6 +143,7 @@ re-sign the IPA with your own certificate.
 
 | Device | OS | Build | Status |
 |---|---|---|---|
+| iPhone 4 | iOS 5.1.1 | `ios5` | Works |
 | iPhone 4S | iOS 6 | `ios6` | Works |
 | iPhone 5 | iOS 7 | `ios6` / `ios7` | Works, full 4-inch screen |
 | iPad mini (1st gen) | iOS 8 | `ios8` | Works, rotation enabled |
@@ -142,21 +155,15 @@ re-sign the IPA with your own certificate.
 
 These are real, current, and mostly not fixable from inside the app:
 
-- **60 fps videos cap at 480p.** YouTube ships 60 fps uploads as itags 298/299 instead of
-  136/137, and the quality ladder does not list them yet. Gaming and sports content is
-  affected. Fixing it is on the list.
-- **1080p is out of reach for A5 devices.** The iPhone 4S and iPad mini 1 decode roughly
-  up to 1080p30 High L4.1. Anything above that will stutter or refuse to play regardless
-  of what the quality menu offers.
 - **No sign-in.** By design — but it also means no personal recommendations, no
   server-side subscriptions, and no liking or posting. Comments are read-only; your
   subscriptions are local only.
-- **Playback speed only applies at 360p on iOS 6.** Above 360p the video is served to
-  AVPlayer as HLS, and the iOS 6 player honours only 1x for HLS. iOS 7 and later are
-  unaffected.
-- **Some videos cannot be downloaded or cast.** Downloading and Chromecast both need a
-  single self-contained file. When YouTube serves a video only as separate video/audio
-  tracks, streaming still works but those two features are unavailable for it.
+- **Playback speed only applies at 360p on iOS 5 and 6.** Above 360p the video is served
+  to AVPlayer as HLS, and before iOS 7 the player honours only 1x for HLS. iOS 7 and later
+  are unaffected.
+- **Casting is limited to 360p.** The Chromecast needs a single self-contained file, which
+  YouTube only offers at 360p — and not for every video, so a few cannot be cast at all.
+  Streaming and downloading work at every quality.
 - **Livestreams are limited.** They play, but seeking within them does not.
 - **YouTube can break this at any time.** The app depends on undocumented internal
   endpoints and on client identities that Google periodically invalidates. When playback
@@ -167,9 +174,10 @@ These are real, current, and mostly not fixable from inside the app:
 
 ## How it works
 
-Three problems had to be solved to make a modern video service work on a 2012 OS:
+Four problems had to be solved to make a modern video service work on an OS from
+2011–2012:
 
-1. **TLS.** iOS 6 only negotiates CBC cipher suites. YouTube and its CDN require AES-GCM,
+1. **TLS.** iOS 5 and 6 only negotiate CBC cipher suites. YouTube and its CDN require AES-GCM,
    which arrived in iOS 7. Every HTTP request in the app therefore goes through a
    statically linked **libcurl 8.20 + OpenSSL 3.4**, bypassing the system TLS stack.
 
@@ -179,9 +187,16 @@ Three problems had to be solved to make a modern video service work on a 2012 OS
    range requests, seeking and mid-stream resume.
 
 3. **Quality above 360p.** Anything above 360p is delivered as separate DASH video and
-   audio tracks, which iOS 6 cannot play. oldpipe **transmuxes fragmented MP4 into
+   audio tracks, which iOS 5 and 6 cannot play. oldpipe **transmuxes fragmented MP4 into
    MPEG-TS on the fly** and serves the result to AVPlayer as an HLS stream, entirely on
    the device.
+
+4. **Swift on iOS 5.** Swift was never meant to run before iOS 7, and iOS 6 only needs the
+   version patches described under [Building](#building). iOS 5 needs more: its
+   Objective-C runtime misreads a flag Swift sets on every class, it predates the
+   `LC_MAIN` entry point, and it has none of the GCD queue objects Swift's Dispatch
+   library is built on. The iOS 5 build ships a rebuilt Swift runtime, clears that flag,
+   brings its own process entry point, and wraps GCD's C API instead.
 
 ---
 
@@ -190,13 +205,14 @@ Three problems had to be solved to make a modern video service work on a 2012 OS
 Building requires macOS with **Xcode 13.2.1** and both the **Swift 5.6.3** and
 **Swift 5.1.5** toolchains installed side by side.
 
-The three targets come from the same source tree, separated by a compile-time flag:
+The four targets come from the same source tree, separated by a compile-time flag:
 
 | Target | Flag | Deployment |
 |---|---|---|
+| iOS 5 | `-D IOS5_TARGET` | armv7, linked with `-ios_version_min 5.0` |
 | iOS 6/7 | `-D IOS6_TARGET` | 7.0, version-min patched to 6.0 |
 | iOS 7 | `-D IOS7_TARGET` | 7.0 |
-| iOS 8/9 | `-D IOS8_TARGET` | 8.0 |
+| iOS 8–12 | `-D IOS8_TARGET` | 8.0 |
 
 The pipeline compiles with **5.6.3** — the 5.1.5 compiler cannot parse modern SDK headers
 — then swaps the bundled Swift runtime dylibs for the **5.1.5** ones, which are the newest
@@ -205,9 +221,15 @@ that still run on iOS 6. Swift's ABI stability is what makes that combination wo
 supported it), `LC_VERSION_MIN_IPHONEOS` and `MinimumOSVersion` are patched down, and
 everything is ad-hoc signed before being zipped into an IPA.
 
-Because the two targets share one DerivedData directory, always run a **clean** build when
-switching flags — Swift's incremental compiler will otherwise silently reuse objects built
-with the previous flag.
+The iOS 5 build is assembled by [`ios5-shims/build-ios5.sh`](ios5-shims/build-ios5.sh) and
+goes further: it ships a rebuilt Swift 5.1.5 runtime instead of the stock one (see
+[`ios5-shims/prebuilt/`](ios5-shims/prebuilt/) for where it comes from), clears the flag
+Swift sets on its classes, links its own process entry point, and thins and strips the
+bundle down to armv7.
+
+Because the iOS 6, 7 and 8 targets share one DerivedData directory, always run a **clean**
+build when switching flags — Swift's incremental compiler will otherwise silently reuse
+objects built with the previous flag. The iOS 5 build keeps its own.
 
 ---
 
@@ -234,3 +256,6 @@ Bundled third-party components:
 |---|---|---|
 | libcurl 8.20.0 | curl (MIT-like) | Yes |
 | OpenSSL 3.4.6 | Apache-2.0 | Yes |
+| Swift 5.1.5 runtime | Apache-2.0 with Runtime Library Exception | Yes |
+| Swift 5.1.5 runtime rebuilt for iOS 5, from the `ios5-v1.0` release of [zirk-a/oldpipe](https://github.com/zirk-a/oldpipe) (iOS 5 build only) | Apache-2.0 with Runtime Library Exception upstream; the rebuild's own changes carry no stated licence | Upstream yes — see [`ios5-shims/prebuilt/README.md`](ios5-shims/prebuilt/README.md) |
+| [Phosphor Icons](https://phosphoricons.com) | MIT | Yes |
