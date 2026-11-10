@@ -243,6 +243,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     //   oldpipe://snapshot              the screen as Documents/snapshot.png
     //   oldpipe://scroll/<y>, oldpipe://back   scroll the top page / pop it
     //   oldpipe://search[/<query>]      open Search as its bar button does, optionally running <query>
+    //   oldpipe://tap/<row>             select row <row> of the top page's list, as a tap would
+    //   oldpipe://press/<action>        tap the top page's button or bar item wired to <action>,
+    //                                   e.g. playTapped, channelTapped, toggleMenu
     //   oldpipe://cast/start/<ip>       cast History's newest video to a receiver at <ip>
     //   oldpipe://cast/<toggle|stop|next|queue>, cast/seek/<s>, cast/volume/<0-1>
     // The cast ones drive CastController the way the page's buttons do, against a stand-in
@@ -268,6 +271,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             if url.pathComponents.count > 1, let page = nav.viewControllers.last as? SearchVC {
                 page.search(for: url.lastPathComponent)
             }
+            return true
+        }
+        if url.host == "tap", let row = Int(url.lastPathComponent),
+           let page = (window?.rootViewController as? UINavigationController)?.topViewController {
+            if let table = firstVisible(UITableView.self, in: page.view) {
+                table.delegate?.tableView?(table, didSelectRowAt: IndexPath(row: row, section: 0))
+            }
+            return true
+        }
+        if url.host == "press",
+           let page = (window?.rootViewController as? UINavigationController)?.topViewController {
+            press(url.lastPathComponent, on: page)
             return true
         }
         if url.host == "cast" {
@@ -313,6 +328,40 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         case "volume": if args.count > 1, let l = Double(args[1]) { cast.setVolume(l) }
         default: break
         }
+    }
+
+    // What a tap on a control does: its actions are sent, so the page runs its own code path.
+    // Bar items first (Home's menu is one), then any visible button in the page's view whose
+    // touch-up action is named `action`.
+    private func press(_ action: String, on page: UIViewController) {
+        CrashLog.mark("url: press \(action)")
+        let items = (page.navigationItem.leftBarButtonItems ?? []) + (page.navigationItem.rightBarButtonItems ?? [])
+        if let item = items.first(where: { $0.action.map(NSStringFromSelector) == action }),
+           let sel = item.action {
+            UIApplication.shared.sendAction(sel, to: item.target, from: item, for: nil)
+            return
+        }
+        var queue: [UIView] = [page.view]
+        while !queue.isEmpty {
+            let v = queue.removeFirst()
+            if let b = v as? UIButton, !b.isHidden, b.isEnabled,
+               b.allTargets.contains(where: { (b.actions(forTarget: $0.base, forControlEvent: .touchUpInside) ?? []).contains(action) }) {
+                b.sendActions(for: .touchUpInside)
+                return
+            }
+            queue.append(contentsOf: v.subviews)
+        }
+    }
+
+    // Breadth-first, so the page's own list wins over one nested further down.
+    private func firstVisible<T: UIView>(_ type: T.Type, in root: UIView) -> T? {
+        var queue: [UIView] = [root]
+        while !queue.isEmpty {
+            let v = queue.removeFirst()
+            if let hit = v as? T, !hit.isHidden { return hit }
+            queue.append(contentsOf: v.subviews.filter { !$0.isHidden })
+        }
+        return nil
     }
     #endif
 
