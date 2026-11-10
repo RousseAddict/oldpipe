@@ -244,8 +244,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     //   oldpipe://scroll/<y>, oldpipe://back   scroll the top page / pop it
     //   oldpipe://search[/<query>]      open Search as its bar button does, optionally running <query>
     //   oldpipe://tap/<row>             select row <row> of the top page's list, as a tap would
-    //   oldpipe://press/<action>        tap the top page's button or bar item wired to <action>,
-    //                                   e.g. playTapped, channelTapped, toggleMenu
+    //   oldpipe://press/<action>[/<n>]  tap the top page's button or bar item wired to <action>,
+    //                                   e.g. playTapped, channelTapped, toggleMenu; with <n>, the
+    //                                   n-th such button from 0 (pillTapped/1 = the first group)
     //   oldpipe://cast/start/<ip>       cast History's newest video to a receiver at <ip>
     //   oldpipe://cast/<toggle|stop|next|queue>, cast/seek/<s>, cast/volume/<0-1>
     // The cast ones drive CastController the way the page's buttons do, against a stand-in
@@ -282,7 +283,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         if url.host == "press",
            let page = (window?.rootViewController as? UINavigationController)?.topViewController {
-            press(url.lastPathComponent, on: page)
+            let args = Array(url.pathComponents.dropFirst())   // drop the leading "/"
+            if let action = args.first {
+                press(action, nth: args.count > 1 ? Int(args[1]) ?? 0 : 0, on: page)
+            }
             return true
         }
         if url.host == "cast" {
@@ -332,11 +336,13 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     // What a tap on a control does: its actions are sent, so the page runs its own code path.
     // Bar items first (Home's menu is one), then any visible button in the page's view whose
-    // touch-up action is named `action`.
-    private func press(_ action: String, on page: UIViewController) {
-        CrashLog.mark("url: press \(action)")
+    // touch-up action is named `action`, with or without the colon of a sender argument.
+    private func press(_ action: String, nth: Int, on page: UIViewController) {
+        CrashLog.mark("url: press \(action) \(nth)")
+        func wired(_ name: String) -> Bool { return name == action || name == action + ":" }
+        var skip = nth
         let items = (page.navigationItem.leftBarButtonItems ?? []) + (page.navigationItem.rightBarButtonItems ?? [])
-        if let item = items.first(where: { $0.action.map(NSStringFromSelector) == action }),
+        if let item = items.first(where: { $0.action.map { wired(NSStringFromSelector($0)) } ?? false }),
            let sel = item.action {
             UIApplication.shared.sendAction(sel, to: item.target, from: item, for: nil)
             return
@@ -344,12 +350,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         var queue: [UIView] = [page.view]
         while !queue.isEmpty {
             let v = queue.removeFirst()
-            if let b = v as? UIButton, !b.isHidden, b.isEnabled,
-               b.allTargets.contains(where: { (b.actions(forTarget: $0.base, forControlEvent: .touchUpInside) ?? []).contains(action) }) {
-                b.sendActions(for: .touchUpInside)
-                return
+            if let b = v as? UIButton, b.isEnabled,
+               b.allTargets.contains(where: { (b.actions(forTarget: $0.base, forControlEvent: .touchUpInside) ?? []).contains(where: wired) }) {
+                if skip == 0 {
+                    b.sendActions(for: .touchUpInside)
+                    return
+                }
+                skip -= 1
             }
-            queue.append(contentsOf: v.subviews)
+            // Not into a hidden view: nothing inside one can be tapped (an empty screen's button
+            // while the list is showing).
+            queue.append(contentsOf: v.subviews.filter { !$0.isHidden })
         }
     }
 
