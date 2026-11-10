@@ -2,7 +2,8 @@ import UIKit
 
 // MARK: - PlaylistsVC
 // Lists local playlists. "+" creates one (name via UIAlertView text input — UIAlertController
-// is iOS 8+ and crashes on iOS 6). Edit/swipe-delete removes a playlist. Tap → detail.
+// is iOS 8+ and crashes on iOS 6), as does the empty screen's button. Edit/swipe-delete removes
+// a playlist. Tap → detail.
 
 class PlaylistsVC: UIViewController, UITableViewDataSource, UITableViewDelegate, UIAlertViewDelegate {
 
@@ -10,7 +11,7 @@ class PlaylistsVC: UIViewController, UITableViewDataSource, UITableViewDelegate,
     private var didSetupUI = false
 
     private var tableView: UITableView!
-    private var statusLabel: UILabel!
+    private var emptyView: EmptyStateView!
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 
@@ -48,21 +49,26 @@ class PlaylistsVC: UIViewController, UITableViewDataSource, UITableViewDelegate,
         tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
-        statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 60))
-        statusLabel.autoresizingMask = iPadFlexWidth
-        statusLabel.backgroundColor = .clear
-        statusLabel.textColor = UIColor(white: 0.5, alpha: 1)
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 2
-        statusLabel.font = UIFont.systemFont(ofSize: 15)
-        statusLabel.text = "No playlists yet.\nTap + to create one."
-        tableView.addSubview(statusLabel)
+        emptyView = EmptyStateView(mark: .playlist, title: "No playlists yet",
+                                   body: "Tap Playlist under any video to save it to a list of your own.",
+                                   buttonTitle: "New playlist")
+        emptyView.frame = CGRect(x: 0, y: 0, width: w, height: tableView.bounds.height)
+        emptyView.onButton = { [weak self] in self?.createTapped() }
+        tableView.addSubview(emptyView)
     }
 
     private func reload() {
         playlists = PlaylistManager.all()
-        statusLabel?.isHidden = !playlists.isEmpty
+        updateEmpty()
         tableView?.reloadData()
+    }
+
+    // The empty screen, and Edit only while there is something to edit.
+    private func updateEmpty() {
+        let empty = playlists.isEmpty
+        emptyView?.isHidden = !empty
+        if empty && isEditing { setEditing(false, animated: true) }
+        editButtonItem.isEnabled = !empty
     }
 
     override func setEditing(_ editing: Bool, animated: Bool) {
@@ -137,7 +143,7 @@ class PlaylistsVC: UIViewController, UITableViewDataSource, UITableViewDelegate,
         PlaylistManager.delete(id: pl.id)
         playlists.remove(at: indexPath.row)
         tableView.deleteRows(at: [indexPath], with: .automatic)
-        statusLabel?.isHidden = !playlists.isEmpty
+        updateEmpty()
     }
 
     // MARK: - UITableViewDelegate

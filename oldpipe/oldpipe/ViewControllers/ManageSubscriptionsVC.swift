@@ -22,7 +22,8 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
 
     private var pillScroll: UIScrollView!
     private var tableView: UITableView!
-    private var statusLabel: UILabel!
+    private var noSubsView: EmptyStateView!       // no subscriptions at all
+    private var emptyGroupView: EmptyStateView!   // a group none of them are in yet
     private var feedItem: UIBarButtonItem!
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
@@ -91,15 +92,19 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
-        statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 60))
-        statusLabel.autoresizingMask = iPadFlexWidth
-        statusLabel.backgroundColor = .clear
-        statusLabel.textColor = UIColor(white: 0.5, alpha: 1)
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 2
-        statusLabel.font = UIFont.systemFont(ofSize: 15)
-        statusLabel.text = "No subscriptions yet"
-        tableView.addSubview(statusLabel)
+        noSubsView = EmptyStateView(mark: .subscriptions, title: "No subscriptions yet",
+                                    body: "Subscribe on a channel's page and its new videos will fill your feed.",
+                                    buttonTitle: "Find channels", buttonImage: UIImage(named: "search"))
+        noSubsView.onButton = { [weak self] in self?.navigationController?.goSearch() }
+        emptyGroupView = EmptyStateView(mark: .subscriptions, title: "This group is empty",
+                                        body: "Choose which of your channels belong in it.",
+                                        buttonTitle: "Choose channels")
+        emptyGroupView.onButton = { [weak self] in self?.setEditing(true, animated: true) }
+        for v in [noSubsView!, emptyGroupView!] {
+            v.frame = CGRect(x: 0, y: 0, width: w, height: tableView.bounds.height)
+            v.isHidden = true
+            tableView.addSubview(v)
+        }
     }
 
     private func reload() {
@@ -124,18 +129,14 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
             rows = allChannels
         }
 
-        if allChannels.isEmpty {
-            statusLabel?.text = "No subscriptions yet"
-            statusLabel?.isHidden = false
-        } else if rows.isEmpty {
-            statusLabel?.text = "No channels in this group.\nTap Edit to add some."
-            statusLabel?.isHidden = false
-        } else {
-            statusLabel?.isHidden = true
-        }
+        // Picking a group's channels lists every subscription, so a group only shows empty
+        // outside edit mode.
+        noSubsView?.isHidden = !allChannels.isEmpty
+        emptyGroupView?.isHidden = allChannels.isEmpty || !rows.isEmpty
     }
 
     private func updateNavItems() {
+        editButtonItem.isEnabled = !allChannels.isEmpty   // nothing to unsubscribe or pick
         if activeGroupId != nil {
             feedItem.isEnabled = !memberIds.isEmpty
             navigationItem.rightBarButtonItems = [editButtonItem, feedItem]
@@ -320,8 +321,8 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         rows.remove(at: indexPath.row)
         tableView.deleteRows(at: [indexPath], with: .automatic)
         if allChannels.isEmpty {
-            statusLabel?.text = "No subscriptions yet"
-            statusLabel?.isHidden = false
+            setEditing(false, animated: true)   // which rebuilds the rows, so the empty screen shows
+            updateNavItems()
         }
     }
 

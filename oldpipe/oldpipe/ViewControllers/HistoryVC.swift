@@ -14,7 +14,8 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
     private var didSetupUI = false
 
     private var tableView: UITableView!
-    private var statusLabel: UILabel!
+    private var emptyView: EmptyStateView!
+    private var clearItem: UIBarButtonItem!
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 
@@ -22,8 +23,8 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
         super.viewDidLoad()
         title = "History"
         view.backgroundColor = bg
-        let clear = UIBarButtonItem(title: "Clear", style: .plain, target: self, action: #selector(clearTapped))
-        navigationItem.rightBarButtonItems = [editButtonItem, clear]
+        clearItem = UIBarButtonItem(title: "Clear", style: .plain, target: self, action: #selector(clearTapped))
+        navigationItem.rightBarButtonItems = [editButtonItem, clearItem]
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -53,15 +54,10 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
         tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
-        statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 60))
-        statusLabel.autoresizingMask = iPadFlexWidth
-        statusLabel.backgroundColor = .clear
-        statusLabel.textColor = UIColor(white: 0.5, alpha: 1)
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 2
-        statusLabel.font = UIFont.systemFont(ofSize: 15)
-        statusLabel.text = "No history yet.\nVideos you play will appear here."
-        tableView.addSubview(statusLabel)
+        emptyView = EmptyStateView(mark: .history, title: "No history yet",
+                                   body: "Videos you watch will show up here, with how far you got in each.")
+        emptyView.frame = CGRect(x: 0, y: 0, width: w, height: tableView.bounds.height)
+        tableView.addSubview(emptyView)
     }
 
     private func reload() {
@@ -79,8 +75,17 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
                 }
             }
         }
-        statusLabel?.isHidden = !videos.isEmpty
+        updateEmpty()
         tableView?.reloadData()
+    }
+
+    // The empty screen, and Edit and Clear only while there is something to remove.
+    private func updateEmpty() {
+        let empty = videos.isEmpty
+        emptyView?.isHidden = !empty
+        if empty && isEditing { setEditing(false, animated: true) }
+        editButtonItem.isEnabled = !empty
+        clearItem.isEnabled = !empty
     }
 
     // Parse "8:00" / "1:02:03" → seconds. Returns 0 if unparseable.
@@ -144,7 +149,7 @@ class HistoryVC: UIViewController, UITableViewDataSource, UITableViewDelegate, U
         HistoryManager.remove(id: videos[indexPath.row].id)
         videos.remove(at: indexPath.row)
         tableView.deleteRows(at: [indexPath], with: .automatic)
-        statusLabel?.isHidden = !videos.isEmpty
+        updateEmpty()
     }
 
     // MARK: - UITableViewDelegate

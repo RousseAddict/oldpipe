@@ -30,19 +30,13 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         tv.separatorColor = UIColor(white: 0.2, alpha: 1)
         tv.dataSource = self
         tv.delegate = self
+        tv.contentInset = UIEdgeInsets(top: 0, left: 0, bottom: 60, right: 0)   // mini player bar
+        tv.tableFooterView = UIView()   // no empty separator rows under a short or empty list
         return tv
     }()
 
-    private lazy var emptyLabel: UILabel = {
-        let l = UILabel()
-        l.backgroundColor = .clear
-        l.textColor = UIColor(white: 0.5, alpha: 1)
-        l.textAlignment = .center
-        l.font = UIFont.systemFont(ofSize: 15)
-        l.numberOfLines = 2
-        l.text = "No downloads yet"
-        return l
-    }()
+    private lazy var emptyView = EmptyStateView(mark: .download, title: "No downloads yet",
+                                                body: "Tap Download under any video to keep a copy you can watch offline.")
 
     // MARK: - Lifecycle
 
@@ -115,9 +109,8 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         // portrait-locked in the pbxproj so autoresizing never triggers there.
         tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
-        emptyLabel.frame = CGRect(x: 20, y: 80, width: w - 40, height: 60)
-        emptyLabel.autoresizingMask = iPadFlexWidth
-        view.addSubview(emptyLabel)
+        emptyView.frame = CGRect(x: 0, y: 0, width: w, height: tableView.bounds.height)
+        tableView.addSubview(emptyView)
     }
 
     private func reload() {
@@ -141,8 +134,16 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
             }
         }
         shownState = currentRowState()
-        emptyLabel.isHidden = !videos.isEmpty
+        updateEmpty()
         tableView.reloadData()
+    }
+
+    // The empty screen, and Edit only while there is something to delete.
+    private func updateEmpty() {
+        let empty = videos.isEmpty
+        emptyView.isHidden = !empty
+        if empty && isEditing { setEditing(false, animated: true) }
+        editButtonItem.isEnabled = !empty
     }
 
     override func setEditing(_ editing: Bool, animated: Bool) {
@@ -244,7 +245,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         videos.remove(at: indexPath.row)
         sizeText[video.id] = nil
         tableView.deleteRows(at: [indexPath], with: .automatic)
-        emptyLabel.isHidden = !videos.isEmpty
+        updateEmpty()
     }
 
     // MARK: - UITableViewDelegate

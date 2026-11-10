@@ -14,7 +14,7 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
     private var didSetupUI = false
 
     private var tableView: UITableView!
-    private var statusLabel: UILabel!
+    private var emptyView: EmptyStateView!
     private var shuffleHeader: UIView!
 
     private let bg = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
@@ -60,14 +60,10 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         tableView.autoresizingMask = iPadFlexWidthHeight
         view.addSubview(tableView)
 
-        statusLabel = UILabel(frame: CGRect(x: 20, y: 40, width: w - 40, height: 40))
-        statusLabel.autoresizingMask = iPadFlexWidth
-        statusLabel.backgroundColor = .clear
-        statusLabel.textColor = UIColor(white: 0.5, alpha: 1)
-        statusLabel.textAlignment = .center
-        statusLabel.font = UIFont.systemFont(ofSize: 15)
-        statusLabel.text = "This playlist is empty"
-        tableView.addSubview(statusLabel)
+        emptyView = EmptyStateView(mark: .playlist, title: "This playlist is empty",
+                                   body: "Add videos with the Playlist button under any video.")
+        emptyView.frame = CGRect(x: 0, y: 0, width: w, height: tableView.bounds.height)
+        tableView.addSubview(emptyView)
 
         shuffleHeader = makeShuffleHeader(width: w)
     }
@@ -91,20 +87,23 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         return header
     }
 
-    // The empty-state label sits at y=40 inside the table, under where the header would be,
-    // so the header only exists while there is something to shuffle.
-    private func updateShuffleHeader() {
+    // The empty screen fills the table, header area included, so the header only exists while
+    // there is something to shuffle. Edit likewise only while there is something to remove.
+    private func updateEmpty() {
         guard let tv = tableView else { return }
-        let header: UIView? = videos.isEmpty ? nil : shuffleHeader
+        let empty = videos.isEmpty
+        emptyView.isHidden = !empty
+        let header: UIView? = empty ? nil : shuffleHeader
         if tv.tableHeaderView !== header { tv.tableHeaderView = header }
+        if empty && isEditing { setEditing(false, animated: true) }
+        editButtonItem.isEnabled = !empty
     }
 
     private func reload() {
         playlist = PlaylistManager.playlist(id: playlistId)
         videos = playlist?.videos ?? []
         title = playlist?.name ?? "Playlist"
-        statusLabel?.isHidden = !videos.isEmpty
-        updateShuffleHeader()
+        updateEmpty()
         tableView?.reloadData()
     }
 
@@ -167,8 +166,7 @@ class PlaylistDetailVC: UIViewController, UITableViewDataSource, UITableViewDele
         PlaylistManager.remove(videoId: video.id, from: playlistId)
         videos.remove(at: indexPath.row)
         tableView.deleteRows(at: [indexPath], with: .automatic)
-        statusLabel?.isHidden = !videos.isEmpty
-        updateShuffleHeader()
+        updateEmpty()
     }
 
     // MARK: - UITableViewDelegate

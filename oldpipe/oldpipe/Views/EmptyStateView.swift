@@ -3,12 +3,13 @@ import UIKit
 // MARK: - EmptyStateView
 // A page with nothing to list yet: a glyph on a faint disc, a title, a line of explanation and an
 // optional button. Full-size over its table and clear, so it places its own content:
-//   regular — centred in the space above the mini player bar (Home's feed with no channels)
+//   regular — centred in the space above the mini player bar (Home's feed with no channels, and
+//             the library pages: Subscriptions, Playlists, Downloads, History)
 //   compact — a smaller block near the top, which stays clear of the keyboard on a 3.5" iPhone
 //             (Search, whose field usually has the keyboard up)
 
 final class EmptyStateView: UIView {
-    enum Mark { case logo, search }
+    enum Mark { case logo, search, subscriptions, playlist, download, history }
 
     private let mark: EmptyStateMarkView
     private let titleLabel = UILabel()
@@ -124,10 +125,7 @@ private final class EmptyStateMarkView: UIView {
         UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: s, height: s)).fill()
         Theme.accent.setFill()
         Theme.accent.setStroke()
-        switch kind {
-        case .logo: drawLogo(s)
-        case .search: drawSearch(s)
-        }
+        if kind == .logo { drawLogo(s) } else { drawGlyph(s) }
     }
 
     // The play glyph from the app icon. The icon SVG (assets/oldpipe_icon_ios.svg) draws it in a
@@ -148,21 +146,56 @@ private final class EmptyStateMarkView: UIView {
         glyph.fill()
     }
 
-    // A magnifier with Phosphor's proportions (lens r 80 at 112,112 and a handle out to 224,224
-    // in a 256-unit box), set in the middle half of the disc.
-    private func drawSearch(_ s: CGFloat) {
+    // Every other mark is a Phosphor icon traced from its 256-unit artboard (the outline
+    // weight's centre lines, stroked 24 wide with round ends and corners), set in the middle
+    // half of the disc. The same family as the bundled toolbar icons.
+    private func drawGlyph(_ s: CGFloat) {
         let k = s * 0.5 / 256
         let o = s * 0.25
-        func p(_ v: CGFloat) -> CGFloat { return o + v * k }
-        let line = 24 * k
-        let lens = UIBezierPath(ovalIn: CGRect(x: p(32), y: p(32), width: 160 * k, height: 160 * k))
-        lens.lineWidth = line
-        lens.stroke()
-        let handle = UIBezierPath()
-        handle.move(to: CGPoint(x: p(168.57), y: p(168.57)))
-        handle.addLine(to: CGPoint(x: p(224), y: p(224)))
-        handle.lineWidth = line
-        handle.lineCapStyle = .round
-        handle.stroke()
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { return CGPoint(x: o + x * k, y: o + y * k) }
+        let path = UIBezierPath()
+        path.lineWidth = 24 * k
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        func line(_ pts: [(CGFloat, CGFloat)]) {
+            path.move(to: p(pts[0].0, pts[0].1))
+            for q in pts.dropFirst() { path.addLine(to: p(q.0, q.1)) }
+        }
+        // Degrees, clockwise on screen unless `cw` is false. Moves to the start first, or the
+        // arc would be joined to the previous stroke by a line.
+        func arc(_ cx: CGFloat, _ cy: CGFloat, _ r: CGFloat, _ from: CGFloat, _ to: CGFloat, cw: Bool = true) {
+            let a = from * .pi / 180
+            path.move(to: p(cx + r * cos(a), cy + r * sin(a)))
+            path.addArc(withCenter: p(cx, cy), radius: r * k, startAngle: a,
+                        endAngle: to * .pi / 180, clockwise: cw)
+        }
+        switch kind {
+        case .search:          // magnifying-glass
+            arc(112, 112, 80, 0, 360)
+            line([(168.57, 168.57), (224, 224)])
+        case .subscriptions:   // users
+            arc(84, 108, 52, 0, 360)
+            arc(84, 248, 88, -146.9, -33.1)
+            arc(172, 108, 52, -111.8, 90)
+            arc(172, 248, 88, -90, -33.1)
+        case .playlist:        // playlist
+            line([(40, 64), (216, 64)])
+            line([(40, 128), (136, 128)])
+            line([(40, 192), (136, 192)])
+            line([(240, 160), (176, 200), (176, 120)])
+            path.close()
+        case .download:        // download-simple
+            line([(128, 144), (128, 32)])
+            line([(168, 104), (128, 144), (88, 104)])
+            line([(216, 144), (216, 208), (40, 208), (40, 144)])
+        case .history:         // clock-counter-clockwise
+            line([(128, 80), (128, 128), (169.57, 152)])
+            line([(72, 104), (32, 104), (32, 64)])
+            arc(128, 128, 88, 133.34, -135, cw: false)
+            path.addCurve(to: p(32, 104), controlPoint1: p(54, 77.69), controlPoint2: p(44, 88.07))
+        case .logo:
+            return
+        }
+        path.stroke()
     }
 }
