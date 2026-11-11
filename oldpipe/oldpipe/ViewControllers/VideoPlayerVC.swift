@@ -3106,40 +3106,71 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Re-apply the track held by the singleton. This VC is built from scratch every time the
     // player is reopened (mini bar, history, a second tap on the same video), so without this
     // the captions the viewer turned on come back off. Runs once the refetched track list is
-    // in; the cached cues are reused when they are still the right ones.
+    // in; the cached cues are reused when they are still the right ones. With nothing chosen
+    // for this video yet, the Settings caption language gets its turn.
     private func restoreCaptionSelection() {
-        guard activeCaptionIndex < 0, !captionTracks.isEmpty, sp.isActive(video.id),
-              let key = sp.activeCaptionKey,
-              let index = captionTracks.firstIndex(where: { $0.key == key }) else { return }
-        guard !sp.activeCaptionCues.isEmpty else {
-            selectCaption(index)   // picked, but the transcript never finished loading
+        guard activeCaptionIndex < 0, !captionTracks.isEmpty else { return }
+        if sp.isActive(video.id), let key = sp.activeCaptionKey {
+            // "" = turned off by hand for this video, which the Settings language must not undo.
+            guard let index = captionTracks.firstIndex(where: { $0.key == key }) else { return }
+            guard !sp.activeCaptionCues.isEmpty else {
+                selectCaption(index)   // picked, but the transcript never finished loading
+                return
+            }
+            activeCaptionIndex = index
+            captionCues = sp.activeCaptionCues
+            captionCueIndex = -1
+            ensureCaptionPlate()
+            startCaptionTimer()
             return
         }
-        activeCaptionIndex = index
-        captionCues = sp.activeCaptionCues
-        captionCueIndex = -1
-        ensureCaptionPlate()
-        startCaptionTimer()
+        // Captions are not cast, so on the TV this would fetch a transcript nobody sees.
+        guard !cast.isCasting(video.id), let index = preferredCaptionIndex() else { return }
+        selectCaption(index, quiet: true)
+    }
+
+    // The track the Settings caption language turns on by itself: that language's human-made
+    // track, else its auto-generated one, else none — the video simply plays without captions.
+    private func preferredCaptionIndex() -> Int? {
+        let lang = AppSettings.captionLanguage
+        guard lang != "off" else { return nil }
+        let hits = captionTracks.indices.filter { Captions.primaryLanguage(captionTracks[$0].languageCode) == lang }
+        let pick = hits.first { !captionTracks[$0].isASR } ?? hits.first
+        DebugLog.log("Captions", "default lang=\(lang) tracks=\(captionTracks.map { $0.key }) "
+            + "pick=\(pick.map { captionTracks[$0].key } ?? "none")")
+        return pick
     }
 
     // index < 0 turns captions off; otherwise fetch + parse the track, then start ticking.
-    private func selectCaption(_ index: Int) {
+    // quiet == true when the Settings caption language picked the track: a failure then just
+    // leaves captions off instead of raising an alert nobody asked for.
+    //
+    // The singleton only hears about the video it is playing. The Settings language picks
+    // before the play tap, while the mini bar may still be playing another video — writing the
+    // pick there would turn captions on for THAT one. captionTick hands it over once this
+    // video plays.
+    private func selectCaption(_ index: Int, quiet: Bool = false) {
         captionCueIndex = -1
         captionLabel?.text = ""
         captionPlate?.isHidden = true
+        let owns = sp.isActive(video.id)
         guard index >= 0, index < captionTracks.count else {
             activeCaptionIndex = -1
             captionCues = []
-            sp.activeCaptionKey = nil
-            sp.activeCaptionCues = []
+            if owns {
+                sp.activeCaptionKey = ""   // off on purpose — see restoreCaptionSelection
+                sp.activeCaptionCues = []
+            }
             stopCaptionTimer()
             return
         }
         activeCaptionIndex = index
         captionCues = []
         let track = captionTracks[index]
-        sp.activeCaptionKey = track.key
-        sp.activeCaptionCues = []
+        if owns {
+            sp.activeCaptionKey = track.key
+            sp.activeCaptionCues = []
+        }
         Captions.load(track, videoId: video.id) { [weak self] cues in
             guard let self = self else { return }
             // A newer pick (or an auto-advance) may have landed while this was in flight.
@@ -3147,12 +3178,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             // would make every row look like the selected one.
             guard self.activeCaptionIndex >= 0, self.activeCaptionIndex < self.captionTracks.count,
                   self.captionTracks[self.activeCaptionIndex].key == track.key else { return }
+            let held = self.sp.isActive(self.video.id) && self.sp.activeCaptionKey == track.key
             self.captionCues = cues
-            self.sp.activeCaptionCues = cues
+            if held { self.sp.activeCaptionCues = cues }
             if cues.isEmpty {
                 self.activeCaptionIndex = -1
-                self.sp.activeCaptionKey = nil
+                if held { self.sp.activeCaptionKey = nil }
                 self.stopCaptionTimer()
+                guard !quiet else { return }
                 let alert = UIAlertView()
                 alert.title = "Captions"
                 alert.message = "Could not load \(track.name)."
@@ -3235,6 +3268,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // whenever the controls auto-hide, which is exactly when captions matter most.
     private func captionTick() {
         guard !captionCues.isEmpty, sp.isActive(video.id) else { return }
+        // A track the Settings language picked before the play tap was kept off the singleton
+        // (selectCaption), and the play cleared it for the new video anyway. Hand it over now,
+        // so a Back + reopen from the mini bar keeps it without a refetch.
+        if sp.activeCaptionKey == nil, activeCaptionIndex >= 0, activeCaptionIndex < captionTracks.count {
+            sp.activeCaptionKey = captionTracks[activeCaptionIndex].key
+            sp.activeCaptionCues = captionCues
+        }
         let i = Captions.cueIndex(at: sp.currentSeconds, in: captionCues, hint: captionCueIndex)
         guard i != captionCueIndex else { return }
         captionCueIndex = i

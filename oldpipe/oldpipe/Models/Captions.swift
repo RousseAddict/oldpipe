@@ -60,6 +60,20 @@ enum Captions {
         }
     }
 
+    // A language code reduced to what the Settings caption language compares: the primary
+    // subtag, lowercased, so "en-US" and "es-419" match "en" and "es" — and "fil" does not
+    // match "fi", as a prefix test would. YouTube still uses the retired ISO codes for three
+    // languages that iOS reports by their current ones.
+    static func primaryLanguage(_ code: String) -> String {
+        let p = String(code.prefix { $0 != "-" && $0 != "_" }).lowercased()
+        switch p {
+        case "iw": return "he"
+        case "in": return "id"
+        case "ji": return "yi"
+        default: return p
+        }
+    }
+
     // The baseUrl YouTube hands us already ends in `fmt=srv3`, and the timedtext endpoint
     // IGNORES a second `&fmt=` — the existing one must be REPLACED. srv1 is the flat
     // `<text start="0.32" dur="14.26">line</text>` form: no per-word <s> timings and no

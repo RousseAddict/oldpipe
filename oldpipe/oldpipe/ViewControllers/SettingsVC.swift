@@ -24,6 +24,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var copyBtn: UIButton?
     private var qualityBtn: UIButton?
     private var fpsBtn: UIButton?
+    private var captionLangBtn: UIButton?
     private var captionSizeBtn: UIButton?
     private var copyDebugBtn: UIButton?
     private var copyCrashBtn: UIButton?
@@ -133,6 +134,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
             subtitle: "Which version to play when a video offers the same quality at both frame rates. Videos published only at 60 fps still play at 60 fps.",
             title: "Frame Rate: \(AppSettings.defaultFpsLabel())",
             action: #selector(fpsTapped), at: &y, width: contentW, pad: pad)
+
+        captionLangBtn = addPreferenceRow(
+            subtitle: "Turn captions on in this language when a video has them, auto-generated ones included.",
+            title: "Caption Language: \(AppSettings.captionLanguageLabel())",
+            action: #selector(captionLanguageTapped), at: &y, width: contentW, pad: pad)
 
         // NOTE: there is deliberately NO download-quality row. The download modal lists every
         // option with its size and remembers what was picked last, so a stored preference here
@@ -311,8 +317,8 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     }
 
     // Sheet tags are a space of their own here (VideoPlayerVC uses 1-7 for its own sheets):
-    // 10 = playback quality, 11 = caption size, 12 = frame rate. 13 was the download quality
-    // sheet, removed with that setting — free to reuse.
+    // 10 = playback quality, 11 = caption size, 12 = frame rate, 13 = caption language (13 was
+    // the download quality sheet before that setting was removed).
     //
     // Empty init + addButton, NOT the variadic otherButtonTitles: convenience init, which
     // crashes on the 5.1.5 runtime.
@@ -341,6 +347,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
                         options: ["Auto", "Small", "Medium", "Large", "Extra Large"])
     }
 
+    @objc private func captionLanguageTapped() {
+        showChoiceSheet(tag: 13, title: "Caption Language",
+                        options: AppSettings.captionLanguageChoices().map { AppSettings.captionLanguageName($0) })
+    }
+
     // The sheets all have the same shape: an index-aligned value list, then store + retitle.
     // The Cancel button sits one past the end of `values`, so an out-of-range index — Cancel,
     // or a dismissal — falls through apply() and changes nothing.
@@ -360,6 +371,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
             apply(["30", "60"], buttonIndex) {
                 AppSettings.defaultFps = $0
                 self.fpsBtn?.setTitle("Frame Rate: \(AppSettings.defaultFpsLabel())", for: .normal)
+            }
+        case 13:
+            apply(AppSettings.captionLanguageChoices(), buttonIndex) {
+                AppSettings.captionLanguage = $0
+                self.captionLangBtn?.setTitle("Caption Language: \(AppSettings.captionLanguageLabel())", for: .normal)
             }
         default:
             break

@@ -152,6 +152,41 @@ enum AppSettings {
         }
     }
 
+    private static let captionLanguageKey = "caption_language"
+
+    // The caption language to turn on by itself when a video opens. "off" (the default) keeps
+    // captions off until picked in the player, as before; otherwise a primary language code
+    // (Captions.primaryLanguage). A video gets its human-made track in that language, else its
+    // auto-generated one, else no captions — never a machine translation. A track picked or
+    // turned off in the player still wins for that video. String-backed like the rest.
+    static var captionLanguage: String {
+        get { UserDefaults.standard.string(forKey: captionLanguageKey) ?? "off" }
+        set {
+            UserDefaults.standard.set(newValue, forKey: captionLanguageKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+
+    // What the Settings sheet offers, in order: off, the device's own language when the list
+    // lacks it, then languages YouTube captions often come in. Kept short so the sheet fits an
+    // iPhone 4's screen.
+    static func captionLanguageChoices() -> [String] {
+        let common = ["en", "fr", "es", "pt", "de", "it", "ru", "ar", "ja", "zh"]
+        let device = Captions.primaryLanguage(Locale.preferredLanguages.first ?? "en")
+        return ["off"] + (common.contains(device) ? [] : [device]) + common
+    }
+
+    // English names, like the rest of the UI. NSLocale's displayName(forKey:value:) is iOS 2+;
+    // Locale.localizedString(forLanguageCode:) would be iOS 10.
+    static func captionLanguageName(_ code: String) -> String {
+        guard code != "off" else { return "Off" }
+        return NSLocale(localeIdentifier: "en").displayName(forKey: .languageCode, value: code) ?? code
+    }
+
+    static func captionLanguageLabel() -> String {
+        return captionLanguageName(captionLanguage)
+    }
+
     private static let debugLoggingKey = "debug_logging_enabled"
 
     // Off by default. When on, DebugLog.log(_:_:) records breadcrumbs through the playback

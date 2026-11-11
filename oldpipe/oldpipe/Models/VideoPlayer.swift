@@ -70,7 +70,8 @@ class VideoPlayer {
     // Back destroys the player VC while playback carries on in the mini bar, so a selection
     // owned by the VC quietly switched itself off on the way back in. The parsed cues ride
     // along so re-entering costs no refetch and shows a line immediately. Cleared when a
-    // *different* video is loaded.
+    // *different* video is loaded. "" = turned off on purpose; nil = nothing chosen yet, which
+    // leaves the Settings caption language free to pick a track.
     var activeCaptionKey: String?
     var activeCaptionCues: [CaptionCue] = []
 
