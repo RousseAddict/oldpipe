@@ -198,6 +198,10 @@ done
 /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$APP/Info.plist"
 /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$APP/Info.plist"
 
+# A pre-rendered icon for Cydia installs: iOS 5/6 draws an /Applications app's icon
+# verbatim, so the square AppIcon showed square there (issue #33). The script says why.
+"$ROOT/assets/legacy-icon/add-legacy-icon.sh" "$APP"
+
 # ── 6b. Strip Swift's is-Swift class bit ─────────────────────────────────────
 # Must run BEFORE signing: it rewrites bytes in __DATA. Covers the executable
 # AND every dylib -- the Swift runtime carries tagged classes of its own, and
