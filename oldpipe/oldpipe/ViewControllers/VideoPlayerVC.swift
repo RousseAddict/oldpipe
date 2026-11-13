@@ -178,6 +178,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var scrollView: UIScrollView?
     private var thumbView: AsyncImageView?
     private var playBtn: UIButton?
+    // playBtn is showing the replay arrow (the video played to its end) — see handleEnded.
+    private var showingReplay = false
     private var statusLabel: UILabel?
     private var spinner: UIActivityIndicatorView?
     private var titleLabel: CopyableLabel?
@@ -349,6 +351,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             guard let self = self, self.sp.nextInQueue(after: self.video.id) != nil else { return }
             self.handleAdvanceFailed()
         }
+        // The video played to its end with nothing queued after it: offer a replay.
+        sp.onEnded = { [weak self] id in
+            guard let self = self, self.video.id == id else { return }
+            self.handleEnded()
+        }
 
         // The queue may have moved while this page was covered (Shorts replaced it, or a
         // lock-screen Next), and a start that settled meanwhile was not reported here.
@@ -373,6 +380,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onRateReverted = nil
         sp.onStartSettled = nil
         sp.onAdvanceFailed = nil
+        sp.onEnded = nil
         cast.onAdvance = nil
         cast.stopDiscovery()
         // A held > tap goes with the page: playback must not start behind the screen pushed
@@ -433,9 +441,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // fullscreen overlay. Left in the container they render behind the overlay, so a quality
     // switch (or a reconnect) made in fullscreen showed no "Loading stream..." feedback at all.
     // Fullscreen parks the label above the controls bar instead of under it.
+    // The centre button follows too — it is the replay arrow when a video ends in fullscreen,
+    // and the retry after a failure there. Brought to the front when it stays put: exiting
+    // fullscreen re-adds the tap-catcher on top of the container, which would swallow its taps.
     private func layoutStatusViews(in host: UIView, fullscreen: Bool) {
         let w = host.bounds.width
         let h = host.bounds.height
+        if let pb = playBtn {
+            pb.frame = CGRect(x: (w - 64) / 2, y: (h - 64) / 2, width: 64, height: 64)
+            if pb.superview !== host { host.addSubview(pb) } else { host.bringSubviewToFront(pb) }
+        }
         if let sl = statusLabel {
             sl.frame = CGRect(x: 0, y: fullscreen ? h - 74 : h - 34, width: w, height: 34)
             if sl.superview !== host { host.addSubview(sl) }
@@ -459,7 +474,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Reattach onto already-running playback (from mini bar / returning to the VC).
     private func showActivePlayback() {
-        playBtn?.isHidden = true
+        // Back onto a video that already played to its end (reopened from the mini bar, say):
+        // the replay arrow, as when it ends on this page.
+        clearReplayButton()
+        if sp.isFinished { showReplayButton() } else { playBtn?.isHidden = true }
         statusLabel?.isHidden = true
         hideThumbForPlayback()
         attachLayer()
@@ -498,6 +516,39 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             statusLabel?.isHidden = false
             playBtn?.isHidden = false
         }
+    }
+
+    // MARK: - End of video (replay)
+
+    // The video played to its end and nothing is queued after it. The centre button comes back
+    // as a replay arrow over the last frame, and the bar stays up with the same arrow on its
+    // play button; either starts the video over in place (VideoPlayer.replay).
+    private func handleEnded() {
+        guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
+        showReplayButton()
+        showControls()
+    }
+
+    private func showReplayButton() {
+        showingReplay = true
+        playBtn?.setImage(UIImage(named: "replay"), for: .normal)
+        playBtn?.isHidden = false
+    }
+
+    // The centre button back to a plain play button. Only the image: whether it shows is the
+    // caller's business.
+    private func clearReplayButton() {
+        guard showingReplay else { return }
+        showingReplay = false
+        playBtn?.setImage(UIImage(named: "play"), for: .normal)
+    }
+
+    // Run with every progress refresh: once the video no longer sits at its end — scrubbed
+    // back, or restarted from the bar, the lock screen or the headphones — the arrow goes.
+    private func syncReplayButton() {
+        guard showingReplay, !(sp.isActive(video.id) && sp.isFinished) else { return }
+        clearReplayButton()
+        playBtn?.isHidden = true
     }
 
     private func handleAutoAdvance(_ newVideo: Video) {
@@ -637,6 +688,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         statusLabel?.text = "Couldn't load the next video"
         statusLabel?.isHidden = false
         if sp.isActive(video.id) { showControls() } else { playBtn?.isHidden = false }
+        // A Next off a finished video hid the replay arrow; that video is still finished.
+        if sp.isActive(video.id), sp.isFinished { showReplayButton() }
         refreshUpNext()
     }
 
@@ -773,7 +826,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let videoH = floor(w * 9.0 / 16.0)
         container.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
         thumbView?.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
-        playBtn?.frame = CGRect(x: (w - 64) / 2, y: (videoH - 64) / 2, width: 64, height: 64)
+        // playBtn is placed by layoutStatusViews, on whichever host it lives on.
 
         if fsOverlay == nil {
             layoutStatusViews(in: container, fullscreen: false)
@@ -2303,6 +2356,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         cancelPlayAttempt()
         controlsView?.isHidden = true
         playBtn?.isHidden = true
+        clearReplayButton()   // back from the TV, it is a plain play button again
         hideSpinner()
         statusLabel?.isHidden = true
         thumbView?.isHidden = false   // the artwork shows through the panel's tint
@@ -2648,7 +2702,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     private func showControls() {
         controlsView?.isHidden = false
-        playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
+        syncPlayPauseIcon()
         updateProgress()
         startProgressTimer()
         armControlsHideTimer()
@@ -2662,12 +2716,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Toggle the bar on a tap anywhere on the video (only while a video is loaded and not
-    // casting — the cast panel has its own controls).
+    // casting — the cast panel has its own controls). Not hidden at the end of the video: it
+    // carries the replay, and its progress ticker is what takes the replay arrow away again
+    // (syncReplayButton) when the video is restarted from elsewhere.
     @objc private func videoAreaTapped() {
         guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
         if controlsView?.isHidden ?? true {
             showControls()
-        } else {
+        } else if !sp.isFinished {
             hideControls()
         }
     }
@@ -2761,6 +2817,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     private func updateProgress() {
+        syncReplayButton()
         guard sp.isReady else { return }
         let dur = sp.durationSeconds
         let cur = sp.currentSeconds
@@ -2771,12 +2828,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             currentTimeLabel?.text = clockText(cur)
         }
         // Keep button glyph in sync with actual rate.
-        playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
+        syncPlayPauseIcon()
+    }
+
+    // Pause while playing. At the end of the video a replay arrow, since play starts it over
+    // (VideoPlayer.play); otherwise play.
+    private func syncPlayPauseIcon() {
+        let name = sp.isPlaying ? "pause" : (sp.isFinished ? "replay" : "play")
+        playPauseBtn?.setImage(UIImage(named: name), for: .normal)
     }
 
     @objc private func togglePlayPause() {
-        sp.togglePlayPause()
-        playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
+        sp.togglePlayPause()   // at the end of the video, this is the replay
+        syncPlayPauseIcon()
+        syncReplayButton()
         // Re-arm the auto-hide (arms only if now playing; stays visible if now paused).
         armControlsHideTimer()
     }
@@ -3348,6 +3413,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // screen — and keeps turning through the stall, since Core Animation renders out of
     // process. The fade also takes > out of play: an animating view ignores touches.
     @objc private func playTapped() {
+        // At the end of the video this button is the replay arrow: start over in place. The
+        // stream is still loaded, so none of the start-up below (fade, spinner, resolve) applies.
+        if showingReplay {
+            clearReplayButton()
+            if sp.isActive(video.id), sp.isReady {
+                playBtn?.isHidden = true
+                sp.replay()
+                showControls()
+                return
+            }
+        }
         guard !startPending else { return }
         startPending = true
         statusLabel?.text = "Loading..."

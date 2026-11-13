@@ -112,6 +112,30 @@ class VideoPlayer {
     var isStarting: Bool { return advanceWaitTimer != nil }
     var onStartSettled: (() -> Void)?
 
+    // MARK: - End of video (replay)
+    // AVPlayer stops on the last frame and stays there: it does not rewind, so a later play()
+    // sets a rate on an item with nothing left to play — nothing moves, and the button that
+    // reads the rate flips to "pause". play() therefore starts a finished video over (replay),
+    // which covers every caller at once: the page, the mini bar, Shorts, the lock screen and
+    // the headphone button.
+    //
+    // `hasEnded`: the current video played to its end and no playlist video followed it. Set
+    // by handlePlaybackEnded (or an autoplay that could not start); cleared by load, any seek,
+    // replay and stop.
+    private var hasEnded = false
+    // Set by the frontmost VideoPlayerVC, like onAdvance, so it can offer a replay. Carries
+    // the video it is about: a page opened over someone else's playback ignores it.
+    var onEnded: ((_ videoId: String) -> Void)?
+
+    // True when play() would start the video over rather than carry on: it played to its end,
+    // or it sits paused on its very last frame (scrubbed there, say).
+    var isFinished: Bool {
+        guard isReady, !isPlaying else { return false }
+        if hasEnded { return true }
+        let d = durationSeconds
+        return d > 0 && currentSeconds >= d - 0.25
+    }
+
     func setQueue(_ videos: [Video], startIndex: Int) {
         queue = videos
         queueIndex = startIndex
@@ -227,6 +251,8 @@ class VideoPlayer {
         didApplyResume = false
         lastSavedPos = resume
         markedWatched = false
+        hasEnded = false
+        resetTailWatch()
         // Watchdog state is per-load, except the attempt counter during a recovery — that one
         // has to survive the reload it is driving, or every attempt would look like the first.
         // Loading a *different* video supersedes a recovery outright.
@@ -303,9 +329,27 @@ class VideoPlayer {
         updateNowPlayingInfo()
     }
 
-    func play() { wantsPlayback = true; player?.rate = playbackRate; updateNowPlayingInfo() }
+    func play() {
+        if isFinished { replay(); return }
+        wantsPlayback = true; player?.rate = playbackRate; updateNowPlayingInfo()
+    }
     func pause() { wantsPlayback = false; player?.pause(); saveResume(); updateNowPlayingInfo() }
     func togglePlayPause() { if isPlaying { pause() } else { play() } }
+
+    // Start the current video over from the top, in place: the item is still loaded, so this
+    // is a seek and a play, not a reload. A stream's transfer was closed at the end, but its
+    // proxy route stays valid (as for any scrub back); a URL that expired while the video sat
+    // finished is the watchdog's to deal with, as it would be mid-video.
+    func replay() {
+        guard isReady, let p = player, let v = currentVideo else { return }
+        DebugLog.log("VideoPlayer", "replay id=\(v.id)")
+        hasEnded = false
+        resetTailWatch()
+        p.seek(to: CMTime.zero, toleranceBefore: CMTime.zero, toleranceAfter: CMTime.zero)
+        wantsPlayback = true
+        p.rate = playbackRate
+        updateNowPlayingInfo()
+    }
 
     // MARK: - Playback speed
     // Setting a non-zero rate is what starts playback, so `play()` is really "rate = 1.0" —
@@ -405,6 +449,7 @@ class VideoPlayer {
         guard let it = item else { return }
         let dur = CMTimeGetSeconds(it.duration)
         guard dur.isFinite, dur > 0 else { return }
+        hasEnded = false   // scrubbed back: play carries on from there (see isFinished)
         player?.seek(to: CMTimeMakeWithSeconds(f * dur, preferredTimescale: 600))
         updateNowPlayingInfo()
     }
@@ -426,6 +471,7 @@ class VideoPlayer {
         var target = t
         if target < 0 { target = 0 }
         if dur > 0, target > dur { target = dur }
+        hasEnded = false
         player?.seek(to: CMTimeMakeWithSeconds(target, preferredTimescale: 600),
                      toleranceBefore: CMTime.zero, toleranceAfter: CMTime.zero)
         updateNowPlayingInfo()
@@ -456,6 +502,7 @@ class VideoPlayer {
         cancelRecovery()
         releaseAwake()
         wantsPlayback = false
+        hasEnded = false
         ticker?.invalidate(); ticker = nil
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
         player?.pause()
@@ -478,6 +525,7 @@ class VideoPlayer {
     func abandonLoad() {
         cancelRecovery()
         wantsPlayback = false
+        hasEnded = false
         ticker?.invalidate(); ticker = nil
         if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
         player?.pause()
@@ -493,7 +541,8 @@ class VideoPlayer {
     // The current item reached its end. Tear down the underlying proxy stream so a finished
     // stream's libcurl transfer doesn't linger blocked in a socket send() holding a worker
     // thread. Routes stay valid (see closeCurrentStream), so a scrub-back reconnect still works.
-    private func handlePlaybackEnded() {
+    // `frozenTail`: called by checkStuckAtEnd rather than by the end notice.
+    private func handlePlaybackEnded(frozenTail: Bool = false) {
         // A stream that died mid-file leaves AVPlayer reading a short body, which it reports
         // as a clean end-of-stream — indistinguishable from a finished video except by the
         // clock. Anything ending materially early is a drop, not an ending, so recover instead
@@ -502,10 +551,65 @@ class VideoPlayer {
             beginRecovery(reason: "premature end")
             return
         }
+        DebugLog.log("VideoPlayer", "ended id=\(currentVideo?.id ?? "nil") via=\(frozenTail ? "frozen tail" : "end notice") at=\(String(format: "%.1f/%.1f", currentSeconds, durationSeconds))s")
         wantsPlayback = false
+        resetTailWatch()
+        // A frozen tail is still nominally playing, and the end notice is not guaranteed to be
+        // delivered after the rate has dropped: stopped here either way, so isFinished — which
+        // the replay arrow keys off — holds from the moment onEnded fires.
+        player?.pause()
         if !isLocal { StreamProxy.shared.closeCurrentStream() }
         updateNowPlayingInfo()
-        advanceQueueIfPossible()
+        if advanceQueueIfPossible() { return }
+        markEnded()
+    }
+
+    // Nothing follows the video that just finished: play starts it over from here on.
+    private func markEnded() {
+        guard let id = currentVideo?.id else { return }
+        hasEnded = true
+        onEnded?(id)
+    }
+
+    // MARK: - Stuck at the end
+    // The end notice is what says a video finished. Should a stream never send it — the clock
+    // playing its way into the last moments and freezing there, the player still nominally
+    // playing — that counts as the end as well, rather than a frame that sits there "playing"
+    // for good. The watchdog cannot catch this: it reads the last seconds as the video ending.
+    // "Playing its way in" is the point of `tailArrived`: a replay's seek back to the top
+    // leaves the clock parked on the end for a moment too, and that is not a stuck stream.
+    private static let tailWindow: Double = 1.5   // seconds before the end
+    private static let tailStillTicks = 4         // ticks (seconds) frozen in that window
+    private var tailPrevSeconds: Double = -1
+    private var tailArrived = false
+    private var tailFrozenTicks = 0
+
+    private func resetTailWatch() {
+        tailPrevSeconds = -1
+        tailArrived = false
+        tailFrozenTicks = 0
+    }
+
+    // Once a tick, with the item ready. Returns true when it ended the video.
+    private func checkStuckAtEnd() -> Bool {
+        let cur = currentSeconds, dur = durationSeconds
+        let prev = tailPrevSeconds
+        tailPrevSeconds = cur
+        guard wantsPlayback, dur > 0, cur >= dur - VideoPlayer.tailWindow else {
+            tailArrived = false
+            tailFrozenTicks = 0
+            return false
+        }
+        if prev >= 0, cur - prev > 0.05 {
+            tailArrived = true
+            tailFrozenTicks = 0
+            return false
+        }
+        guard tailArrived else { return false }
+        tailFrozenTicks += 1
+        guard tailFrozenTicks >= VideoPlayer.tailStillTicks else { return false }
+        handlePlaybackEnded(frozenTail: true)
+        return true
     }
 
     // MARK: - Recovery
@@ -642,15 +746,17 @@ class VideoPlayer {
 
     // Advance to the next queued video, if the video that just ended is still the current
     // queue item (guards against having navigated to a non-queue video) and a next item
-    // exists (stop at the end — no loop).
-    private func advanceQueueIfPossible() {
-        guard let id = currentVideo?.id, nextInQueue(after: id) != nil else { return }
-        advanceQueue(hold: holdAwake("autoplay"))
+    // exists (stop at the end — no loop). False when nothing was started.
+    private func advanceQueueIfPossible() -> Bool {
+        guard let id = currentVideo?.id, nextInQueue(after: id) != nil else { return false }
+        advanceQueue(hold: holdAwake("autoplay"), fromEnd: true)
+        return true
     }
 
     // Move the queue on by one and start that video. Callers have checked there is one, and
-    // took `hold` for it; a start that gets nowhere gives it back.
-    private func advanceQueue(hold: Int) {
+    // took `hold` for it; a start that gets nowhere gives it back. `fromEnd`: an autoplay off
+    // a finished video, rather than a Next.
+    private func advanceQueue(hold: Int, fromEnd: Bool = false) {
         // The queue entry, not currentVideo: a page can be skipped before its video started.
         let from = queue[queueIndex].id
         queueIndex += 1
@@ -668,6 +774,9 @@ class VideoPlayer {
                 // Back to where the queue was, so it still matches the page and Next can retry.
                 self.queueIndex -= 1
                 self.releaseAwake(hold)
+                // The video it left is still sitting finished: a replay, before the failure is
+                // reported over it.
+                if fromEnd, self.currentVideo?.id == from { self.markEnded() }
                 self.onAdvanceFailed?()
                 return
             }
@@ -816,6 +925,7 @@ class VideoPlayer {
     private func tick() {
         if checkPlaybackAlive() { return }
         guard item?.status == .readyToPlay else { return }
+        if checkStuckAtEnd() { return }
         reconcileRate()
         releaseAwakeOncePlaying()
         refreshNowPlayingElapsed()

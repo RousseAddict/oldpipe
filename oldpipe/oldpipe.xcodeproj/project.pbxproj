@@ -13,6 +13,7 @@
 		BB000001000000000000BE01 /* play.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD01 /* play.png */; };
 		BB000001000000000000BE17 /* playlist.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD17 /* playlist.png */; };
 		BB000001000000000000BE19 /* next.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD19 /* next.png */; };
+		BB000001000000000000BE25 /* replay.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD25 /* replay.png */; };
 		BB000001000000000000BE1F /* menu.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD1F /* menu.png */; };
 		BB000001000000000000BE1B /* home.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD1B /* home.png */; };
 		BB000001000000000000BE1D /* search.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD1D /* search.png */; };
@@ -21,6 +22,7 @@
 		BB000001000000000000BE02 /* play@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD02 /* play@2x.png */; };
 		BB000001000000000000BE18 /* playlist@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD18 /* playlist@2x.png */; };
 		BB000001000000000000BE1A /* next@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD1A /* next@2x.png */; };
+		BB000001000000000000BE26 /* replay@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD26 /* replay@2x.png */; };
 		BB000001000000000000BE20 /* menu@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD20 /* menu@2x.png */; };
 		BB000001000000000000BE21 /* cast-on.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD21 /* cast-on.png */; };
 		BB000001000000000000BE22 /* cast-on@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD22 /* cast-on@2x.png */; };
@@ -132,6 +134,7 @@
 		BB000001000000000000BD01 /* play.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "play.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD17 /* playlist.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD19 /* next.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "next.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD25 /* replay.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "replay.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD1F /* menu.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "menu.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD1B /* home.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "home.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD1D /* search.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "search.png"; sourceTree = "<group>"; };
@@ -140,6 +143,7 @@
 		BB000001000000000000BD02 /* play@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "play@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD18 /* playlist@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD1A /* next@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "next@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD26 /* replay@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "replay@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD20 /* menu@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "menu@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD21 /* cast-on.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "cast-on.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD22 /* cast-on@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "cast-on@2x.png"; sourceTree = "<group>"; };
@@ -286,6 +290,7 @@
 				BB000001000000000000BD01 /* play.png */,
 				BB000001000000000000BD17 /* playlist.png */,
 				BB000001000000000000BD19 /* next.png */,
+				BB000001000000000000BD25 /* replay.png */,
 				BB000001000000000000BD1F /* menu.png */,
 				BB000001000000000000BD1B /* home.png */,
 				BB000001000000000000BD1D /* search.png */,
@@ -294,6 +299,7 @@
 				BB000001000000000000BD02 /* play@2x.png */,
 				BB000001000000000000BD18 /* playlist@2x.png */,
 				BB000001000000000000BD1A /* next@2x.png */,
+				BB000001000000000000BD26 /* replay@2x.png */,
 				BB000001000000000000BD20 /* menu@2x.png */,
 				BB000001000000000000BD21 /* cast-on.png */,
 				BB000001000000000000BD22 /* cast-on@2x.png */,
@@ -537,6 +543,7 @@
 				BB000001000000000000BE01 /* play.png in Resources */,
 				BB000001000000000000BE17 /* playlist.png in Resources */,
 				BB000001000000000000BE19 /* next.png in Resources */,
+				BB000001000000000000BE25 /* replay.png in Resources */,
 				BB000001000000000000BE1F /* menu.png in Resources */,
 				BB000001000000000000BE1B /* home.png in Resources */,
 				BB000001000000000000BE1D /* search.png in Resources */,
@@ -545,6 +552,7 @@
 				BB000001000000000000BE02 /* play@2x.png in Resources */,
 				BB000001000000000000BE18 /* playlist@2x.png in Resources */,
 				BB000001000000000000BE1A /* next@2x.png in Resources */,
+				BB000001000000000000BE26 /* replay@2x.png in Resources */,
 				BB000001000000000000BE20 /* menu@2x.png in Resources */,
 				BB000001000000000000BE21 /* cast-on.png in Resources */,
 				BB000001000000000000BE22 /* cast-on@2x.png in Resources */,

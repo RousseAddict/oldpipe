@@ -155,7 +155,9 @@ class MiniPlayerBar: UIView {
             if !video.thumbnailURL.isEmpty { thumbView.load(url: video.thumbnailURL) }
         }
 
-        playPauseBtn.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
+        // A finished video shows the replay arrow: play starts it over (VideoPlayer.play).
+        playPauseBtn.setImage(UIImage(named: sp.isPlaying ? "pause" : (sp.isFinished ? "replay" : "play")),
+                              for: .normal)
 
         let dur = sp.durationSeconds
         let frac = dur > 0 ? CGFloat(sp.currentSeconds / dur) : 0
