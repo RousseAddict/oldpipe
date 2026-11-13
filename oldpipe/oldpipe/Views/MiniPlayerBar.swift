@@ -4,8 +4,9 @@ import UIKit
 // Persistent bar pinned to the bottom of the app window (added in AppDelegate). It is a thin
 // view onto VideoPlayer.shared: it polls the singleton every 0.5s and mirrors the current
 // title / thumbnail / play state. Tapping the title area reopens VideoPlayerVC; the close
-// button tears playback down. It auto-hides when there is no active video or when a
-// VideoPlayerVC is already on screen (avoids a double player).
+// button tears playback down. It auto-hides when there is no active video, and on the one
+// page that already shows it — that video's own VideoPlayerVC, or Shorts. Any other page,
+// another video's included (a related video opened mid-play), gets the bar.
 //
 // While casting it is the TV's remote instead: the video on the TV with "Playing on <TV>",
 // play/pause acting on the TV, and close stopping the cast. The phone's own player is stopped
@@ -132,13 +133,15 @@ class MiniPlayerBar: UIView {
     private func poll() {
         let sp = VideoPlayer.shared
         let top = navProvider?()?.topViewController
-        let topIsPlayer = (top is VideoPlayerVC) || (top is ShortsPlayerVC)
         let cast = CastController.shared
-        if cast.isActive, let video = cast.video, !topIsPlayer {
+        let playingId = cast.isActive ? cast.video?.id : sp.currentVideo?.id
+        let pageShowsIt = (top is ShortsPlayerVC)
+            || (playingId != nil && (top as? VideoPlayerVC)?.video.id == playingId)
+        if cast.isActive, let video = cast.video, !pageShowsIt {
             pollCast(cast, video)
             return
         }
-        guard let video = sp.currentVideo, !topIsPlayer, !cast.isActive else {
+        guard let video = sp.currentVideo, !pageShowsIt, !cast.isActive else {
             if !isHidden { isHidden = true }
             return
         }

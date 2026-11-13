@@ -60,7 +60,7 @@ class ShortsPlayerVC: UIViewController, UIScrollViewDelegate {
         playShort(at: currentIndex)
         // The frontmost VC owns onAdvance (last-writer-wins). When the shared player's queue
         // auto-advances at end-of-video, follow it by scrolling to the new short's page.
-        sp.onAdvance = { [weak self] video in self?.handleAutoAdvance(video) }
+        sp.onAdvance = { [weak self] _, video in self?.handleAutoAdvance(video) }
     }
 
     override func viewWillDisappear(_ animated: Bool) {

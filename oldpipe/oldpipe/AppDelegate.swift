@@ -259,7 +259,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         bar.navProvider = { [weak nav] in nav }
         bar.onOpen = { [weak nav] video in
             guard let nav = nav else { return }
-            if nav.topViewController is VideoPlayerVC { return }
+            // Already on that video's page. Any other video page is a real open: the Navigator
+            // pops back to the playing page when it is right below, else pushes one.
+            if (nav.topViewController as? VideoPlayerVC)?.video.id == video.id { return }
             nav.openVideo(video)
         }
         win.addSubview(bar)

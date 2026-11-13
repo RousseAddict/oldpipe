@@ -82,7 +82,8 @@ class VideoPlayer {
     }
     // Set by the frontmost player VC (last-writer-wins, like onAdvance) so it can say
     // "Reconnecting…" instead of showing a dead frame. Recovery runs with or without it.
-    var onRecovery: ((RecoveryState) -> Void)?
+    // Carries the video it is about: by .failed, abandonLoad has already cleared currentVideo.
+    var onRecovery: ((_ videoId: String, RecoveryState) -> Void)?
 
     // Fired by reconcileRate when a chosen speed turns out not to hold on this stream, so the
     // VC can say so. The speed is refused after the fact rather than up front because the item
@@ -94,10 +95,11 @@ class VideoPlayer {
     // end, the singleton auto-advances to the next queued video (stopping at the end — no
     // loop). Because the queue lives here, autoplay continues even after VideoPlayerVC is
     // popped and only the mini bar remains. onAdvance lets the frontmost VideoPlayerVC (if
-    // any) swap its content to the new video.
+    // any) swap its content to the new video — only if it was showing `from`, the queue entry
+    // just left: a page opened over the queue (a related video tapped mid-play) stays put.
     private(set) var queue: [Video] = []
     private(set) var queueIndex = 0
-    var onAdvance: ((Video) -> Void)?
+    var onAdvance: ((_ from: String, _ to: Video) -> Void)?
     // The next video could not be resolved, so nothing was loaded and the queue is back where
     // it was. Set by the frontmost VideoPlayerVC, like onAdvance.
     var onAdvanceFailed: (() -> Void)?
@@ -557,7 +559,7 @@ class VideoPlayer {
             // fetching against it and makes isActive() lie to the mini bar and the player VC.
             abandonLoad()
             releaseAwake()
-            onRecovery?(.failed)
+            onRecovery?(video.id, .failed)
             return
         }
         // The backoff below and the re-resolve both run with the sound stopped.
@@ -572,7 +574,7 @@ class VideoPlayer {
         let attempt = recoveryAttempts
         let at = currentSeconds
         DebugLog.log("VideoPlayer", "recovery id=\(video.id) attempt=\(attempt) reason=\(reason) at=\(Int(at))s")
-        onRecovery?(.reconnecting(attempt: attempt))
+        onRecovery?(video.id, .reconnecting(attempt: attempt))
         // Detach the dead item so AVPlayer stops fetching against it in the background — on
         // iOS 6 those fetches otherwise compete with the replacement stream through the proxy.
         // `item` itself is deliberately left set: isActive() keys off it, and nilling it here
@@ -619,7 +621,7 @@ class VideoPlayer {
                 self.lastTickSeconds = -1
                 self.stalledTicks = 0
                 DebugLog.log("VideoPlayer", "recovery OK id=\(video.id) resumed at \(Int(at))s")
-                self.onRecovery?(.recovered)
+                self.onRecovery?(video.id, .recovered)
             }, onFail: { [weak self] in
                 guard let self = self else { return }
                 self.recovering = false
@@ -649,6 +651,8 @@ class VideoPlayer {
     // Move the queue on by one and start that video. Callers have checked there is one, and
     // took `hold` for it; a start that gets nowhere gives it back.
     private func advanceQueue(hold: Int) {
+        // The queue entry, not currentVideo: a page can be skipped before its video started.
+        let from = queue[queueIndex].id
         queueIndex += 1
         let next = queue[queueIndex]
         StreamResolver.resolve(next) { [weak self] resolved in
@@ -671,7 +675,7 @@ class VideoPlayer {
             self.load(video: next, url: r.url, isLocal: r.isLocal, resume: resume, artwork: nil)
             // Waiting first, so the page sees isStarting while it swaps its content in.
             self.waitForReadyThenPlay(onFail: { [weak self] in self?.releaseAwake(hold) })
-            self.onAdvance?(next)   // let the frontmost VideoPlayerVC swap its content
+            self.onAdvance?(from, next)   // let the frontmost VideoPlayerVC swap its content
         }
     }
 

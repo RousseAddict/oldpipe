@@ -315,21 +315,40 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // Related videos — not ahead of anything playback is waiting for (see loadRelatedIfIdle).
         loadRelatedIfIdle()
 
-        // Own the singleton's autoplay-advance callback while we're the frontmost player,
-        // so a playlist auto-advance swaps this VC's content in place.
-        sp.onAdvance = { [weak self] v in self?.handleAutoAdvance(v) }
+        // Own the singleton's callbacks while we're the frontmost page. This page may not be
+        // the one playing, though: a related video opened mid-play sits over playback that
+        // belongs to another page, and the mini bar shows it. Such a page must not react to
+        // that playback's events, so each callback below checks it is about this video.
+
+        // A playlist auto-advance swaps this VC's content in place — when it left this video.
+        sp.onAdvance = { [weak self] from, to in
+            guard let self = self, self.video.id == from else { return }
+            self.handleAutoAdvance(to)
+        }
 
         // Same ownership deal for the mid-playback recovery callback: report what the
         // watchdog is doing rather than leaving a frozen frame with no explanation.
-        sp.onRecovery = { [weak self] state in self?.handleRecovery(state) }
+        sp.onRecovery = { [weak self] id, state in
+            guard let self = self, self.video.id == id else { return }
+            self.handleRecovery(state)
+        }
 
         // A speed that the stream turns out not to hold is refused after the fact, so the
         // singleton has to be able to reach us to say so.
-        sp.onRateReverted = { [weak self] in self?.handleRateReverted() }
+        sp.onRateReverted = { [weak self] in
+            guard let self = self, self.sp.currentVideo?.id == self.video.id else { return }
+            self.handleRateReverted()
+        }
 
         // And for the end of a start the player made by itself, which related waits behind.
+        // Not checked: related waits behind ANY such start (playbackPending reads
+        // sp.isStarting), so a page over someone else's playback needs this to load its own.
         sp.onStartSettled = { [weak self] in self?.handleStartSettled() }
-        sp.onAdvanceFailed = { [weak self] in self?.handleAdvanceFailed() }
+        // The queue is back on the entry it failed to leave — this page's video, or not ours.
+        sp.onAdvanceFailed = { [weak self] in
+            guard let self = self, self.sp.nextInQueue(after: self.video.id) != nil else { return }
+            self.handleAdvanceFailed()
+        }
 
         // The queue may have moved while this page was covered (Shorts replaced it, or a
         // lock-screen Next), and a start that settled meanwhile was not reported here.
@@ -1880,8 +1899,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @objc private func relatedRowTapped(_ sender: UIButton) {
         let idx = sender.tag
         guard idx >= 0, idx < relatedVideos.count else { return }
-        // Replaces this page rather than stacking on it: Back goes to the list, not to the
-        // previous video (Navigator.swift).
+        // Stacks on this page, so Back comes back here (Navigator.swift). Whatever is playing
+        // carries on in the mini bar until the new page's own play is tapped.
         navigationController?.openVideo(relatedVideos[idx])
     }
 
