@@ -2444,7 +2444,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let w = panel.bounds.width
         let h = panel.bounds.height
         let barH: CGFloat = 40
-        let timeW: CGFloat = 40
+        // As wide as the player bar's: "10:15:32" is 42.8pt at 11pt, and a 10-hour video
+        // on the TV would otherwise read "10:15:…".
+        let timeW: CGFloat = 46
         let inset: CGFloat = 12
 
         castIcon?.frame = CGRect(x: 12, y: 10, width: 24, height: 24)
@@ -2493,9 +2495,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         castScrubber?.isEnabled = canSeek && cast.duration > 0
 
         let dur = cast.duration
-        castDurLabel?.text = timeString(dur)
+        castDurLabel?.text = clockText(dur)
         if !castIsScrubbing {
-            castCurLabel?.text = timeString(cast.position)
+            castCurLabel?.text = clockText(cast.position)
             castScrubber?.value = dur > 0 ? Float(cast.position / dur) : 0
         }
         if !castVolumeDragging {
@@ -2515,7 +2517,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     @objc private func castScrubChanged() {
         guard cast.duration > 0, let v = castScrubber?.value else { return }
-        castCurLabel?.text = timeString(Double(v) * cast.duration)
+        castCurLabel?.text = clockText(Double(v) * cast.duration)
     }
 
     @objc private func castScrubTouchUp() {
@@ -2763,18 +2765,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let dur = sp.durationSeconds
         let cur = sp.currentSeconds
         guard dur > 0 else { return }
-        durationLabel?.text = timeString(dur)
+        durationLabel?.text = clockText(dur)
         if !isScrubbing {
             scrubber?.value = Float(cur / dur)
-            currentTimeLabel?.text = timeString(cur)
+            currentTimeLabel?.text = clockText(cur)
         }
         // Keep button glyph in sync with actual rate.
         playPauseBtn?.setImage(UIImage(named: sp.isPlaying ? "pause" : "play"), for: .normal)
-    }
-
-    private func timeString(_ seconds: Double) -> String {
-        let s = Int(seconds)
-        return "\(s / 60):" + String(format: "%02d", s % 60)
     }
 
     @objc private func togglePlayPause() {
@@ -2792,7 +2789,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @objc private func scrubChanged() {
         let dur = sp.durationSeconds
         guard dur > 0, let v = scrubber?.value else { return }
-        currentTimeLabel?.text = timeString(Double(v) * dur)
+        currentTimeLabel?.text = clockText(Double(v) * dur)
     }
 
     @objc private func scrubTouchUp() {

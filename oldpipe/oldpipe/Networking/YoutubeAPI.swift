@@ -1025,7 +1025,7 @@ class YoutubeAPI {
             let vid = str(details["videoId"]) ?? videoId
             let thumbURL = "https://i.ytimg.com/vi/\(vid)/mqdefault.jpg"
             let durSecs = str(details["lengthSeconds"]).flatMap({ Int($0) }) ?? 0
-            let durText = "\(durSecs / 60):\(String(format: "%02d", durSecs % 60))"
+            let durText = clockText(Double(durSecs))
             let viewsRaw = str(details["viewCount"]) ?? ""
             let views = viewsRaw.isEmpty ? "" : "\(formatViewCount(viewsRaw)) views"
             // publishDate from microformat: "2024-01-15" → keep the YYYY-MM-DD part

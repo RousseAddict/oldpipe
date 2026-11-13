@@ -121,21 +121,25 @@ struct VideoStream {
     var isProgressive: Bool { return indexEnd < 0 }
 }
 
+// A time as YouTube writes it: "4:05", and "1:02:30" once there are hours — never "62:30".
+// The player's elapsed and total times, chapter starts and video lengths all go through here.
+// Clamped before the Int conversion: Int is 32-bit on armv7, and a garbage duration (a cast
+// receiver's, say) past 2^31 seconds would trap rather than print.
+func clockText(_ seconds: Double) -> String {
+    let t = seconds.isFinite ? Int(min(max(seconds, 0), 1e8)) : 0
+    if t >= 3600 {
+        return "\(t / 3600):" + String(format: "%02d:%02d", (t % 3600) / 60, t % 60)
+    }
+    return "\(t / 60):" + String(format: "%02d", t % 60)
+}
+
 // A seekable point inside a video. Taken from the watch page's own chapter list when YouTube
 // publishes one (see YoutubeAPI.parseChapters), else parsed out of the description below.
 struct Chapter: Equatable {
     let title: String
     let startSeconds: Double
 
-    // "4:05" / "1:02:30". VideoPlayerVC.timeString never carries an hours field, which reads
-    // wrong on the multi-hour videos that tend to have chapters in the first place.
-    var timeLabel: String {
-        let t = Int(startSeconds)
-        if t >= 3600 {
-            return "\(t / 3600):" + String(format: "%02d:%02d", (t % 3600) / 60, t % 60)
-        }
-        return "\(t / 60):" + String(format: "%02d", t % 60)
-    }
+    var timeLabel: String { return clockText(startSeconds) }
 
     // Timestamp lines come in every shape there is — "0:00 Intro", "⌨️ (0:00) Intro",
     // "[0:00] Intro", "Intro - 0:00" — so the scan is positional rather than a pattern match:
