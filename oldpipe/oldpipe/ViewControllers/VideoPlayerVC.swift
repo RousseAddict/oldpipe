@@ -189,6 +189,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var videoContainer: UIView?
     private var tapCatcher: SeekTapView?
     private var seekIndicator: UIView?
+    // Hold to speed up: the "2x" pill shown while a finger is held on the video, and whether
+    // the boost running in the player is this page's (so letting go only ends our own).
+    private var boostPill: UIView?
+    private var boostOwned = false
     private var downloadBtn: UIButton?
     private var shareBtn: UIButton?
     private var addPlaylistBtn: UIButton?
@@ -345,6 +349,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             guard let self = self, self.sp.currentVideo?.id == self.video.id else { return }
             self.handleRateReverted()
         }
+        // The player ended a hold by itself (refused, stalled, paused, ended): the pill goes,
+        // silently — the finger may still be down, and lifting it then does nothing.
+        sp.onBoostEnded = { [weak self] in
+            guard let self = self, self.boostOwned else { return }
+            self.boostOwned = false
+            self.hideBoostPill()
+        }
 
         // And for the end of a start the player made by itself, which related waits behind.
         // Not checked: related waits behind ANY such start (playbackPending reads
@@ -382,6 +393,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onAdvance = nil
         sp.onRecovery = nil
         sp.onRateReverted = nil
+        sp.onBoostEnded = nil
+        // A hold does not outlive the page: the finger's release would land nowhere.
+        holdEnded()
         sp.onStartSettled = nil
         sp.onAdvanceFailed = nil
         sp.onEnded = nil
@@ -899,15 +913,19 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         // Transparent tap-catcher over the video: single tap toggles the control bar, a
         // double tap on the left/right third seeks back / forward by the Double-Tap Seek
-        // setting (AppSettings.seekStepSeconds, 15s by default). A custom UIView reading
-        // UITouch.tapCount (NOT a UITapGestureRecognizer, which conflicts with button taps
-        // on iOS 6). Added here so it sits BELOW the play button / controls / cast button —
-        // those keep their own taps; taps anywhere else on the video hit this.
+        // setting (AppSettings.seekStepSeconds, 15s by default), and holding plays at 2x until
+        // the finger lifts. A custom UIView reading UITouch.tapCount (NOT a
+        // UITapGestureRecognizer, which conflicts with button taps on iOS 6). Added here so
+        // it sits BELOW the play button / controls / cast button — those keep their own taps;
+        // taps anywhere else on the video hit this.
         let tap = SeekTapView(frame: CGRect(x: 0, y: 0, width: w, height: videoH))
         tap.backgroundColor = .clear
         tap.onSingleTap = { [weak self] in self?.videoAreaTapped() }
         tap.onSeekBackward = { [weak self] in self?.seekBackwardTapped() }
         tap.onSeekForward = { [weak self] in self?.seekForwardTapped() }
+        tap.canHold = { [weak self] in self?.canHoldToBoost() ?? false }
+        tap.onHoldBegan = { [weak self] in self?.holdBegan() ?? false }
+        tap.onHoldEnded = { [weak self] in self?.holdEnded() }
         container.addSubview(tap)
         tapCatcher = tap
 
@@ -2779,6 +2797,66 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         showControls()
     }
 
+    // Hold on the video → 2x until the finger lifts, back to the chosen speed after. Offered
+    // only while this page's video is playing here, not on the TV; VideoPlayer.canBoost has
+    // the rest (on iOS 5/6 an HD stream or download refuses any speed, so there it is not
+    // even tried). Asked once per touch, at touch-down: when it says no, the touch is handled
+    // exactly as before the hold existed.
+    private func canHoldToBoost() -> Bool {
+        return sp.isActive(video.id) && !cast.isCasting(video.id) && sp.canBoost
+    }
+
+    // Called half a second into the hold; false leaves the touch an ordinary (slow) tap.
+    private func holdBegan() -> Bool {
+        guard canHoldToBoost(), sp.beginBoost() else { return false }
+        boostOwned = true
+        showBoostPill()
+        return true
+    }
+
+    // Finger lifted, touch cancelled, or the page going away. Safe to call twice.
+    private func holdEnded() {
+        if boostOwned {
+            boostOwned = false
+            sp.endBoost()
+        }
+        hideBoostPill()
+    }
+
+    // "2x" + the forward arrow on a small dark plate, top centre of the video. Hosted like the
+    // seek plate (fullscreen overlay when active), and re-hosted when fullscreen toggles.
+    private func showBoostPill() {
+        boostPill?.removeFromSuperview()
+        boostPill = nil
+        guard let host = fsOverlay ?? videoContainer else { return }
+        let pw: CGFloat = 64, ph: CGFloat = 28
+        let pill = UIView(frame: CGRect(x: floor((host.bounds.width - pw) / 2), y: 10, width: pw, height: ph))
+        pill.backgroundColor = UIColor(white: 0, alpha: 0.6)
+        pill.layer.cornerRadius = ph / 2
+        pill.isUserInteractionEnabled = false
+
+        let lbl = UILabel(frame: CGRect(x: 8, y: 0, width: 26, height: ph))
+        lbl.backgroundColor = .clear
+        lbl.textColor = .white
+        lbl.font = UIFont.boldSystemFont(ofSize: 13)
+        lbl.textAlignment = .right
+        lbl.text = "2x"
+        pill.addSubview(lbl)
+
+        let iv = UIImageView(image: UIImage(named: "forward"))
+        iv.contentMode = .scaleAspectFit
+        iv.frame = CGRect(x: 38, y: (ph - 16) / 2, width: 16, height: 16)
+        pill.addSubview(iv)
+
+        host.addSubview(pill)
+        boostPill = pill
+    }
+
+    private func hideBoostPill() {
+        boostPill?.removeFromSuperview()
+        boostPill = nil
+    }
+
     // A ~96pt rounded plate on the left/right of the video showing the rewind/forward
     // glyph + the step ("15s"), fading in then out. Hosted in the fullscreen overlay when
     // active so it follows rotation, else in the video container.
@@ -4129,6 +4207,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         // Captions ride into the overlay too (host rule = fsOverlay ?? videoContainer).
         if captionPlate != nil { ensureCaptionPlate() }
+        // So does a "2x" pill, should fullscreen toggle mid-hold (rotation on iOS 8).
+        if boostPill != nil { showBoostPill() }
 
         ensureSheetWindow()
     }
@@ -4174,6 +4254,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         teardownSheetWindow()
         // fsOverlay is now nil, so the host resolves back to videoContainer.
         if captionPlate != nil { ensureCaptionPlate() }
+        if boostPill != nil { showBoostPill() }
     }
 }
 
@@ -4248,14 +4329,31 @@ private class PassthroughWindow: UIWindow {
     }
 }
 
+// Holding still for half a second is a hold (2x while the finger stays down). canHold is
+// asked once at touch-down; when it says no, the touch takes exactly the path it took before
+// the hold existed, timers included. When it says yes, a single tap whose delay runs out with
+// the finger still down waits for the release instead, and is dropped if the hold begins.
+// Nothing here runs between touches: both timers exist only while a touch is in progress.
 private class SeekTapView: UIView {
     var onSingleTap: (() -> Void)?
     var onSeekBackward: (() -> Void)?
     var onSeekForward: (() -> Void)?
+    var canHold: (() -> Bool)?
+    var onHoldBegan: (() -> Bool)?   // false: refused, the touch stays an ordinary slow tap
+    var onHoldEnded: (() -> Void)?
     private var pendingSingle: Timer?
+    private var pendingHold: Timer?
+    private var fingerDown = false
+    private var singleDue = false    // the tap's delay ran out with the finger still down
+    private var holding = false
+    private var touchStart = CGPoint.zero
+    private static let holdDelay: TimeInterval = 0.5
+    private static let holdSlop: CGFloat = 10
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first else { return }
+        fingerDown = true
+        singleDue = false
         if touch.tapCount >= 2 {
             pendingSingle?.invalidate(); pendingSingle = nil
             let x = touch.location(in: self).x
@@ -4265,12 +4363,67 @@ private class SeekTapView: UIView {
             else { onSingleTap?() }
         } else {
             pendingSingle?.invalidate()
+            let mayHold = canHold?() ?? false
             let t = Timer(timeInterval: 0.28, target: BlockTarget { [weak self] in
-                self?.pendingSingle = nil
-                self?.onSingleTap?()
+                guard let self = self else { return }
+                self.pendingSingle = nil
+                if mayHold && self.fingerDown && self.pendingHold != nil {
+                    self.singleDue = true
+                } else {
+                    self.onSingleTap?()
+                }
             }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
             RunLoop.main.add(t, forMode: .common)
             pendingSingle = t
+            if mayHold { armHold(at: touch.location(in: self)) }
+        }
+    }
+
+    private func armHold(at point: CGPoint) {
+        pendingHold?.invalidate()
+        touchStart = point
+        let h = Timer(timeInterval: SeekTapView.holdDelay, target: BlockTarget { [weak self] in
+            guard let self = self else { return }
+            self.pendingHold = nil
+            guard self.fingerDown, self.onHoldBegan?() ?? false else { return }
+            self.holding = true
+            self.pendingSingle?.invalidate(); self.pendingSingle = nil
+            self.singleDue = false
+        }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+        RunLoop.main.add(h, forMode: .common)
+        pendingHold = h
+    }
+
+    // A finger that wanders before the hold begins is not holding: the tap goes ahead as it
+    // always did. Once the hold is on, moving does not end it.
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard pendingHold != nil, let touch = touches.first else { return }
+        let p = touch.location(in: self)
+        guard abs(p.x - touchStart.x) > SeekTapView.holdSlop
+           || abs(p.y - touchStart.y) > SeekTapView.holdSlop else { return }
+        pendingHold?.invalidate(); pendingHold = nil
+        if singleDue { singleDue = false; onSingleTap?() }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        finishTouch(cancelled: false)
+    }
+
+    // The page scrolled, the app left the foreground, an alert came up: a hold ends, and a
+    // tap still waiting for its release is dropped.
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        finishTouch(cancelled: true)
+    }
+
+    private func finishTouch(cancelled: Bool) {
+        fingerDown = false
+        pendingHold?.invalidate(); pendingHold = nil
+        if holding {
+            holding = false
+            onHoldEnded?()
+        } else if singleDue {
+            singleDue = false
+            if !cancelled { onSingleTap?() }
         }
     }
 }

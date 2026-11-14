@@ -90,6 +90,11 @@ class VideoPlayer {
     // cannot be asked reliably beforehand — see supportsRate.
     var onRateReverted: (() -> Void)?
 
+    // Fired when the player ends a hold-to-2x by itself (see beginBoost) — refused, stalled,
+    // paused from elsewhere, ended, or another video loaded — so the VC can take its "2x"
+    // pill down while the finger is still on the video. Never fired by endBoost().
+    var onBoostEnded: (() -> Void)?
+
     // MARK: - Autoplay queue (playlists)
     // Set by PlaylistDetailVC before pushing the player. When the current item plays to the
     // end, the singleton auto-advances to the next queued video (stopping at the end — no
@@ -252,6 +257,9 @@ class VideoPlayer {
         lastSavedPos = resume
         markedWatched = false
         hasEnded = false
+        // A recovery reloads the same video and keeps a hold going (every start reads
+        // effectiveRate); a different video starts at the chosen speed.
+        if isBoosting, !isSameVideo { dropBoost("new video") }
         resetTailWatch()
         // Watchdog state is per-load, except the attempt counter during a recovery — that one
         // has to survive the reload it is driving, or every attempt would look like the first.
@@ -325,15 +333,19 @@ class VideoPlayer {
             if let v = currentVideo { HistoryManager.record(v) }
         }
         wantsPlayback = true
-        p.rate = playbackRate
+        p.rate = effectiveRate
         updateNowPlayingInfo()
     }
 
     func play() {
         if isFinished { replay(); return }
-        wantsPlayback = true; player?.rate = playbackRate; updateNowPlayingInfo()
+        wantsPlayback = true; player?.rate = effectiveRate; updateNowPlayingInfo()
     }
-    func pause() { wantsPlayback = false; player?.pause(); saveResume(); updateNowPlayingInfo() }
+    func pause() {
+        // The lock screen or the headphones can pause while a finger is held on the video.
+        if isBoosting { dropBoost("paused") }
+        wantsPlayback = false; player?.pause(); saveResume(); updateNowPlayingInfo()
+    }
     func togglePlayPause() { if isPlaying { pause() } else { play() } }
 
     // Start the current video over from the top, in place: the item is still loaded, so this
@@ -347,7 +359,7 @@ class VideoPlayer {
         resetTailWatch()
         p.seek(to: CMTime.zero, toleranceBefore: CMTime.zero, toleranceAfter: CMTime.zero)
         wantsPlayback = true
-        p.rate = playbackRate
+        p.rate = effectiveRate
         updateNowPlayingInfo()
     }
 
@@ -404,9 +416,62 @@ class VideoPlayer {
         playbackRate = rate
         // Only push it to the player when something is actually running — assigning a rate to
         // a paused player would start playback behind the user's back.
-        if isPlaying { player?.rate = rate }
+        if isPlaying { player?.rate = effectiveRate }
         updateNowPlayingInfo()
         return true
+    }
+
+    // MARK: - Hold to speed up (2x while a finger is held on the video)
+    // A temporary speed laid OVER the chosen one rather than replacing it: playbackRate keeps
+    // what the Speed menu says, and letting go goes back to it. Every start reads
+    // effectiveRate, so a reconnect during the hold keeps the boost.
+    static let boostRate: Float = 2.0
+    private(set) var isBoosting = false
+    var effectiveRate: Float { return isBoosting ? VideoPlayer.boostRate : playbackRate }
+
+    // Before iOS 7 an HLS item refuses every rate but 1.0, and says so straight away (iOS 6.1.3
+    // log, 2026-11-08: canPlayFastForward=no, 1.25x reverted to 1.0 within a second). That is
+    // every quality above 360p and every HD download on iOS 5/6, so the hold is not even tried
+    // there. Read from lastLoadWasHLS rather than the flag, which iOS 5 cannot be asked for.
+    // Anything else is tried, and reconcileRate ends a boost that does not hold.
+    private static let osMajor = Int((UIDevice.current.systemVersion as NSString).intValue)
+
+    var canBoost: Bool {
+        guard isReady, wantsPlayback, isPlaying, !recovering, !isBoosting,
+              playbackRate < VideoPlayer.boostRate else { return false }
+        return !(lastLoadWasHLS && VideoPlayer.osMajor < 7)
+    }
+
+    @discardableResult
+    func beginBoost() -> Bool {
+        guard canBoost, let p = player else { return false }
+        isBoosting = true
+        rateZeroTicks = 0
+        p.rate = VideoPlayer.boostRate
+        DebugLog.log("VideoPlayer", "boost on (from \(playbackRate), hls=\(lastLoadWasHLS))")
+        updateNowPlayingInfo()
+        return true
+    }
+
+    // The finger lifted: back to the chosen speed. Only a running player gets a rate — the
+    // video may have been paused or finished meanwhile, and a rate would restart it.
+    func endBoost() {
+        guard isBoosting else { return }
+        isBoosting = false
+        rateZeroTicks = 0
+        if isPlaying { player?.rate = playbackRate }
+        DebugLog.log("VideoPlayer", "boost off (released)")
+        updateNowPlayingInfo()
+    }
+
+    // The player ends the boost by itself. Quietly: no alert, the chosen speed is untouched,
+    // and the caller decides what rate the player gets.
+    private func dropBoost(_ why: String) {
+        isBoosting = false
+        rateZeroTicks = 0
+        DebugLog.log("VideoPlayer", "boost dropped (\(why), hls=\(lastLoadWasHLS))")
+        updateNowPlayingInfo()
+        onBoostEnded?()
     }
 
     // An item may accept the assignment and then quietly revert, in which case only the
@@ -421,21 +486,33 @@ class VideoPlayer {
     // should fall back to normal speed (which also halves what it has to pull) rather than be
     // torn down and reconnected at a rate it was never going to hold.
     private static let rateZeroGraceTicks = 5
+    // A hold gives up sooner: the finger is down and waiting, and the chosen speed asks the
+    // stream for less.
+    private static let boostZeroGraceTicks = 2
 
+    // A boost that fails is ended quietly and the chosen speed is left as it was; only a speed
+    // picked in the Speed menu is walked back to Normal with an alert.
     private func reconcileRate() {
-        guard playbackRate != 1.0, wantsPlayback, let p = player else { rateZeroTicks = 0; return }
+        let target = effectiveRate
+        guard target != 1.0, wantsPlayback, let p = player else { rateZeroTicks = 0; return }
         if p.rate == 0 {
             rateZeroTicks += 1
-            guard rateZeroTicks >= VideoPlayer.rateZeroGraceTicks else { return }
-            DebugLog.log("VideoPlayer", "rate \(playbackRate) collapsed to 0 for \(rateZeroTicks)s (hls=\(lastLoadWasHLS))")
-            revertRate()
-            p.rate = playbackRate   // the player is parked — restart it at normal speed
+            let grace = isBoosting ? VideoPlayer.boostZeroGraceTicks : VideoPlayer.rateZeroGraceTicks
+            guard rateZeroTicks >= grace else { return }
+            DebugLog.log("VideoPlayer", "rate \(target) collapsed to 0 for \(rateZeroTicks)s (hls=\(lastLoadWasHLS))")
+            if isBoosting { dropBoost("stalled") } else { revertRate() }
+            p.rate = playbackRate   // the player is parked — restart it at the chosen speed
             return
         }
         rateZeroTicks = 0
-        guard abs(p.rate - playbackRate) > 0.01 else { return }
-        DebugLog.log("VideoPlayer", "rate \(playbackRate) reverted by player to \(p.rate) (hls=\(lastLoadWasHLS))")
-        revertRate()
+        guard abs(p.rate - target) > 0.01 else { return }
+        DebugLog.log("VideoPlayer", "rate \(target) reverted by player to \(p.rate) (hls=\(lastLoadWasHLS))")
+        if isBoosting {
+            dropBoost("refused")
+            if abs(p.rate - playbackRate) > 0.01 { p.rate = playbackRate }
+        } else {
+            revertRate()
+        }
     }
 
     private func revertRate() {
@@ -497,6 +574,7 @@ class VideoPlayer {
     // Full teardown — used by the mini bar's close button. Casting tears the phone's player
     // down the same way but keeps the queue, which goes on driving Next and autoplay on the TV.
     func stop(keepQueue: Bool = false) {
+        if isBoosting { dropBoost("stopped") }
         saveResume()
         if !keepQueue { clearQueue() }
         cancelRecovery()
@@ -523,6 +601,7 @@ class VideoPlayer {
     // competing with the fallback download; (2) isActive() checks `item != nil`, so a lingering
     // item makes the download-completion handler skip auto-play and freeze at "Downloading 100%".
     func abandonLoad() {
+        if isBoosting { dropBoost("load abandoned") }
         cancelRecovery()
         wantsPlayback = false
         hasEnded = false
@@ -552,6 +631,7 @@ class VideoPlayer {
             return
         }
         DebugLog.log("VideoPlayer", "ended id=\(currentVideo?.id ?? "nil") via=\(frozenTail ? "frozen tail" : "end notice") at=\(String(format: "%.1f/%.1f", currentSeconds, durationSeconds))s")
+        if isBoosting { dropBoost("ended") }
         wantsPlayback = false
         resetTailWatch()
         // A frozen tail is still nominally playing, and the end notice is not guaranteed to be
@@ -637,7 +717,7 @@ class VideoPlayer {
         // otherwise rewinding would look like a stall until playback caught up again.
         // Scaled by the playback speed: at 0.5x a healthy second of playback only advances
         // the clock half a second, which a fixed 0.25s floor would read as a stall.
-        let threshold = 0.25 * Double(min(playbackRate, 1.0))
+        let threshold = 0.25 * Double(min(effectiveRate, 1.0))
         let moved = lastTickSeconds < 0 || abs(cur - lastTickSeconds) > threshold
         lastTickSeconds = cur
         if moved {
