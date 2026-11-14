@@ -210,6 +210,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var scrubber: UISlider?
     private var currentTimeLabel: UILabel?
     private var durationLabel: UILabel?
+    // Whether this video's times have an hours part (duration >= 1h) — picks the time layout
+    // in layoutControls — and the bar width it last laid out at, to redo it when that flips.
+    private var timesShowHours = false
+    private var controlsLayoutWidth: CGFloat = 0
     private var fsButton: UIButton?
     private var isScrubbing = false
     private var fsAngle: CGFloat = CGFloat(Double.pi / 2)
@@ -2616,21 +2620,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(nx)
         nextBtn = nx
 
-        // Elapsed time — left-aligned so it hugs the play button (no dead gap between them).
+        // Elapsed time. Frame and alignment come from layoutControls (centered under an hour,
+        // left-aligned against the play button from an hour).
+        // 10pt, not 11: "1:19:28" at 11pt filled its 46pt column and ran into the slider.
         let cur = UILabel()
         cur.backgroundColor = .clear
         cur.textColor = .white
-        cur.font = UIFont.systemFont(ofSize: 11)
+        cur.font = UIFont.systemFont(ofSize: 10)
         cur.textAlignment = .left
         cur.text = "0:00"
         bar.addSubview(cur)
         currentTimeLabel = cur
 
-        // Total time — right-aligned so it hugs the settings/fullscreen buttons (mirrors the left).
+        // Total time — mirrors the left (right-aligned against the settings button from an hour).
         let dur = UILabel()
         dur.backgroundColor = .clear
         dur.textColor = .white
-        dur.font = UIFont.systemFont(ofSize: 11)
+        dur.font = UIFont.systemFont(ofSize: 10)
         dur.textAlignment = .right
         dur.text = "0:00"
         bar.addSubview(dur)
@@ -2667,26 +2673,34 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Position the control bar's children for a given bar width (bar frame set by caller).
     // Layout: [play 36]([next 36])[cur 46] ===slider=== [dur 46][hd 36][fullscreen 36]
     // (Cast is not here: it sits beside Download, reachable before anything has played.)
-    // Times are left/right-aligned so they hug the adjacent buttons — spacing is uniform
-    // on both ends and the slider is centered between them.
+    // Times: under an hour ("12:34") they are centered between the button's icon and the
+    // slider; from an hour ("1:19:28", which nearly fills the column) they are left/right-
+    // aligned against the buttons instead. Decided per video by its duration (timesShowHours),
+    // so a long video's "0:35" doesn't jump sideways when playback crosses 1:00:00.
     // Next appears only from minBarWidthForNext up — landscape fullscreen, or iPad — because
     // the inline bar on a 320pt iPhone leaves the slider 120pt, and one more button cuts it to
     // 84. There the Up next row under the video does the job.
     private static let minBarWidthForNext: CGFloat = 400
 
     private func layoutControls(width w: CGFloat) {
+        controlsLayoutWidth = w
         let barH: CGFloat = 40
         let btnW: CGFloat = 36
         let timeW: CGFloat = 46
         let showNext = w >= VideoPlayerVC.minBarWidthForNext && sp.nextInQueue(after: video.id) != nil
         let nextW: CGFloat = showNext ? btnW : 0
+        // The times sit timeNudge pt into the empty padding of the button beside them (24pt
+        // icons in 36pt buttons leave 6pt each side). On the iOS 5 emulator the slider's
+        // track/thumb run ~11pt into the time columns (see thumbInset below), so "1:19:28"
+        // was ~1pt from the track while ~10pt from the play icon; this evens the two gaps
+        // out without shortening the slider. Labels take no touches, so the overlap leaves
+        // the buttons' tap areas unchanged.
+        let timeNudge: CGFloat = 4
         playPauseBtn?.frame = CGRect(x: 0, y: 0, width: btnW, height: barH)
         nextBtn?.frame = CGRect(x: btnW, y: 0, width: btnW, height: barH)
         nextBtn?.isHidden = !showNext
-        currentTimeLabel?.frame = CGRect(x: btnW + nextW, y: 0, width: timeW, height: barH)
         fsButton?.frame = CGRect(x: w - btnW, y: 0, width: btnW, height: barH)
         hdBtn?.frame = CGRect(x: w - btnW * 2, y: 0, width: btnW, height: barH)
-        durationLabel?.frame = CGRect(x: w - btnW * 2 - timeW, y: 0, width: timeW, height: barH)
         let leftEdge = btnW + nextW + timeW
         let rightEdge = btnW * 2 + timeW
         // A UISlider reserves ~half its thumb width of empty space at each end of its frame
@@ -2696,6 +2710,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let thumbInset: CGFloat = 12
         scrubber?.frame = CGRect(x: leftEdge - thumbInset, y: 0,
                                  width: (w - leftEdge - rightEdge) + thumbInset * 2, height: barH)
+        if timesShowHours {
+            currentTimeLabel?.textAlignment = .left
+            currentTimeLabel?.frame = CGRect(x: btnW + nextW - timeNudge, y: 0, width: timeW, height: barH)
+            durationLabel?.textAlignment = .right
+            durationLabel?.frame = CGRect(x: w - btnW * 2 - timeW + timeNudge, y: 0, width: timeW, height: barH)
+        } else {
+            // The column runs from the button's icon edge (24pt icons in 36pt buttons: 6pt in)
+            // to the slider frame's edge, which on the iOS 5 emulator is where the track
+            // starts — so centering in it centers the time between icon and track. 40pt wide,
+            // room for "59:59" with space to spare.
+            let iconPad: CGFloat = 6
+            let colW = timeW - thumbInset + iconPad
+            currentTimeLabel?.textAlignment = .center
+            currentTimeLabel?.frame = CGRect(x: btnW + nextW - iconPad, y: 0, width: colW, height: barH)
+            durationLabel?.textAlignment = .center
+            durationLabel?.frame = CGRect(x: w - rightEdge + thumbInset, y: 0, width: colW, height: barH)
+        }
     }
 
     private func showSpinner() { spinner?.startAnimating() }
@@ -2828,6 +2859,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let cur = sp.currentSeconds
         guard dur > 0 else { return }
         durationLabel?.text = clockText(dur)
+        // Same threshold as clockText's hours form (Int truncation: dur >= 3600 <=> Int(dur) >= 3600).
+        let hours = dur >= 3600
+        if hours != timesShowHours {
+            timesShowHours = hours
+            if controlsLayoutWidth > 0 { layoutControls(width: controlsLayoutWidth) }
+        }
         if !isScrubbing {
             scrubber?.value = Float(cur / dur)
             currentTimeLabel?.text = clockText(cur)
