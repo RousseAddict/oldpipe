@@ -894,7 +894,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         thumbView = thumb
 
         // Transparent tap-catcher over the video: single tap toggles the control bar, a
-        // double tap on the left/right third seeks -15s / +15s. A custom UIView reading
+        // double tap on the left/right third seeks back / forward by the Double-Tap Seek
+        // setting (AppSettings.seekStepSeconds, 15s by default). A custom UIView reading
         // UITouch.tapCount (NOT a UITapGestureRecognizer, which conflicts with button taps
         // on iOS 6). Added here so it sits BELOW the play button / controls / cast button —
         // those keep their own taps; taps anywhere else on the video hit this.
@@ -2408,8 +2409,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         panel.addSubview(stop)
         castStopBtn = stop
 
-        // [-15s]  ( play/pause )  [+15s] across the middle — the TV's transport, large enough
-        // to hit without looking.
+        // [back]  ( play/pause )  [forward] across the middle — the TV's transport, large
+        // enough to hit without looking. Back/forward skip by the Double-Tap Seek setting.
         let rew = UIButton(type: .custom)
         rew.setImage(UIImage(named: "rewind"), for: .normal)
         rew.addTarget(self, action: #selector(castRewindTapped), for: .touchUpInside)
@@ -2564,8 +2565,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         cast.togglePlayPause()
     }
 
-    @objc private func castRewindTapped() { cast.seek(by: -15) }
-    @objc private func castForwardTapped() { cast.seek(by: 15) }
+    @objc private func castRewindTapped() { cast.seek(by: -Double(AppSettings.seekStepSeconds)) }
+    @objc private func castForwardTapped() { cast.seek(by: Double(AppSettings.seekStepSeconds)) }
 
     @objc private func castScrubTouchDown() { castIsScrubbing = true }
 
@@ -2728,25 +2729,29 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
-    // Double-tap left/right → skip 15s back/forward, with a fading on-screen indicator.
+    // Double-tap left/right → skip back/forward by the Double-Tap Seek setting, with a fading
+    // on-screen indicator. Read at tap time, so a change made in Settings applies to a page
+    // that is already open underneath it.
     @objc private func seekBackwardTapped() {
         guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
-        sp.seek(bySeconds: -15)
-        showSeekIndicator(forward: false)
+        let step = AppSettings.seekStepSeconds
+        sp.seek(bySeconds: -Double(step))
+        showSeekIndicator(forward: false, seconds: step)
         showControls()
     }
 
     @objc private func seekForwardTapped() {
         guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
-        sp.seek(bySeconds: 15)
-        showSeekIndicator(forward: true)
+        let step = AppSettings.seekStepSeconds
+        sp.seek(bySeconds: Double(step))
+        showSeekIndicator(forward: true, seconds: step)
         showControls()
     }
 
     // A ~96pt rounded plate on the left/right of the video showing the rewind/forward
-    // glyph + "15s", fading in then out. Hosted in the fullscreen overlay when active so
-    // it follows rotation, else in the video container.
-    private func showSeekIndicator(forward: Bool) {
+    // glyph + the step ("15s"), fading in then out. Hosted in the fullscreen overlay when
+    // active so it follows rotation, else in the video container.
+    private func showSeekIndicator(forward: Bool, seconds: Int) {
         guard let host = fsOverlay ?? videoContainer else { return }
         seekIndicator?.removeFromSuperview()
 
@@ -2768,7 +2773,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         lbl.textColor = .white
         lbl.font = UIFont.boldSystemFont(ofSize: 13)
         lbl.textAlignment = .center
-        lbl.text = "15s"
+        lbl.text = "\(seconds)s"
         cont.addSubview(lbl)
 
         host.addSubview(cont)

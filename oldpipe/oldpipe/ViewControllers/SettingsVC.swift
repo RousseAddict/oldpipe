@@ -26,6 +26,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     private var fpsBtn: UIButton?
     private var captionLangBtn: UIButton?
     private var captionSizeBtn: UIButton?
+    private var seekStepBtn: UIButton?
     private var copyDebugBtn: UIButton?
     private var copyCrashBtn: UIButton?
     private var copyIdHint: UILabel?
@@ -147,6 +148,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
             subtitle: "Size of the closed-caption text during playback. Auto scales it with the size of the video on screen.",
             title: "Caption Size: \(AppSettings.captionSizeLabel())",
             action: #selector(captionSizeTapped), at: &y, width: contentW, pad: pad)
+
+        seekStepBtn = addPreferenceRow(
+            subtitle: "How far a double tap on either side of the video skips. The cast remote uses it too.",
+            title: "Double-Tap Seek: \(AppSettings.seekStepLabel())",
+            action: #selector(seekStepTapped), at: &y, width: contentW, pad: pad)
 
         y += 16
 
@@ -318,7 +324,7 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
 
     // Sheet tags are a space of their own here (VideoPlayerVC uses 1-7 for its own sheets):
     // 10 = playback quality, 11 = caption size, 12 = frame rate, 13 = caption language (13 was
-    // the download quality sheet before that setting was removed).
+    // the download quality sheet before that setting was removed), 14 = double-tap seek.
     //
     // Empty init + addButton, NOT the variadic otherButtonTitles: convenience init, which
     // crashes on the 5.1.5 runtime.
@@ -352,6 +358,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
                         options: AppSettings.captionLanguageChoices().map { AppSettings.captionLanguageName($0) })
     }
 
+    @objc private func seekStepTapped() {
+        showChoiceSheet(tag: 14, title: "Double-Tap Seek",
+                        options: AppSettings.seekStepChoices.map { "\($0) seconds" })
+    }
+
     // The sheets all have the same shape: an index-aligned value list, then store + retitle.
     // The Cancel button sits one past the end of `values`, so an out-of-range index — Cancel,
     // or a dismissal — falls through apply() and changes nothing.
@@ -376,6 +387,11 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
             apply(AppSettings.captionLanguageChoices(), buttonIndex) {
                 AppSettings.captionLanguage = $0
                 self.captionLangBtn?.setTitle("Caption Language: \(AppSettings.captionLanguageLabel())", for: .normal)
+            }
+        case 14:
+            apply(AppSettings.seekStepChoices, buttonIndex) {
+                AppSettings.seekStep = $0
+                self.seekStepBtn?.setTitle("Double-Tap Seek: \(AppSettings.seekStepLabel())", for: .normal)
             }
         default:
             break

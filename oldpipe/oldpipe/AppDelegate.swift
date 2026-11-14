@@ -116,6 +116,34 @@ enum AppSettings {
         return defaultFps == "60" ? "60 fps" : "30 fps"
     }
 
+    private static let seekStepKey = "double_tap_seek"
+
+    // How far a double tap on the left/right of the video jumps back/forward, in seconds. The
+    // cast remote's back/forward buttons use it too, so "skip" means one thing everywhere.
+    // "15" (the default) is what it was before this was a setting. A stored value that is not
+    // one of the choices (a hand-edited import, a choice later dropped) reads as 15.
+    // String-backed like the rest.
+    static let seekStepChoices = ["5", "10", "15", "20", "30", "60"]
+
+    static var seekStep: String {
+        get {
+            let v = UserDefaults.standard.string(forKey: seekStepKey) ?? "15"
+            return seekStepChoices.contains(v) ? v : "15"
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: seekStepKey)
+            UserDefaults.standard.synchronize()
+        }
+    }
+
+    static var seekStepSeconds: Int {
+        return Int(seekStep) ?? 15
+    }
+
+    static func seekStepLabel() -> String {
+        return "\(seekStep) seconds"
+    }
+
     private static let captionSizeKey = "caption_size"
 
     // Caption text size. "auto" (the default) scales with the width of the view the captions
