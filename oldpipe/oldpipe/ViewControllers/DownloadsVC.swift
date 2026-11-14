@@ -94,7 +94,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         for path in tableView.indexPathsForVisibleRows ?? [] where path.row < videos.count {
             let video = videos[path.row]
             guard DownloadManager.isDownloading(video.id) || PhotoExporter.shared.isBusy(video.id),
-                  let cell = tableView.cellForRow(at: path) else { continue }
+                  let cell = tableView.cellForRow(at: path) as? DownloadCell else { continue }
             applyStatus(to: cell, for: video)
             cell.setNeedsLayout()   // the stock cell sizes its labels to their text in layout
         }
@@ -170,6 +170,7 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         cell.textLabel?.numberOfLines = 2
         cell.textLabel?.font = UIFont.systemFont(ofSize: 14)
         cell.detailTextLabel?.font = UIFont.systemFont(ofSize: 12)
+        cell.detailTextLabel?.textColor = UIColor(white: 0.55, alpha: 1)
 
         cell.textLabel?.text = video.title
         applyStatus(to: cell, for: video)
@@ -196,9 +197,9 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
         return cell
     }
 
-    // The channel + status line under the title, and its colour. Also what the poll rewrites
-    // on the rows still running.
-    private func applyStatus(to cell: UITableViewCell, for video: Video) {
+    // The channel (line 3) and the status (line 4, coloured) under the title. Also what the
+    // poll rewrites on the rows still running.
+    private func applyStatus(to cell: DownloadCell, for video: Video) {
         let isDownloading = DownloadManager.isDownloading(video.id)
         let isPartial = incomplete.contains(video.id)
         let isExporting = PhotoExporter.shared.isBusy(video.id)
@@ -218,18 +219,19 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
             status = [q, sz].filter { !$0.isEmpty }.joined(separator: " \u{2022} ")
         }
         if isDownloading || isPartial || isExporting {
-            cell.detailTextLabel?.textColor = UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)  // amber
+            cell.statusLabel.textColor = UIColor(red: 0.95, green: 0.6, blue: 0.2, alpha: 1)  // amber
         } else if exportText != nil {
-            cell.detailTextLabel?.textColor = UIColor(red: 0.45, green: 0.8, blue: 0.45, alpha: 1)  // saved
+            cell.statusLabel.textColor = UIColor(red: 0.45, green: 0.8, blue: 0.45, alpha: 1)  // saved
         } else {
-            cell.detailTextLabel?.textColor = UIColor(white: 0.55, alpha: 1)
+            cell.statusLabel.textColor = UIColor(white: 0.55, alpha: 1)
         }
-        cell.detailTextLabel?.text = [video.channelName, status]
-            .filter { !$0.isEmpty }.joined(separator: " • ")
+        cell.detailTextLabel?.text = video.channelName
+        cell.statusLabel.text = status
     }
 
+    // Two title lines + channel + status come to ~69pt; 80 leaves ~5pt above and below.
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        return 72
+        return 80
     }
 
     // MARK: - Delete
@@ -282,10 +284,30 @@ class DownloadsVC: UIViewController, UITableViewDataSource, UITableViewDelegate 
 // Stock subtitle cell with a thin "watched progress" bar pinned to the bottom edge of the
 // thumbnail (red fill over a dark track). Positioned in layoutSubviews from imageView.bounds
 // so it tracks the thumb's frame after the async image loads.
+//
+// Four lines of text: the title (up to two), the channel, then the status on a line of its
+// own — sharing one line, a long channel name cut "Downloading 34%" off the end. The stock
+// layout still places the thumbnail and decides where the text starts; layoutText then
+// stacks the lines, centred as a block, so a one-line title leaves no gap.
 
 private class DownloadCell: UITableViewCell {
 
     var playedFraction: CGFloat = 0 { didSet { setNeedsLayout() } }
+
+    // "720p • 48.2 MB", "Audio only • 12.3 MB", "Downloading 34%", "Saved to Photos ✓"…
+    let statusLabel = UILabel()
+    private static let thumbMaxH: CGFloat = 72
+    // Sizes the title. Not the title label itself: before iOS 7 a label measures as one line
+    // unless it is word-wrapping with no line limit (iOS 5: truncating with 2 lines measured
+    // one line, and so did word-wrapping with 2) — two-line titles came out cut to one. This
+    // unlimited stand-in measures the real height, capped at two lines by the caller, and the
+    // title keeps its "…". Main thread only.
+    private static let titleMeasurer: UILabel = {
+        let l = UILabel()
+        l.numberOfLines = 0
+        l.lineBreakMode = .byWordWrapping
+        return l
+    }()
 
     // This cell draws into the built-in UITableViewCell.imageView (not an AsyncImageView),
     // so it holds the request ticket itself and withdraws it on reuse — otherwise a fast
@@ -302,6 +324,10 @@ private class DownloadCell: UITableViewCell {
         progressFill.backgroundColor = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
         progressTrack.addSubview(progressFill)
         imageView?.addSubview(progressTrack)
+        statusLabel.backgroundColor = .clear   // white by default on iOS 6
+        statusLabel.font = UIFont.systemFont(ofSize: 12)
+        statusLabel.lineBreakMode = .byTruncatingTail
+        contentView.addSubview(statusLabel)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -316,6 +342,7 @@ private class DownloadCell: UITableViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        layoutText()
         guard let iv = imageView else { return }
         let b = iv.bounds
         guard playedFraction > 0.01, b.width > 0, b.height > 0 else {
@@ -327,6 +354,44 @@ private class DownloadCell: UITableViewCell {
         progressTrack.frame = CGRect(x: 0, y: b.height - barH, width: b.width, height: barH)
         progressFill.frame = CGRect(x: 0, y: 0, width: b.width * min(1, playedFraction), height: barH)
         iv.bringSubviewToFront(progressTrack)
+    }
+
+    // x comes from where the stock layout put the title (right of the thumbnail, with each
+    // iOS version's own spacing); the width runs to the content view's edge, so the delete
+    // button in Edit mode and the iPad's width are followed. An empty line takes no room.
+    private func layoutText() {
+        guard let title = textLabel, let channel = detailTextLabel,
+              let titleFont = title.font, let channelFont = channel.font else { return }
+        // The stock layout scales the thumbnail to the row's height, so the taller row would
+        // widen it (128 -> 142pt on iOS 5) and take that width from the text. Held at the 72pt
+        // tall it was before the fourth line, and the text moved left by what it gave back.
+        var shift: CGFloat = 0
+        if let iv = imageView, iv.frame.height > DownloadCell.thumbMaxH {
+            let f = iv.frame
+            let h = DownloadCell.thumbMaxH
+            let tw = floor(f.width * h / f.height)
+            iv.frame = CGRect(x: f.minX, y: floor((contentView.bounds.height - h) / 2), width: tw, height: h)
+            shift = f.width - tw
+        }
+        let x = title.frame.minX - shift
+        let w = contentView.bounds.width - x - 10
+        guard w > 0 else { return }
+        let m = DownloadCell.titleMeasurer
+        m.font = titleFont
+        m.text = title.text
+        let fitted = m.sizeThatFits(CGSize(width: w, height: CGFloat.greatestFiniteMagnitude)).height
+        let titleH = ceil(min(fitted, titleFont.lineHeight * 2))
+        let channelH = (channel.text ?? "").isEmpty ? 0 : ceil(channelFont.lineHeight)
+        let hasStatus = !(statusLabel.text ?? "").isEmpty
+        let statusH = hasStatus ? ceil(statusLabel.font.lineHeight) : 0
+        let gap: CGFloat = 2
+        var y = floor((contentView.bounds.height - (titleH + gap + channelH + statusH)) / 2)
+        title.frame = CGRect(x: x, y: y, width: w, height: titleH)
+        y += titleH + gap
+        channel.frame = CGRect(x: x, y: y, width: w, height: channelH)
+        y += channelH
+        statusLabel.frame = CGRect(x: x, y: y, width: w, height: statusH)
+        statusLabel.isHidden = !hasStatus
     }
 }
 
