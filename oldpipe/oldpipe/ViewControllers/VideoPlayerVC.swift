@@ -7,7 +7,7 @@ import AVFoundation
 // disappear it detaches the layer (does NOT stop playback). Audio session, Now Playing
 // metadata, remote-control transport, and resume persistence all live in the singleton.
 
-class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegate {
+class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegate, UIScrollViewDelegate {
 
     private(set) var video: Video   // read by Navigator to find this page in the stack
     private var streams: [VideoStream] = []
@@ -193,6 +193,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // the boost running in the player is this page's (so letting go only ends our own).
     private var boostPill: UIView?
     private var boostOwned = false
+
+    // Mini player handover (see scrollViewDidScroll): false once the page is scrolled so far
+    // that the video is mostly out of view. The mini bar then shows the video, live, and this
+    // page's video area keeps only the thumbnail.
+    private var videoOnScreen = true
+
+    // Whether this page is showing its video itself — what decides, for the mini bar, that
+    // this page does not need it. Fullscreen always does.
+    var isShowingVideo: Bool { return fsOverlay != nil || videoOnScreen }
     private var downloadBtn: UIButton?
     private var shareBtn: UIButton?
     private var addPlaylistBtn: UIButton?
@@ -297,6 +306,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             if !didRequestStreams { loadStreams(updateStatus: false, reuse: true) }
         } else if sp.isActive(video.id) {
             showActivePlayback()
+            // The video just left the mini bar for this page (or stays there, scrolled away):
+            // the bar settles now rather than on its next tick.
+            notifyMiniBar()
             // Already playing, so nothing waits on the lane: related goes ahead of the
             // description refetch below rather than behind its two player requests.
             loadRelatedIfIdle()
@@ -423,8 +435,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         stopCaptionTimer()
         if fsOverlay != nil { exitFullscreen() }
         // Detach the shared layer — do NOT stop. Playback (audio) continues; the mini bar
-        // takes over the UI. The layer is reattached on the next appear.
+        // takes over the UI, the video with it, at once rather than on its next tick. The layer
+        // is reattached on the next appear.
         detachLayer()
+        notifyMiniBar()
     }
 
     @objc private func appDidBecomeActive() {
@@ -437,6 +451,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // MARK: - Shared layer attach / detach
 
     private func attachLayer() {
+        // Scrolled away from the video: the mini bar shows it. Left free rather than put in
+        // the container, so the bar can take it (it only ever takes a free layer).
+        if fsOverlay == nil && !videoOnScreen {
+            detachLayer()
+            notifyMiniBar()
+            return
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         sp.layer.videoGravity = AVLayerVideoGravity.resizeAspect
@@ -482,15 +503,82 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
     }
 
+    // Takes the shared layer off THIS page only. It may be in the mini bar (this page scrolled
+    // away, or another page in front), and leaving the page must not empty the bar.
     private func detachLayer() {
-        sp.layer.removeFromSuperlayer()
+        guard let host = sp.layer.superlayer else { return }
+        if host === videoContainer?.layer || host === fsOverlay?.layer {
+            sp.layer.removeFromSuperlayer()
+        }
     }
 
     // An audio-only download has no video track, so hiding the thumbnail would leave a black
     // rectangle for the whole track. Keep the artwork up instead — it doubles as the "this is
-    // audio" cue. Every site that reveals live playback goes through this.
+    // audio" cue. Every site that reveals live playback goes through this. Scrolled away, the
+    // video is in the mini bar, and the strip of video area still in view keeps the thumbnail.
     private func hideThumbForPlayback() {
-        thumbView?.isHidden = !DownloadManager.isAudioOnly(video.id)
+        thumbView?.isHidden = videoOnScreen && !DownloadManager.isAudioOnly(video.id)
+    }
+
+    // MARK: - Mini player handover
+
+    // The video goes to the mini bar once two thirds of it have scrolled out of view, and comes
+    // back once half of it is in view again: two different points, so a page held near one of
+    // them does not flick the bar on and off. Runs on every scroll frame, so it is only a
+    // comparison until a point is crossed.
+    func scrollViewDidScroll(_ s: UIScrollView) {
+        guard s === scrollView, let h = videoContainer?.bounds.height, h > 0 else { return }
+        let y = s.contentOffset.y + s.contentInset.top
+        if videoOnScreen {
+            if y >= h * 2 / 3 { setVideoOnScreen(false) }
+        } else if y <= h / 2 {
+            setVideoOnScreen(true)
+        }
+    }
+
+    private func setVideoOnScreen(_ on: Bool) {
+        guard on != videoOnScreen else { return }
+        videoOnScreen = on
+        // Fullscreen keeps the video whatever the page underneath is scrolled to; exiting it
+        // settles where the video goes.
+        if fsOverlay == nil, sp.isActive(video.id), !cast.isCasting(video.id) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if on {
+                attachLayer()
+            } else {
+                detachLayer()
+            }
+            hideThumbForPlayback()
+            CATransaction.commit()
+        }
+        notifyMiniBar()
+    }
+
+    // The bar decides on a timer; this makes it decide now, so the video changes place in the
+    // same frame as the scroll that moved it.
+    private func notifyMiniBar() {
+        NotificationCenter.default.post(name: MiniPlayerBar.refreshNotification, object: nil)
+    }
+
+    // The mini bar tapped while it shows this page's own video: back up to it.
+    func scrollToVideo() {
+        guard let sv = scrollView else { return }
+        sv.setContentOffset(CGPoint(x: 0, y: -sv.contentInset.top), animated: true)
+    }
+
+    // The mini bar's close while this page was scrolled away from its video. Playback is gone,
+    // so the video area goes back to how the page opened: the thumbnail and the play button.
+    func playbackClosedFromBar(_ videoId: String) {
+        guard videoId == video.id, !cast.isCasting(video.id) else { return }
+        detachLayer()
+        hideSpinner()
+        clearReplayButton()
+        thumbView?.isHidden = false
+        playBtn?.isHidden = false
+        statusLabel?.isHidden = true
+        captionPlate?.isHidden = true
+        hideControls()
     }
 
     // Reattach onto already-running playback (from mini bar / returning to the VC).
@@ -852,7 +940,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if fsOverlay == nil {
             layoutStatusViews(in: container, fullscreen: false)
             tapCatcher?.frame = CGRect(x: 0, y: 0, width: w, height: videoH)
-            sp.layer.frame = container.bounds
+            // Only while it is here: in the mini bar it is sized to the bar's slot.
+            if sp.layer.superlayer === container.layer { sp.layer.frame = container.bounds }
             controlsView?.frame = CGRect(x: 0, y: videoH - 40, width: w, height: 40)
             layoutControls(width: w)
         }
@@ -893,6 +982,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // internal content (video, labels, controls) is snapped into place by
         // relayoutForRotation() on completion. iOS 6/7 build: [] (portrait-locked, no-op).
         sv.autoresizingMask = iPadFlexWidthHeight
+        sv.delegate = self   // scrollViewDidScroll: the mini player handover
         view.addSubview(sv)
         scrollView = sv
 
@@ -4234,6 +4324,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if boostPill != nil { showBoostPill() }
 
         ensureSheetWindow()
+        // Entered from a page scrolled away (the full-screen button sits at the bottom of the
+        // video area, still in view): the video just left the mini bar, which now hides.
+        notifyMiniBar()
     }
 
     private func setFSStatusBar(hidden: Bool) {
@@ -4250,11 +4343,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if let container = videoContainer {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            pLayer.frame = container.bounds
-            if let thumbLayer = thumbView?.layer {
-                container.layer.insertSublayer(pLayer, below: thumbLayer)
-            } else {
-                container.layer.addSublayer(pLayer)
+            if videoOnScreen {
+                pLayer.frame = container.bounds
+                if let thumbLayer = thumbView?.layer {
+                    container.layer.insertSublayer(pLayer, below: thumbLayer)
+                } else {
+                    container.layer.addSublayer(pLayer)
+                }
+            } else if pLayer.superlayer === overlay.layer {
+                // The page under the overlay is scrolled away from its video: the video goes to
+                // the mini bar instead (left free here, the bar takes it).
+                pLayer.removeFromSuperlayer()
             }
             CATransaction.commit()
         }
@@ -4278,6 +4377,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // fsOverlay is now nil, so the host resolves back to videoContainer.
         if captionPlate != nil { ensureCaptionPlate() }
         if boostPill != nil { showBoostPill() }
+        if !videoOnScreen, sp.isActive(video.id), !cast.isCasting(video.id) { hideThumbForPlayback() }
+        notifyMiniBar()
     }
 }
 
