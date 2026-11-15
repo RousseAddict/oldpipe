@@ -80,7 +80,7 @@
 		BB000001000000000000BC09 /* VideoPlayerVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB09 /* VideoPlayerVC.swift */; };
 		BB000001000000000000BC0A /* DownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0A /* DownloadManager.swift */; };
 		BB000001000000000000BC34 /* PhotoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB34 /* PhotoExporter.swift */; };
-		BB000001000000000000BC36 /* AudioExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB36 /* AudioExporter.swift */; };
+		BB000001000000000000BC36 /* FileExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB36 /* FileExporter.swift */; };
 		BB000001000000000000BC37 /* CastController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB37 /* CastController.swift */; };
 		BB000001000000000000BC0B /* DownloadsVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB0B /* DownloadsVC.swift */; };
 		BB000001000000000000BC17 /* PlaylistDetailVC.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BB17 /* PlaylistDetailVC.swift */; };
@@ -203,7 +203,7 @@
 		BB000001000000000000BB09 /* VideoPlayerVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayerVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0A /* DownloadManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadManager.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB34 /* PhotoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoExporter.swift; sourceTree = "<group>"; };
-		BB000001000000000000BB36 /* AudioExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioExporter.swift; sourceTree = "<group>"; };
+		BB000001000000000000BB36 /* FileExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileExporter.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB37 /* CastController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastController.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB0B /* DownloadsVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadsVC.swift; sourceTree = "<group>"; };
 		BB000001000000000000BB17 /* PlaylistDetailVC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistDetailVC.swift; sourceTree = "<group>"; };
@@ -378,7 +378,7 @@
 				BB000001000000000000BB23 /* Captions.swift */,
 				BB000001000000000000BB0A /* DownloadManager.swift */,
 				BB000001000000000000BB34 /* PhotoExporter.swift */,
-				BB000001000000000000BB36 /* AudioExporter.swift */,
+				BB000001000000000000BB36 /* FileExporter.swift */,
 				BB000001000000000000BB37 /* CastController.swift */,
 				BB000001000000000000BB0C /* Channel.swift */,
 				BB000001000000000000BB14 /* Playlist.swift */,
@@ -630,7 +630,7 @@
 				BB000001000000000000BC09 /* VideoPlayerVC.swift in Sources */,
 				BB000001000000000000BC0A /* DownloadManager.swift in Sources */,
 				BB000001000000000000BC34 /* PhotoExporter.swift in Sources */,
-				BB000001000000000000BC36 /* AudioExporter.swift in Sources */,
+				BB000001000000000000BC36 /* FileExporter.swift in Sources */,
 				BB000001000000000000BC37 /* CastController.swift in Sources */,
 				BB000001000000000000BC0B /* DownloadsVC.swift in Sources */,
 				BB000001000000000000BC17 /* PlaylistDetailVC.swift in Sources */,

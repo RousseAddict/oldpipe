@@ -7,7 +7,7 @@ import Foundation
 // above the muxed 360p is stored as index.m3u8 + seg<i>.ts (see DownloadManager).
 //
 // With `audioOnly` the same machinery writes a single-track .m4a from an audio-only bundle,
-// which is what AudioExporter hands to iTunes File Sharing. Only the container differs: the
+// which is what FileExporter hands to iTunes File Sharing. Only the container differs: the
 // AAC frames take the identical path either way.
 //
 // The input is ALWAYS a bundle written by HLSTransmuxer, so this only has to read what its

@@ -317,6 +317,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         } else if PhotoExporter.shared.isBusy(video.id) {
             // Same for a Save to Photos, which reports on the same button.
             observePhotoExport()
+        } else if FileExporter.shared.isBusy(video.id) {
+            // And for a Save as File.
+            observeFileExport()
         } else {
             // Either may have finished while we were away: no stale "Photos • Saving 90%".
             updateDownloadButton()
@@ -415,7 +418,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if let t = objc_getAssociatedObject(self, &progressTimerKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
-        if let t = objc_getAssociatedObject(self, &m4aPollKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &fileExportPollKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &controlsHideKey) as? Timer { t.invalidate() }
         stopCaptionTimer()
         if fsOverlay != nil { exitFullscreen() }
@@ -578,7 +581,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         // transfers themselves carry on in their managers.
         if let t = objc_getAssociatedObject(self, &downloadPollKey) as? Timer { t.invalidate() }
         if let t = objc_getAssociatedObject(self, &photoPollKey) as? Timer { t.invalidate() }
-        if let t = objc_getAssociatedObject(self, &m4aPollKey) as? Timer { t.invalidate() }
+        if let t = objc_getAssociatedObject(self, &fileExportPollKey) as? Timer { t.invalidate() }
         video = newVideo
         contentGen += 1   // invalidates every in-flight response for the previous video
         streams = []
@@ -1130,9 +1133,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             let q = DownloadManager.qualityLabel(for: video.id)
             downloadBtn?.setTitle(q.isEmpty ? "Downloaded \u{2713}" : "Downloaded \(q) \u{2713}",
                                   for: .normal)
-            // Still tappable for a video: it is where Save to Photos lives. An audio-only
-            // copy has nothing to offer there.
-            downloadBtn?.isEnabled = !DownloadManager.isAudioOnly(video.id)
+            // Still tappable: it is where Save to Photos (a video) and Save as File (either
+            // kind — an audio-only copy becomes an .m4a) live.
+            downloadBtn?.isEnabled = true
             downloadBtn?.backgroundColor = UIColor(red: 0.15, green: 0.4, blue: 0.15, alpha: 1)
         } else {
             downloadBtn?.setTitle("Download", for: .normal)
@@ -2006,11 +2009,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // MARK: - Save to Photos (the work is PhotoExporter's; this is the asking and the progress)
 
     private static let photosSheetTag = 8   // UIActionSheet: the Download button once it is busy or done
-    private static let m4aSheetTag = 9      // UIActionSheet: the Download button during an M4A export
+    private static let fileSheetTag = 9     // UIActionSheet: the Download button during a Save as File
 
     // The Download button when there is no picker to show: the video is downloading, downloaded,
     // or on its way to Photos. The sheet is the confirmation — for a download it names the
-    // quality and size, which is what a separate alert used to say.
+    // quality and size, which is what a separate alert used to say. A finished download also
+    // offers Save as File: an .mp4 from a video download, an .m4a from an audio-only one.
     private func showPhotosSheet() {
         let id = video.id
         let sheet = UIActionSheet()
@@ -2028,15 +2032,21 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             } else {
                 sheet.addButton(withTitle: "Save to Photos When Done")
             }
-        } else if PhotoExporter.canExport(id) {
+        } else if FileExporter.canExport(id) {
+            let forPhotos = PhotoExporter.canExport(id)   // false for an audio-only download
             var lines = [[DownloadManager.qualityLabel(for: id), DownloadManager.fileSizeText(for: id)]
                 .filter { !$0.isEmpty }.joined(separator: " \u{2022} ")]
-            if PhotoExporter.shared.wasSaved(id) {
-                lines.append("Already saved once, so this adds a second copy.")
+            if forPhotos && PhotoExporter.shared.wasSaved(id) {
+                lines.append("Already saved to Photos once, so saving there again adds a second copy.")
             }
             let title = lines.filter { !$0.isEmpty }.joined(separator: "\n")
             if !title.isEmpty { sheet.title = title }   // "" would still draw an empty header
-            sheet.addButton(withTitle: "Save to Photos")
+            if forPhotos {
+                sheet.addButton(withTitle: "Save to Photos")
+                sheet.addButton(withTitle: "Save as MP4 File")
+            } else {
+                sheet.addButton(withTitle: "Save as M4A File")
+            }
         } else {
             return
         }
@@ -2044,15 +2054,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sheet.show(in: view)
     }
 
-    // The Download button while an M4A export is running: the only place to stop one, since an
+    // The Download button while a Save as File is running: the only place to stop one, since an
     // export-only download never becomes a Downloads row.
-    private func showM4ASheet() {
-        guard AudioExporter.shared.canStop(video.id) else { return }
+    private func showFileSheet() {
+        guard FileExporter.shared.canStop(video.id) else { return }
         let sheet = UIActionSheet()
         sheet.delegate = self
-        sheet.tag = VideoPlayerVC.m4aSheetTag
-        sheet.title = "Saving an M4A file"
-        sheet.destructiveButtonIndex = sheet.addButton(withTitle: "Stop Saving M4A")
+        sheet.tag = VideoPlayerVC.fileSheetTag
+        sheet.title = "Saving a file for iTunes"
+        sheet.destructiveButtonIndex = sheet.addButton(withTitle: "Stop Saving File")
         sheet.cancelButtonIndex = sheet.addButton(withTitle: "Cancel")
         sheet.show(in: view)
     }
@@ -2067,16 +2077,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         observePhotoExport()
     }
 
-    // "M4A file": fetch the audio, repackage it, leave the file in Documents for iTunes.
-    // An audio download already on disk is repackaged in place instead of fetched again.
-    private func beginM4AExport(_ c: DownloadChoice) {
-        if AudioExporter.canExport(video.id) {
-            AudioExporter.shared.export(video)
+    // The picker's File destination: the chosen video tier or the audio is fetched into a
+    // temporary folder, made into an .mp4 or .m4a in Documents for iTunes, and deleted. (The
+    // picker only opens on a video with no download; Save as File from one is the sheet's.)
+    private func beginFileExport(_ c: DownloadChoice) {
+        if c.isAudioOnly {
+            FileExporter.shared.downloadAndExportAudio(video, audioStream: c.stream,
+                                                       estimatedBytes: c.estimatedBytes)
         } else {
-            AudioExporter.shared.downloadAndExport(video, audioStream: c.stream,
-                                                   estimatedBytes: c.estimatedBytes)
+            let audio = c.isProgressive ? nil : audioStreamForHLS()
+            guard c.isProgressive || audio != nil else { return }
+            FileExporter.shared.downloadAndExportVideo(video, quality: c.label, videoStream: c.stream,
+                                                       audioStream: audio, estimatedBytes: c.estimatedBytes)
         }
-        observeM4AExport()
+        observeFileExport()
     }
 
     // Mirrors a Save to Photos onto the Download button ("Photos • Saving 34%"), the way
@@ -2108,24 +2122,24 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         tick()   // "Waiting..." at once, not half a second later
     }
 
-    // The same mirroring for an M4A export ("M4A • Exporting 34%"). AudioExporter puts up its
+    // The same mirroring for a Save as File ("File • Exporting 34%"). FileExporter puts up its
     // own alert naming the file at the end, so there is no flash to match Photos'.
-    private func observeM4AExport() {
-        if let t = objc_getAssociatedObject(self, &m4aPollKey) as? Timer { t.invalidate() }
+    private func observeFileExport() {
+        if let t = objc_getAssociatedObject(self, &fileExportPollKey) as? Timer { t.invalidate() }
         let tick = { [weak self] in
             guard let self = self else { return }
             let id = self.video.id
-            if AudioExporter.shared.isBusy(id), let s = AudioExporter.shared.statusText(id) {
-                self.downloadBtn?.setTitle("M4A \u{2022} \(s)", for: .normal)
+            if FileExporter.shared.isBusy(id), let s = FileExporter.shared.statusText(id) {
+                self.downloadBtn?.setTitle("File \u{2022} \(s)", for: .normal)
                 return
             }
-            if let t = objc_getAssociatedObject(self, &m4aPollKey) as? Timer { t.invalidate() }
+            if let t = objc_getAssociatedObject(self, &fileExportPollKey) as? Timer { t.invalidate() }
             self.updateDownloadButton()
         }
         let t = Timer(timeInterval: 0.5, target: BlockTarget(tick),
                       selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
-        objc_setAssociatedObject(self, &m4aPollKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &fileExportPollKey, t, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         tick()
     }
 
@@ -2200,13 +2214,21 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             case "Stop Saving to Photos":
                 PhotoExporter.shared.cancel(video.id)
                 observePhotoExport()   // "Photos • Stopping...", then the usual label
+            case "Save as MP4 File", "Save as M4A File":
+                // Same wait as Save to Photos: it may answer with an alert (no room).
+                let t = Timer(timeInterval: 0.35, target: BlockTarget { [weak self] in
+                    guard let self = self else { return }
+                    FileExporter.shared.export(self.video)
+                    self.observeFileExport()
+                }, selector: #selector(BlockTarget.fire), userInfo: nil, repeats: false)
+                RunLoop.main.add(t, forMode: .common)
             default:
                 break
             }
-        } else if actionSheet.tag == VideoPlayerVC.m4aSheetTag {
-            if actionSheet.buttonTitle(at: buttonIndex) == "Stop Saving M4A" {
-                AudioExporter.shared.cancel(video.id)
-                observeM4AExport()   // "M4A • Stopping...", then the usual label
+        } else if actionSheet.tag == VideoPlayerVC.fileSheetTag {
+            if actionSheet.buttonTitle(at: buttonIndex) == "Stop Saving File" {
+                FileExporter.shared.cancel(video.id)
+                observeFileExport()   // "File • Stopping...", then the usual label
             }
         } else if actionSheet.tag == 2 {
             if buttonIndex < pendingPlaylists.count {
@@ -3754,10 +3776,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     @objc private func downloadTapped() {
-        // An M4A export is checked first: it is the live operation, and for a video that is
+        // A Save as File is checked first: it is the live operation, and for a video that is
         // not otherwise downloaded this sheet is the only way to stop one.
-        if AudioExporter.shared.isBusy(video.id) {
-            showM4ASheet()
+        if FileExporter.shared.isBusy(video.id) {
+            showFileSheet()
             return
         }
         // Busy or done: the button is where Save to Photos lives from here on.
@@ -3794,11 +3816,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                                          mark: "", enabled: true, tag: 0),
                        DownloadOptionRow(title: "Photos", detail: "photo library",
                                          mark: "", enabled: true, tag: 0),
-                       // Deliberately NOT called "Music": no iOS version lets an app put a
-                       // file into the Music app (see AudioExporter), so the row promises the
-                       // file it really produces rather than a destination it cannot reach.
-                       DownloadOptionRow(title: "M4A file", detail: "audio, via iTunes",
-                                         mark: "", enabled: audioChoice != nil, tag: 0)],
+                       // A file for iTunes File Sharing: a video tier becomes an .mp4, the
+                       // audio an .m4a. Deliberately NOT called "Music": no iOS version lets
+                       // an app put a file into the Music app (see FileExporter), so the row
+                       // promises the file it really produces, not a place it cannot reach.
+                       DownloadOptionRow(title: "File", detail: "via iTunes",
+                                         mark: "", enabled: true, tag: 0)],
                 mode: .single,
                 initialSelection: [0]),
             DownloadOptionSection(
@@ -3829,27 +3852,23 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 initialSelection: ticked))
         }
 
-        // Each destination carries one kind of thing and no captions, so the sections it
-        // cannot carry grey out, and a pick that has just become impossible moves to the
-        // section that can still hold it. Photos takes one video file; an M4A takes the audio.
-        // The Video and Audio sections are modal-wide exclusive, so selecting into one of them
-        // clears the other by itself.
+        // Photos and File take no captions, so those grey out. Photos also takes only a video
+        // file: its audio section greys out, and an audio pick moves to a video tier. File
+        // takes either (a video tier becomes an .mp4, the audio an .m4a), so the pick is left
+        // as it was. The Video and Audio sections are modal-wide exclusive, so selecting into
+        // one of them clears the other by itself.
         let photosRow = preselection(choices, audio: nil).row
         let onChange: (DownloadOptionsView, [[Int]]) -> Void = { modal, picked in
             let toPhotos = picked[destSection] == [1]
-            let toM4A = picked[destSection] == [2]
+            let toFile = picked[destSection] == [2]
             if audioSection >= 0 {
                 if toPhotos, !picked[audioSection].isEmpty {
                     modal.select(section: videoSection, row: photosRow)
                 }
-                if toM4A, picked[audioSection].isEmpty {
-                    modal.select(section: audioSection, row: 0)
-                }
                 modal.setSectionEnabled(audioSection, !toPhotos)
             }
-            modal.setSectionEnabled(videoSection, !toM4A)
-            if capSection >= 0 { modal.setSectionEnabled(capSection, !toPhotos && !toM4A) }
-            modal.setConfirmTitle(toPhotos || toM4A ? "Download & Save" : "Download")
+            if capSection >= 0 { modal.setSectionEnabled(capSection, !toPhotos && !toFile) }
+            modal.setConfirmTitle(toPhotos || toFile ? "Download & Save" : "Download")
         }
 
         DownloadOptionsView.present(in: view, title: "Download", sections: sections,
@@ -3862,8 +3881,12 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 return
             }
             if picked[destSection] == [2] {
-                guard let a = audioChoice else { return }
-                self.beginM4AExport(a)
+                // Exclusive: exactly one of Video and Audio carries a row.
+                if audioSection >= 0, let a = audioChoice, !picked[audioSection].isEmpty {
+                    self.beginFileExport(a)
+                } else if let idx = picked[videoSection].first, idx >= 0, idx < choices.count {
+                    self.beginFileExport(choices[idx])
+                }
                 return
             }
 
@@ -4264,7 +4287,7 @@ private var timerKey = "timerKey"
 private var progressTimerKey = "progressTimerKey"
 private var downloadPollKey = "downloadPollKey"
 private var photoPollKey = "photoPollKey"
-private var m4aPollKey = "m4aPollKey"
+private var fileExportPollKey = "fileExportPollKey"
 private var controlsHideKey = "controlsHideKey"
 private var captionTimerKey = "captionTimerKey"
 

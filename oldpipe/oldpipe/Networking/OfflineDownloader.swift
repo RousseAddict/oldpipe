@@ -121,7 +121,7 @@ final class OfflineDownloader {
     // iOS 6 AVPlayer cannot play fMP4 at all — and because a playlist gives an exact duration,
     // which a raw ADTS .aac would not (the scrubber and the premature-EOF watchdog need it).
     //
-    // `dir` + `cancelKey` work exactly as in start(), and for the same reason: AudioExporter
+    // `dir` + `cancelKey` work exactly as in start(), and for the same reason: FileExporter
     // fetches a bundle that is NOT a download, into its own temp dir and under its own key.
     static func startAudio(video: Video, audioStream: VideoStream,
                            captions: [CaptionTrack] = [],

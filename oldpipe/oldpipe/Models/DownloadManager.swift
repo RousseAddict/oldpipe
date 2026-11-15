@@ -141,7 +141,7 @@ class DownloadManager {
         // re-register the entry the user asked us to remove.
         cancelDownload(videoId)
         PhotoExporter.shared.downloadRemoved(videoId)   // same reason: it reads the files deleted below
-        AudioExporter.shared.downloadRemoved(videoId)   // and so does an M4A export of it
+        FileExporter.shared.downloadRemoved(videoId)    // and so does a Save as File of it
         removeFiles(videoId)
         var list = rawList()
         list.removeAll { ($0["id"] as? String) == videoId }
@@ -325,7 +325,7 @@ class DownloadManager {
             guard let id = entry["id"] as? String else { continue }
             cancelDownload(id)
             PhotoExporter.shared.downloadRemoved(id)
-            AudioExporter.shared.downloadRemoved(id)
+            FileExporter.shared.downloadRemoved(id)
             removeFiles(id)
         }
         UserDefaults.standard.removeObject(forKey: defaultsKey)
