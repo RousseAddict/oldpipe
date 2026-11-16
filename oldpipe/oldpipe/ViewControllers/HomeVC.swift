@@ -107,6 +107,12 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
+    // iOS 5-8 do not drop observers on their own; a popped group feed would leave a dangling one.
+    deinit {
+        NotificationCenter.default.removeObserver(self, name: UIApplication.didBecomeActiveNotification,
+                                                  object: nil)
+    }
+
     // The channels this feed covers: every subscription, or — for a group feed — only the
     // subscribed channels in that group. Intersecting with the live subscription list here
     // is what makes unsubscribing need no group cleanup.
@@ -132,6 +138,25 @@ class HomeVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
         }
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             image: UIImage(named: "search"), style: .plain, target: self, action: #selector(showSearch))
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive),
+                                               name: UIApplication.didBecomeActiveNotification,
+                                               object: nil)
+    }
+
+    // iOS removes a layer's animations when its view leaves the window (a page pushed on top)
+    // and when the app goes to the background. A feed load outlives both, so without these
+    // the loading bar comes back frozen where its segment was first placed. Restarting is
+    // safe: startLoadingBar replaces any animation still there.
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        if isLoading { startLoadingBar() }
+    }
+
+    // Covers returning from another app and unlocking. A page on top of Home gets nothing
+    // here; viewWillAppear restarts the bar when that page is closed.
+    @objc private func appDidBecomeActive() {
+        guard isLoading, isViewLoaded, view.window != nil else { return }
+        startLoadingBar()
     }
 
     override func viewDidAppear(_ animated: Bool) {
