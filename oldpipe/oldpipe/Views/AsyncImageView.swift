@@ -32,6 +32,13 @@ class AsyncImageView: UIImageView {
         return (diskCacheDir as NSString).appendingPathComponent("\(key).jpg")
     }
 
+    // The bytes downloaded for `url`, exactly as they arrived; nil when not on disk. Any thread:
+    // the cache writes its files atomically, so a reader never sees half of one. FileExporter
+    // uses it for an export's cover art when the network has nothing better.
+    static func cachedData(for url: String) -> Data? {
+        return try? Data(contentsOf: URL(fileURLWithPath: diskPath(for: url)))
+    }
+
     // MARK: - Decode queue (serial — UIGraphicsBeginImageContextWithOptions unsafe concurrent on iOS 6)
     private static let decodeQueue = AppQueue(label: "com.oldpipe.imagedecode")
 

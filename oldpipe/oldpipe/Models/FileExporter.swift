@@ -18,8 +18,9 @@ import UIKit
 //                   same conversion Save to Photos uses.
 //   audio only      an HLS bundle too (iOS 6 AVPlayer cannot play the fMP4 the adaptive audio
 //                   stream ships as): MP4Remuxer writes a single-track .m4a.
-// Nothing is re-encoded. A remuxed file carries the title and channel as iTunes metadata, so
-// it does not show up as a bare file name; the copied 360p file is YouTube's own, as it came.
+// Nothing is re-encoded. A remuxed file carries the title, the channel and the thumbnail as
+// iTunes metadata, so it does not show up as a bare file name with a blank picture; the copied
+// 360p file is YouTube's own, as it came.
 //
 // Unlike Save to Photos there is no compatibility probe: nothing here refuses a quality. A
 // 1080p60 file this phone cannot play is still a fine file to copy to a computer.
@@ -207,10 +208,13 @@ final class FileExporter {
         let ext = audioOnly ? "m4a" : "mp4"
         let name = FileExporter.uniqueName(for: video.title, ext: ext)
         let out = FileExporter.documentsPath(name)
+        let cover = FileExporter.coverArt(for: video)
+        if abort() { AppQueue.main.async { self.finish(id) }; return }
         let started = Date()
         let reason = MP4Remuxer.remux(bundleDir: bundle, outPath: out,
                                       audioOnly: audioOnly,
                                       title: video.title, artist: video.channelName,
+                                      cover: cover,
                                       progress: { done, total in
             let pct = done * 100 / max(total, 1)
             AppQueue.main.async { self.setProgress(id, ownsBundle ? 90 + pct / 10 : pct) }
@@ -224,8 +228,26 @@ final class FileExporter {
             }
             return
         }
-        DebugLog.log("FileExport", "id=\(id) wrote \(name) (\(FileExporter.fileSize(out)) bytes) in \(ms)ms")
+        DebugLog.log("FileExport", "id=\(id) wrote \(name) (\(FileExporter.fileSize(out)) bytes, "
+            + "cover \(cover?.count ?? 0) bytes) in \(ms)ms")
         AppQueue.main.async { self.completed(id, name: name, path: out) }
+    }
+
+    // The video's thumbnail as the file's artwork, so iTunes and the Music app show a picture
+    // instead of a blank note. Best first: YouTube's 1280x720, which videos uploaded below 720p
+    // do not have (a 404, so nil); then the thumbnail the lists already downloaded, which also
+    // covers an export made offline; then the 320x180 every video has. The bytes go in as
+    // YouTube sent them — nothing is decoded or re-encoded. No usable image at all means a
+    // file without a cover, never a failed export. Runs on `queue`, so blocking is fine.
+    private static func coverArt(for video: Video) -> Data? {
+        let base = "https://i.ytimg.com/vi/\(video.id)/"
+        if let d = CurlFetcher.getSync(url: base + "maxresdefault.jpg", timeout: 10),
+           MP4Remuxer.coverFlags(d) != nil { return d }
+        if !video.thumbnailURL.isEmpty, let d = AsyncImageView.cachedData(for: video.thumbnailURL),
+           MP4Remuxer.coverFlags(d) != nil { return d }
+        if let d = CurlFetcher.getSync(url: base + "mqdefault.jpg", timeout: 10),
+           MP4Remuxer.coverFlags(d) != nil { return d }
+        return nil
     }
 
     // A muxed 360p file already is the .mp4: copied in from a download (which stays), or moved

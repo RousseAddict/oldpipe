@@ -42,6 +42,17 @@ final class MP4Remuxer {
         return n
     }
 
+    // The iTunes data type of a cover image: 13 = JPEG, 14 = PNG, read from its magic bytes.
+    // nil for anything else (WebP, an HTML error page, a truncated body) and for a file over
+    // 1 MB, which no YouTube thumbnail is: such bytes are left out, not stored as a broken cover.
+    static func coverFlags(_ d: Data) -> Int? {
+        guard d.count >= 8, d.count <= 1024 * 1024 else { return nil }
+        let b = [UInt8](d.prefix(4))
+        if b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF { return 13 }
+        if b == [0x89, 0x50, 0x4E, 0x47] { return 14 }
+        return nil
+    }
+
     // Remux the bundle in `bundleDir` into `outPath`. `maxSegments` stops early — the Photos
     // compatibility probe converts only the first segment. `progress(done, total)` runs on the
     // calling thread after each segment. Returns nil on success, otherwise a short reason for
@@ -50,9 +61,11 @@ final class MP4Remuxer {
     // `audioOnly` reads a bundle HLSTransmuxer wrote with no video track (an audio-only
     // download) and writes a single-track .m4a instead of a two-track .mp4. `title`/`artist`
     // become the iTunes metadata a music player reads; without them an exported file shows up
-    // under its own file name with no artist at all.
+    // under its own file name with no artist at all. `cover` is a JPEG or PNG, stored as the
+    // file's artwork byte for byte (see coverFlags for what is accepted).
     static func remux(bundleDir: String, outPath: String, maxSegments: Int = Int.max,
                       audioOnly: Bool = false, title: String? = nil, artist: String? = nil,
+                      cover: Data? = nil,
                       progress: ((Int, Int) -> Void)? = nil,
                       shouldAbort: () -> Bool = { false }) -> String? {
         let total = min(segmentCount(bundleDir: bundleDir), maxSegments)
@@ -60,7 +73,8 @@ final class MP4Remuxer {
         let part = outPath + ".part"
         unlink(part)
         guard let file = MP4File(path: part) else { return "cannot create output" }
-        let session = RemuxSession(file: file, audioOnly: audioOnly, title: title, artist: artist)
+        let session = RemuxSession(file: file, audioOnly: audioOnly, title: title, artist: artist,
+                                   cover: cover)
 
         var failure: String?
         for i in 0..<total {
@@ -189,6 +203,7 @@ private final class RemuxSession {
     private let audioOnly: Bool
     private let title: String?
     private let artist: String?
+    private let cover: Data?
 
     // Read from the PAT/PMT rather than assuming TSWriter's 256/257.
     private var pmtPID = -1, videoPID = -1, audioPID = -1
@@ -216,11 +231,13 @@ private final class RemuxSession {
     private var segV: [UInt8] = [], segA: [UInt8] = []
     private var segVSamples: [VideoSample] = [], segAFrames: [AudioFrame] = []
 
-    init(file: MP4File, audioOnly: Bool = false, title: String? = nil, artist: String? = nil) {
+    init(file: MP4File, audioOnly: Bool = false, title: String? = nil, artist: String? = nil,
+         cover: Data? = nil) {
         self.file = file
         self.audioOnly = audioOnly
         self.title = title
         self.artist = artist
+        self.cover = cover
         var b = BoxBuilder()
         b.begin("ftyp")
         if audioOnly {
@@ -684,7 +701,7 @@ private final class RemuxSession {
     // iTunes-style metadata, so an exported file shows a title and an artist in a music player
     // instead of just its file name. moov/udta/meta/ilst, laid out the way iTunes writes it.
     private func writeMeta(_ m: inout BoxBuilder) {
-        guard title != nil || artist != nil else { return }
+        guard title != nil || artist != nil || cover != nil else { return }
         m.begin("udta")
         m.beginFull("meta")
         // The metadata handler. 'appl' sits in the first 4 of the 12 reserved bytes, then an
@@ -701,6 +718,15 @@ private final class RemuxSession {
             writeTextAtom(&m, "alb", a)
         }
         writeTextAtom(&m, "too", "oldpipe")
+        // The artwork. moov is written after mdat, so its size moves no sample offset.
+        if let c = cover, let flags = MP4Remuxer.coverFlags(c) {
+            m.begin("covr")
+            m.beginFull("data", flags: flags)
+            m.u32(0)                    // locale
+            m.raw([UInt8](c))
+            m.end()   // data
+            m.end()   // covr
+        }
         m.end()   // ilst
         m.end()   // meta
         m.end()   // udta
