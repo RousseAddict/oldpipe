@@ -15,7 +15,8 @@ class VideoPlayer {
 
     // Persistent layer — each VideoPlayerVC reattaches it into its own video container
     // (and the fullscreen overlay). Removing it from a superlayer does NOT stop audio.
-    let layer = AVPlayerLayer()
+    // A PlayerHostLayer so a handover can show a second player through it (see handOver).
+    let layer = PlayerHostLayer()
 
     private(set) var player: AVPlayer?
     private(set) var item: AVPlayerItem?
@@ -207,6 +208,10 @@ class VideoPlayer {
         // load() can hold the main thread for seconds on iOS 6 (see VideoPlayerVC.playTapped);
         // these timings say which step does it.
         let t0 = CFAbsoluteTimeGetCurrent()
+        // Experiment: a handover still under way gives way to this load, and one that finished
+        // left its player showing through the overlay — back into the layer itself below.
+        cancelHandover("new load")
+        layer.overlay = nil
         configureAudioSession()
         let tAudio = CFAbsoluteTimeGetCurrent()
         // iOS 6 AVPlayer cannot replaceCurrentItem across content types (progressive MP4
@@ -236,6 +241,8 @@ class VideoPlayer {
             layer.player = p
             layer.videoGravity = AVLayerVideoGravity.resizeAspect
         }
+        // A finished handover took the layer's player away (see finishHandover).
+        if layer.player !== player { layer.player = player }
         let tPlayer = CFAbsoluteTimeGetCurrent()
         let newItem = AVPlayerItem(url: url)
         let tItem = CFAbsoluteTimeGetCurrent()
@@ -243,12 +250,7 @@ class VideoPlayer {
         player?.replaceCurrentItem(with: newItem)
         let tReplace = CFAbsoluteTimeGetCurrent()
         DebugLog.log("VideoPlayer", "load timings ms audioSession=\(Int((tAudio - t0) * 1000)) player=\(Int((tPlayer - tAudio) * 1000)) item=\(Int((tItem - tPlayer) * 1000)) replace=\(Int((tReplace - tItem) * 1000))")
-        // Close the proxy stream when this item plays to the end (see handlePlaybackEnded).
-        if let obs = endObserver { NotificationCenter.default.removeObserver(obs) }
-        endObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime, object: newItem, queue: OperationQueue.main) { [weak self] _ in
-            self?.handlePlaybackEnded()
-        }
+        observeEnd(of: newItem)
         currentVideo = video
         self.isLocal = isLocal
         self.artwork = artwork
@@ -280,6 +282,15 @@ class VideoPlayer {
         if !recovering { recoveryAttempts = 0 }
         updateNowPlayingInfo()
         startTicker()
+    }
+
+    // Close the proxy stream when this item plays to the end (see handlePlaybackEnded).
+    private func observeEnd(of it: AVPlayerItem) {
+        if let obs = endObserver { NotificationCenter.default.removeObserver(obs) }
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: it, queue: OperationQueue.main) { [weak self] _ in
+            self?.handlePlaybackEnded()
+        }
     }
 
     var isReady: Bool { return item?.status == .readyToPlay }
@@ -420,6 +431,7 @@ class VideoPlayer {
             return false
         }
         playbackRate = rate
+        handover?.rate = nil   // a pick waiting for a handover is replaced by this one
         // Only push it to the player when something is actually running — assigning a rate to
         // a paused player would start playback behind the user's back.
         if isPlaying { player?.rate = effectiveRate }
@@ -467,6 +479,261 @@ class VideoPlayer {
         DebugLog.log("VideoPlayer", "speed carried into the reload: rate \(playbackRate), boost \(isBoosting)")
     }
 
+    // MARK: - Handing over to the MP4 route without a gap (experiment)
+    // Moving an HD stream to the MP4 route used to be a reload: picture and sound stopped until
+    // the MP4 had loaded and sought to the spot. Now the MP4 loads in a second AVPlayer, out of
+    // sight, while the HLS one plays on. It is sought a little AHEAD of the playing position,
+    // and when the HLS clock gets to where it landed, the second player is shown and started
+    // and the first stopped, on the same run-loop turn. It shows through its own layer, laid
+    // over the persistent one (PlayerHostLayer.overlay), until the next load puts it back there.
+    //
+    // The seek is loose on the far side: the player lands on the first keyframe at or after the
+    // asked time, where it can start decoding, and the swap waits for the HLS clock to get to
+    // THAT. An exact seek decodes from the keyframe before up to the frame; on the 4S
+    // (2026-11-19) it re-read the sought segment over and over and never finished in 20 s.
+    //
+    // The speed waits for the swap, since the HLS item would refuse it. A hold lifted before
+    // then drops its 2x but not the swap, so the next hold is immediate.
+    private final class Handover {
+        let player: AVPlayer
+        let item: AVPlayerItem
+        let layer: AVPlayerLayer
+        let url: URL
+        var rate: Float?   // a Speed pick to apply at the swap
+        var boost: Bool    // a hold to apply at the swap
+        let started = CFAbsoluteTimeGetCurrent()
+        var readyMs = -1
+        var lead = VideoPlayer.handoverLead   // the earliest landing asked for, past the HLS clock
+        var target: Double = -1               // where the second player landed, -1 before
+        var expectedAhead: Double = 0         // how far past the HLS clock it landed
+        var seeking = false
+        var seeks = 0
+        var seekMs = 0
+        var soughtAt: CFAbsoluteTime = 0
+        // When getting ready and sought gives up; nil while the sought player waits to be shown.
+        var deadline: CFAbsoluteTime?
+        var swapTimer: Timer?
+        init(player: AVPlayer, item: AVPlayerItem, layer: AVPlayerLayer, url: URL, rate: Float?, boost: Bool) {
+            self.player = player
+            self.item = item
+            self.layer = layer
+            self.url = url
+            self.rate = rate
+            self.boost = boost
+        }
+    }
+    private var handover: Handover?
+    private var handoverTicker: Timer?
+
+    // A seek has to wait for its segment to come through the proxy, about a second, so it asks
+    // to land at least this far ahead; a seek that took longer raises it for the next try.
+    private static let handoverLead: Double = 2
+    // How far past the asked time a seek may land looking for a keyframe: more than the
+    // longest fragment seen (7 s).
+    private static let handoverLanding: Double = 10
+    // The MP4 player must be ready and sought within this long, and a later seek within the
+    // second; failing that the handover gives up (a hold is waiting on it).
+    private static let handoverLoadLimit: CFAbsoluteTime = 10
+    private static let handoverSeekLimit: CFAbsoluteTime = 6
+    // A hidden layer should still say when the sought frame is on it; one that never does is
+    // shown anyway after this long.
+    private static let handoverDisplayWait: CFAbsoluteTime = 1
+
+    // Set by the frontmost VideoPlayerVC, like onRecovery. ok: the MP4 plays now. Not ok: the
+    // handover gave up, and hands back the speed it was carrying for the page to take the old
+    // way. Not fired when a load, a stop or a reconnect takes over from it.
+    var onHandover: ((_ videoId: String, _ ok: Bool, _ rate: Float?, _ boost: Bool) -> Void)?
+    var isHandingOver: Bool { return handover != nil }
+
+    // Start handing the playing HLS stream over to the MP4 that `url` gives, carrying a Speed
+    // pick or a hold to apply when it takes over; one under way already just takes the new
+    // pick. `url` is only asked for when a handover starts, since it registers the file with
+    // the proxy. false when nothing is playing here that could be handed over.
+    @discardableResult
+    func handOver(rate: Float?, boost: Bool, to url: () -> URL?) -> Bool {
+        if let h = handover {
+            if let r = rate { h.rate = r }
+            if boost { h.boost = true }
+            DebugLog.log("VideoPlayer", "handover under way takes rate \(h.rate.map { "\($0)" } ?? "unchanged"), boost \(h.boost)")
+            return true
+        }
+        guard isReady, !recovering, player != nil, let v = currentVideo, let u = url() else { return false }
+        let it = AVPlayerItem(url: u)
+        let p = AVPlayer(playerItem: it)
+        let l = AVPlayerLayer(player: p)
+        l.isHidden = true
+        layer.overlay = l
+        let h = Handover(player: p, item: it, layer: l, url: u, rate: rate, boost: boost)
+        h.deadline = h.started + VideoPlayer.handoverLoadLimit
+        handover = h
+        handoverTicker?.invalidate()
+        let t = Timer(timeInterval: 0.1, target: TickProxy { [weak self] in self?.handoverTick() },
+                      selector: #selector(TickProxy.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        handoverTicker = t
+        DebugLog.log("VideoPlayer", "handover id=\(v.id) starts at " + String(format: "%.1f", currentSeconds)
+            + "s to \(u.absoluteString)")
+        return true
+    }
+
+    private func handoverTick() {
+        guard let h = handover else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        if h.item.status == .failed {
+            failHandover("MP4 item failed \(VideoPlayer.describe(h.item.error))")
+            return
+        }
+        if let d = h.deadline, now > d {
+            failHandover(h.item.status != .readyToPlay ? "MP4 not ready after \(Int(now - h.started))s"
+                : "seek \(h.seeks) not done after " + String(format: "%.1f", now - h.soughtAt) + "s")
+            return
+        }
+        guard h.item.status == .readyToPlay, !h.seeking, h.swapTimer == nil else { return }
+        if h.readyMs < 0 {
+            h.readyMs = Int((now - h.started) * 1000)
+            DebugLog.log("VideoPlayer", "handover: MP4 ready in \(h.readyMs)ms")
+        }
+        if h.target < 0 {
+            seekHandover(h)
+            return
+        }
+        guard h.layer.isReadyForDisplay || now - h.soughtAt > VideoPlayer.handoverDisplayWait else { return }
+        alignHandover(h)
+    }
+
+    // Playing: land on the first keyframe from `lead` past the HLS clock on, which is all the
+    // seek has to read, then wait for the clock to get there. Paused or stalled: the very frame
+    // on screen, since the clock will not move towards anything.
+    private func seekHandover(_ h: Handover) {
+        let playing = wantsPlayback && isPlaying
+        let from = currentSeconds
+        var t = from + (playing ? h.lead : 0)
+        let d = durationSeconds
+        if d > 0 { t = min(t, d - 0.5) }
+        h.seeking = true
+        h.seeks += 1
+        let t0 = CFAbsoluteTimeGetCurrent()
+        h.soughtAt = t0
+        if h.seeks > 1 { h.deadline = t0 + VideoPlayer.handoverSeekLimit }
+        let after = playing ? CMTimeMakeWithSeconds(VideoPlayer.handoverLanding, preferredTimescale: 600) : CMTime.zero
+        h.player.seek(to: CMTimeMakeWithSeconds(t, preferredTimescale: 600),
+                      toleranceBefore: CMTime.zero, toleranceAfter: after) { [weak self, weak h] finished in
+            AppQueue.main.async {
+                guard let self = self, let h = h, self.handover === h else { return }
+                h.seeking = false
+                h.seekMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                h.soughtAt = CFAbsoluteTimeGetCurrent()
+                h.deadline = nil
+                let landed = CMTimeGetSeconds(h.item.currentTime())
+                h.target = landed.isFinite ? landed : t
+                h.expectedAhead = h.target - self.currentSeconds
+                DebugLog.log("VideoPlayer", "handover seek \(h.seeks) " + (playing ? "loose" : "exact")
+                    + String(format: " from %.2fs asked %.2fs landed %.2fs in ", from, t, h.target)
+                    + "\(h.seekMs)ms" + (finished ? "" : " (not finished)")
+                    + String(format: ", HLS now %.2fs", self.currentSeconds))
+                self.handoverTick()
+            }
+        }
+    }
+
+    // The second player sits on `target`: swap once the HLS clock is there too.
+    private func alignHandover(_ h: Handover) {
+        let ahead = h.target - currentSeconds   // what the HLS player still has to play
+        guard wantsPlayback && isPlaying else {
+            // Paused, or stalled: nothing moves, so the frames have to match exactly.
+            if abs(ahead) < 0.05 { finishHandover(h, ahead: ahead) } else { seekHandover(h) }
+            return
+        }
+        if ahead < -0.1 || ahead > h.expectedAhead + 1 {
+            // Landed behind the clock: the seek took longer than the lead, so again, as far ahead
+            // as that seek took and then some. Or the HLS player was sought meanwhile.
+            if ahead < -0.1 { h.lead = max(h.lead, Double(h.seekMs) / 1000 * 1.5 + 0.5) }
+            DebugLog.log("VideoPlayer", "handover off by " + String(format: "%.2f", -ahead)
+                + "s (seek \(h.seekMs)ms), lead now " + String(format: "%.1f", h.lead) + "s")
+            seekHandover(h)
+            return
+        }
+        if ahead <= 0.02 {
+            finishHandover(h, ahead: ahead)
+            return
+        }
+        // Close enough for a timer on the moment itself; further off, the next tick looks again.
+        guard ahead < 0.25 else { return }
+        let t = Timer(timeInterval: ahead, target: TickProxy { [weak self, weak h] in
+            guard let self = self, let h = h, self.handover === h else { return }
+            h.swapTimer = nil
+            self.alignHandover(h)
+        }, selector: #selector(TickProxy.fire), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+        h.swapTimer = t
+    }
+
+    private func finishHandover(_ h: Handover, ahead: Double) {
+        let old = player
+        let oldURL = (item?.asset as? AVURLAsset)?.url
+        let shown = h.layer.isReadyForDisplay
+        stopHandoverTimers(h)
+        handover = nil
+        if let r = h.rate { playbackRate = r }
+        if h.boost { isBoosting = true }
+        rateZeroTicks = 0
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        h.layer.isHidden = false
+        CATransaction.commit()
+        player = h.player
+        item = h.item
+        lastLoadWasHLS = false
+        if wantsPlayback { h.player.rate = effectiveRate }
+        old?.pause()
+        old?.replaceCurrentItem(with: nil)
+        layer.player = nil
+        observeEnd(of: h.item)
+        lastTickSeconds = -1
+        stalledTicks = 0
+        resetTailWatch()
+        speedWindow = nil
+        measureSpeed()
+        updateNowPlayingInfo()
+        if let u = oldURL { StreamProxy.shared.closeSession(u) }
+        DebugLog.log("VideoPlayer", "handover DONE at " + String(format: "%.2f", h.target) + "s, "
+            + String(format: "%+.0f", ahead * 1000) + "ms off, after "
+            + "\(Int((CFAbsoluteTimeGetCurrent() - h.started) * 1000))ms (MP4 ready in \(h.readyMs)ms, "
+            + "\(h.seeks) seek(s), last \(h.seekMs)ms), frame on layer: \(shown ? "yes" : "no"), "
+            + "rate \(effectiveRate); rate caps: \(rateCapsText())")
+        if let id = currentVideo?.id { onHandover?(id, true, h.rate, h.boost) }
+    }
+
+    private func failHandover(_ why: String) {
+        guard let h = handover else { return }
+        DebugLog.log("VideoPlayer", "handover FAILED: \(why)")
+        dropHandover(h)
+        if let id = currentVideo?.id { onHandover?(id, false, h.rate, h.boost) }
+    }
+
+    // A load, a stop or a reconnect takes over from a handover still under way.
+    private func cancelHandover(_ why: String) {
+        guard let h = handover else { return }
+        DebugLog.log("VideoPlayer", "handover dropped (\(why))")
+        dropHandover(h)
+    }
+
+    private func dropHandover(_ h: Handover) {
+        stopHandoverTimers(h)
+        handover = nil
+        h.player.pause()
+        h.player.replaceCurrentItem(with: nil)
+        if layer.overlay === h.layer { layer.overlay = nil }
+        StreamProxy.shared.closeSession(h.url)
+    }
+
+    private func stopHandoverTimers(_ h: Handover) {
+        handoverTicker?.invalidate()
+        handoverTicker = nil
+        h.swapTimer?.invalidate()
+        h.swapTimer = nil
+    }
+
     @discardableResult
     func beginBoost() -> Bool {
         guard canBoost, let p = player else { return false }
@@ -482,6 +749,8 @@ class VideoPlayer {
     // The finger lifted: back to the chosen speed. Only a running player gets a rate — the
     // video may have been paused or finished meanwhile, and a rate would restart it.
     func endBoost() {
+        // Lifted before a handover took over: it still takes over, at the chosen speed.
+        handover?.boost = false
         guard isBoosting else { return }
         isBoosting = false
         rateZeroTicks = 0
@@ -649,6 +918,7 @@ class VideoPlayer {
     // down the same way but keeps the queue, which goes on driving Next and autoplay on the TV.
     func stop(keepQueue: Bool = false) {
         if isBoosting { dropBoost("stopped") }
+        cancelHandover("stopped")
         saveResume()
         if !keepQueue { clearQueue() }
         cancelRecovery()
@@ -676,6 +946,7 @@ class VideoPlayer {
     // item makes the download-completion handler skip auto-play and freeze at "Downloading 100%".
     func abandonLoad() {
         if isBoosting { dropBoost("load abandoned") }
+        cancelHandover("load abandoned")
         cancelRecovery()
         wantsPlayback = false
         hasEnded = false
@@ -706,6 +977,7 @@ class VideoPlayer {
         }
         DebugLog.log("VideoPlayer", "ended id=\(currentVideo?.id ?? "nil") via=\(frozenTail ? "frozen tail" : "end notice") at=\(String(format: "%.1f/%.1f", currentSeconds, durationSeconds))s")
         if isBoosting { dropBoost("ended") }
+        cancelHandover("ended")
         wantsPlayback = false
         resetTailWatch()
         // A frozen tail is still nominally playing, and the end notice is not guaranteed to be
@@ -820,6 +1092,8 @@ class VideoPlayer {
             onRecovery?(video.id, .failed)
             return
         }
+        // The reconnect reloads whatever was playing; a handover in the middle goes with it.
+        cancelHandover("reconnecting")
         // The backoff below and the re-resolve both run with the sound stopped.
         holdAwake("reconnect")
         recovering = true
@@ -1153,6 +1427,32 @@ class VideoPlayer {
         default: break
         }
     }
+}
+
+// MARK: - PlayerHostLayer
+// The persistent layer (VideoPlayer.layer), which can carry a second player's layer over its
+// own picture. That is how a handover shows the MP4 player without swapping out the layer that
+// every page, the mini bar and fullscreen hold on to. The carried layer follows this one's
+// size and gravity, and is let go of when replaced or set to nil.
+final class PlayerHostLayer: AVPlayerLayer {
+    var overlay: AVPlayerLayer? {
+        didSet {
+            guard overlay !== oldValue else { return }
+            oldValue?.player = nil
+            oldValue?.removeFromSuperlayer()
+            guard let o = overlay else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            o.videoGravity = videoGravity
+            o.frame = CGRect(origin: .zero, size: bounds.size)
+            addSublayer(o)
+            CATransaction.commit()
+        }
+    }
+    // Set in the same transaction as this layer's own change, so a resize animates both alike.
+    override var bounds: CGRect { didSet { overlay?.frame = CGRect(origin: .zero, size: bounds.size) } }
+    override var frame: CGRect { didSet { overlay?.frame = CGRect(origin: .zero, size: bounds.size) } }
+    override var videoGravity: AVLayerVideoGravity { didSet { overlay?.videoGravity = videoGravity } }
 }
 
 // Tiny target wrapper so the repeating Timer doesn't retain the singleton via a selector.

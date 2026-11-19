@@ -193,6 +193,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // the boost running in the player is this page's (so letting go only ends our own).
     private var boostPill: UIView?
     private var boostOwned = false
+    // Experiment: the hold is real but the 2x is not playing yet — it comes with the move to the
+    // MP4 route — so the pill turns a spinner instead of the arrow until it is.
+    private var boostPillPending = false
 
     // Mini player handover (see scrollViewDidScroll): false once the page is scrolled so far
     // that the video is mostly out of view. The mini bar then shows the video, live, and this
@@ -371,6 +374,11 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             self.boostOwned = false
             self.hideBoostPill()
         }
+        // Experiment: a speed on its way through a handover to the MP4 route.
+        sp.onHandover = { [weak self] id, ok, rate, boost in
+            guard let self = self, self.video.id == id else { return }
+            self.handleHandover(ok: ok, rate: rate, boost: boost)
+        }
 
         // And for the end of a start the player made by itself, which related waits behind.
         // Not checked: related waits behind ANY such start (playbackPending reads
@@ -409,6 +417,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onRecovery = nil
         sp.onRateReverted = nil
         sp.onBoostEnded = nil
+        sp.onHandover = nil
         // A hold does not outlive the page: the finger's release would land nowhere.
         holdEnded()
         stopMP4Wait()
@@ -2932,13 +2941,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // move — the pill shows straight away, the 2x once the MP4 plays.
     private func holdBegan() -> Bool {
         guard canHoldToBoost() else { return false }
+        var pending = false
         if !sp.canBoost {
             guard switchToMP4(rate: nil, boost: true) else { return false }
+            pending = true
         } else if !sp.beginBoost() {
             return false
         }
         boostOwned = true
-        showBoostPill()
+        showBoostPill(pending: pending)
         return true
     }
 
@@ -2953,7 +2964,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // "2x" + the forward arrow on a small dark plate, top centre of the video. Hosted like the
     // seek plate (fullscreen overlay when active), and re-hosted when fullscreen toggles.
-    private func showBoostPill() {
+    // `pending`: a spinner in the arrow's place (see boostPillPending); nil keeps what it was.
+    private func showBoostPill(pending: Bool? = nil) {
+        if let p = pending { boostPillPending = p }
         boostPill?.removeFromSuperview()
         boostPill = nil
         guard let host = fsOverlay ?? videoContainer else { return }
@@ -2971,10 +2984,19 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         lbl.text = "2x"
         pill.addSubview(lbl)
 
-        let iv = UIImageView(image: UIImage(named: "forward"))
-        iv.contentMode = .scaleAspectFit
-        iv.frame = CGRect(x: 38, y: (ph - 16) / 2, width: 16, height: 16)
-        pill.addSubview(iv)
+        if boostPillPending {
+            let spin = UIActivityIndicatorView(style: .white)
+            spin.isUserInteractionEnabled = false
+            spin.center = CGPoint(x: 46, y: ph / 2)
+            spin.transform = CGAffineTransform(scaleX: 0.75, y: 0.75)
+            spin.startAnimating()
+            pill.addSubview(spin)
+        } else {
+            let iv = UIImageView(image: UIImage(named: "forward"))
+            iv.contentMode = .scaleAspectFit
+            iv.frame = CGRect(x: 38, y: (ph - 16) / 2, width: 16, height: 16)
+            pill.addSubview(iv)
+        }
 
         host.addSubview(pill)
         boostPill = pill
@@ -2983,6 +3005,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private func hideBoostPill() {
         boostPill?.removeFromSuperview()
         boostPill = nil
+        boostPillPending = false
     }
 
     // A ~96pt rounded plate on the left/right of the video showing the rewind/forward
@@ -3431,7 +3454,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         case .preparing(let pct):
             prepareMP4IfNeeded()   // resumes the reading if a stream change stopped it
             mp4PendingRate = rate
-            showMP4Wait(pct)
+            showMP4Wait(rate, preparing: pct)
             if mp4WaitTimer == nil {
                 let t = Timer(timeInterval: 1, target: BlockTarget { [weak self] in self?.mp4WaitTick() },
                               selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
@@ -3444,16 +3467,44 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     // Move the HD stream to the MP4 route at its current position, taking the speed pick or the
-    // hold along. false when there is nothing to move.
+    // hold along. The MP4 loads in a second player behind the playing one and takes over without
+    // a gap (VideoPlayer.handOver); only when that cannot start does it reload as before. false
+    // when there is nothing to move.
     @discardableResult
     private func switchToMP4(rate: Float?, boost: Bool) -> Bool {
-        guard let v = mp4Candidate else { return false }
+        guard let v = mp4Candidate, let a = audioStreamForHLS() else { return false }
         stopMP4Wait()
+        let handing = sp.handOver(rate: rate, boost: boost) {
+            StreamProxy.shared.mp4URL(videoURL: v.url, audioURL: a.url, videoIndexEnd: v.indexEnd,
+                                      audioIndexEnd: a.indexEnd, supersede: false)
+        }
         DebugLog.log("Player", "id=\(video.id) itag=\(v.itag) moves to the MP4 route at \(Int(sp.currentSeconds))s for "
-            + (boost ? "a hold" : "speed \(rate ?? sp.playbackRate)"))
+            + (boost ? "a hold" : "speed \(rate ?? sp.playbackRate)") + (handing ? ", handed over" : ", by a reload"))
+        if !handing {
+            reloadIntoMP4(v, rate: rate, boost: boost)
+        } else if let r = rate {
+            showMP4Wait(r)
+        }
+        return true
+    }
+
+    // The way before handovers: a reload at the same position. Also what a handover that gave
+    // up falls back to.
+    private func reloadIntoMP4(_ v: VideoStream, rate: Float?, boost: Bool) {
         sp.carrySpeedIntoReload(rate: rate, boost: boost)
         playHLS(v, asMP4: true)
-        return true
+    }
+
+    // The MP4 route took over, and the speed with it; or the handover gave up, and the speed it
+    // carried goes the old way (a hold's pill keeps its spinner until that reload plays).
+    private func handleHandover(ok: Bool, rate: Float?, boost: Bool) {
+        stopMP4Wait()
+        if ok {
+            if boost, boostOwned { showBoostPill(pending: false) }
+            return
+        }
+        guard rate != nil || boost, let v = mp4Candidate else { return }
+        reloadIntoMP4(v, rate: rate, boost: boost)
     }
 
     private var mp4PendingRate: Float?
@@ -3465,24 +3516,25 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         case .ready:
             switchToMP4(rate: rate, boost: false)
         case .preparing(let pct):
-            showMP4Wait(pct)
+            showMP4Wait(rate, preparing: pct)
         case .unavailable:
             stopMP4Wait()
             showSpeedAlert("This stream only plays at normal speed here.")
         }
     }
 
-    private func showMP4Wait(_ pct: Int) {
-        let label = VideoPlayerVC.speedOptions.first(where: { $0.rate == mp4PendingRate })?.label ?? "Speed"
-        statusLabel?.text = "\(label) in a moment \u{2022} preparing \(pct)%"
+    // While the moofs are read (`preparing`), or the handover runs.
+    private func showMP4Wait(_ rate: Float, preparing pct: Int? = nil) {
+        let label = VideoPlayerVC.speedOptions.first(where: { $0.rate == rate })?.label ?? "Speed"
+        statusLabel?.text = "\(label) in a moment" + (pct.map { " \u{2022} preparing \($0)%" } ?? "")
         statusLabel?.isHidden = false
     }
 
-    // Drop a pick still waiting, and its message. Safe to call when nothing waits.
+    // Drop a pick still waiting, and the message of that or of a handover. Safe to call when
+    // nothing waits.
     private func stopMP4Wait() {
         mp4WaitTimer?.invalidate()
         mp4WaitTimer = nil
-        guard mp4PendingRate != nil else { return }
         mp4PendingRate = nil
         if statusLabel?.text?.contains("in a moment") == true { statusLabel?.isHidden = true }
     }
@@ -4270,6 +4322,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             self.sp.applyResumeAndPlay()
             self.showControls()
             self.prepareMP4IfNeeded()
+            // Experiment: a hold carried into a reload to the MP4 route is playing at 2x now.
+            if self.boostOwned, self.boostPillPending, self.sp.isBoosting { self.showBoostPill(pending: false) }
         }, onFail: { [weak self] timedOut in
             guard let self = self else { return }
             // The AVPlayerItem error, when present, is the single most useful clue for
