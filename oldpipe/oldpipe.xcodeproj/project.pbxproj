@@ -23,6 +23,10 @@
 		BB000001000000000000BE18 /* playlist@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD18 /* playlist@2x.png */; };
 		BB000001000000000000BE1A /* next@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD1A /* next@2x.png */; };
 		BB000001000000000000BE26 /* replay@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD26 /* replay@2x.png */; };
+		BB000001000000000000BE27 /* float-out.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD27 /* float-out.png */; };
+		BB000001000000000000BE28 /* float-out@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD28 /* float-out@2x.png */; };
+		BB000001000000000000BE29 /* float-in.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD29 /* float-in.png */; };
+		BB000001000000000000BE2A /* float-in@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD2A /* float-in@2x.png */; };
 		BB000001000000000000BE20 /* menu@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD20 /* menu@2x.png */; };
 		BB000001000000000000BE21 /* cast-on.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD21 /* cast-on.png */; };
 		BB000001000000000000BE22 /* cast-on@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BB000001000000000000BD22 /* cast-on@2x.png */; };
@@ -144,6 +148,10 @@
 		BB000001000000000000BD18 /* playlist@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "playlist@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD1A /* next@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "next@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD26 /* replay@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "replay@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD27 /* float-out.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "float-out.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD28 /* float-out@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "float-out@2x.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD29 /* float-in.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "float-in.png"; sourceTree = "<group>"; };
+		BB000001000000000000BD2A /* float-in@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "float-in@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD20 /* menu@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "menu@2x.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD21 /* cast-on.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "cast-on.png"; sourceTree = "<group>"; };
 		BB000001000000000000BD22 /* cast-on@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "cast-on@2x.png"; sourceTree = "<group>"; };
@@ -300,6 +308,10 @@
 				BB000001000000000000BD18 /* playlist@2x.png */,
 				BB000001000000000000BD1A /* next@2x.png */,
 				BB000001000000000000BD26 /* replay@2x.png */,
+				BB000001000000000000BD27 /* float-out.png */,
+				BB000001000000000000BD28 /* float-out@2x.png */,
+				BB000001000000000000BD29 /* float-in.png */,
+				BB000001000000000000BD2A /* float-in@2x.png */,
 				BB000001000000000000BD20 /* menu@2x.png */,
 				BB000001000000000000BD21 /* cast-on.png */,
 				BB000001000000000000BD22 /* cast-on@2x.png */,
@@ -553,6 +565,10 @@
 				BB000001000000000000BE18 /* playlist@2x.png in Resources */,
 				BB000001000000000000BE1A /* next@2x.png in Resources */,
 				BB000001000000000000BE26 /* replay@2x.png in Resources */,
+				BB000001000000000000BE27 /* float-out.png in Resources */,
+				BB000001000000000000BE28 /* float-out@2x.png in Resources */,
+				BB000001000000000000BE29 /* float-in.png in Resources */,
+				BB000001000000000000BE2A /* float-in@2x.png in Resources */,
 				BB000001000000000000BE20 /* menu@2x.png in Resources */,
 				BB000001000000000000BE21 /* cast-on.png in Resources */,
 				BB000001000000000000BE22 /* cast-on@2x.png in Resources */,

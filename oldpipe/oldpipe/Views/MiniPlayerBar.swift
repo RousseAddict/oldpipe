@@ -21,10 +21,25 @@ import AVFoundation
 // While casting it is the TV's remote instead: the video on the TV with "Playing on <TV>",
 // play/pause acting on the TV, and close stopping the cast. The phone's own player is stopped
 // in cast mode, so there is never a local video competing for the bar.
+//
+// iPad: a 106x60 picture is tiny on that screen, so the video can float as a 320x180 card in
+// the bottom-right corner, just above the bar. A toggle on the bar moves it between the bar
+// and the card, and the choice is remembered (floating by default). Only the video slot moves
+// — the same view, carrying the one layer — so the three rules above do not change. The card
+// shows and hides with the bar, and is not used when there is no picture to enlarge (an
+// audio-only download, a cast): those stay in the bar as on the iPhone. Bottom-right, because
+// the side menu opens from the left. The iPhone never builds any of it.
 
 class MiniPlayerBar: UIView {
 
     static let barHeight: CGFloat = 60
+
+    // Read once: on an iPhone the toggle and the card are never created.
+    static let canFloat = UIDevice.current.userInterfaceIdiom == .pad
+    private static let cardSize = CGSize(width: 320, height: 180)
+    private static let cardMargin: CGFloat = 12          // from the screen's right edge and the bar
+    // "1" = floating, "0" = in the bar; absent = floating, the default.
+    private static let floatKey = "miniplayer_floating"
 
     // Posted by a page that just changed whether it shows its video: poll now.
     static let refreshNotification = Notification.Name("oldpipe.miniPlayerBar.refresh")
@@ -47,9 +62,30 @@ class MiniPlayerBar: UIView {
     private let progressLine = UIView()
 
     private var shownVideoId: String?
+    private var shownThumbURL = ""
     // Whether the labels currently describe a cast rather than local playback.
     private var shownCast = false
     private var pollTimer: Timer?
+
+    // iPad only (nil on an iPhone). The card lives in the window, not in the bar, so the page
+    // beside it keeps its touches; it is built the first time the video floats.
+    private var floatBtn: UIButton?
+    private var card: UIView?
+    private var cardThumb: AsyncImageView?
+    private var cardOpenBtn: UIButton?
+    private var floating = MiniPlayerBar.canFloat
+        && UserDefaults.standard.string(forKey: MiniPlayerBar.floatKey) != "0"
+    private var slotInCard = false      // where the video slot is right now
+    private var moving = false          // the slot is on its way between the bar and the card
+
+    // The card shows and hides with the bar, whoever hides it.
+    override var isHidden: Bool {
+        didSet {
+            guard card != nil, isHidden != oldValue else { return }
+            if moving { videoSlot.isHidden = isHidden }   // mid-trip it sits in the window
+            syncCard()
+        }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -95,43 +131,66 @@ class MiniPlayerBar: UIView {
         videoSlot.isUserInteractionEnabled = false
         addSubview(videoSlot)
 
-        let textX: CGFloat = 106 + 10
-        let textW = bounds.width - textX - 88
-
-        titleLabel.frame = CGRect(x: textX, y: 10, width: textW, height: 20)
         titleLabel.backgroundColor = .clear
         titleLabel.textColor = .white
         titleLabel.font = UIFont.boldSystemFont(ofSize: 14)
         addSubview(titleLabel)
 
-        channelLabel.frame = CGRect(x: textX, y: 32, width: textW, height: 16)
         channelLabel.backgroundColor = .clear
         channelLabel.textColor = UIColor(white: 0.7, alpha: 1)
         channelLabel.font = UIFont.systemFont(ofSize: 12)
         addSubview(channelLabel)
 
         // play / pause
-        playPauseBtn.frame = CGRect(x: bounds.width - 88, y: 0, width: 44, height: MiniPlayerBar.barHeight)
         playPauseBtn.backgroundColor = .clear
         playPauseBtn.setImage(UIImage(named: "play"), for: .normal)
         playPauseBtn.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
         addSubview(playPauseBtn)
 
         // close
-        closeBtn.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: MiniPlayerBar.barHeight)
         closeBtn.backgroundColor = .clear
         closeBtn.setImage(UIImage(named: "close"), for: .normal)
         closeBtn.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
         addSubview(closeBtn)
 
         // transparent tap target over thumb + text (NO gesture recognizer — see CLAUDE.md)
-        openBtn.frame = CGRect(x: 0, y: 0, width: bounds.width - 88, height: MiniPlayerBar.barHeight)
         openBtn.backgroundColor = .clear
         openBtn.addTarget(self, action: #selector(openTapped), for: .touchUpInside)
         addSubview(openBtn)
 
+        // iPad: the toggle between the video in the bar and the floating card, left of play.
+        if MiniPlayerBar.canFloat {
+            let b = UIButton(type: .custom)
+            b.backgroundColor = .clear
+            b.setImage(UIImage(named: floating ? "float-in" : "float-out"), for: .normal)
+            b.addTarget(self, action: #selector(floatTapped), for: .touchUpInside)
+            addSubview(b)
+            floatBtn = b
+        }
+
+        layoutBar()
         bringSubviewToFront(playPauseBtn)
         bringSubviewToFront(closeBtn)
+        if let b = floatBtn { bringSubviewToFront(b) }
+    }
+
+    // Every frame but the thumbnail's and the video slot's, which never move within the bar.
+    // On an iPhone this is the bar's original layout. On an iPad the toggle takes 44 pt left of
+    // play, and while the video floats the bar drops its thumbnail and the text starts at the
+    // left edge.
+    private func layoutBar() {
+        let w = bounds.width, h = MiniPlayerBar.barHeight
+        let toggleShown = floatBtn.map { !$0.isHidden } ?? false
+        let right: CGFloat = toggleShown ? 132 : 88
+        let textX: CGFloat = slotInCard ? 12 : 106 + 10
+        let textW = max(0, w - textX - right)
+        thumbView.isHidden = slotInCard
+        titleLabel.frame = CGRect(x: textX, y: 10, width: textW, height: 20)
+        channelLabel.frame = CGRect(x: textX, y: 32, width: textW, height: 16)
+        floatBtn?.frame = CGRect(x: w - 132, y: 0, width: 44, height: h)
+        playPauseBtn.frame = CGRect(x: w - 88, y: 0, width: 44, height: h)
+        closeBtn.frame = CGRect(x: w - 44, y: 0, width: 44, height: h)
+        openBtn.frame = CGRect(x: 0, y: 0, width: w - right, height: h)
     }
 
     #if IOS8_TARGET
@@ -141,14 +200,7 @@ class MiniPlayerBar: UIView {
     // never resizes the bar (portrait-locked window) so it keeps its original fixed layout.
     override func layoutSubviews() {
         super.layoutSubviews()
-        let w = bounds.width
-        let textX: CGFloat = 106 + 10
-        let textW = max(0, w - textX - 88)
-        titleLabel.frame = CGRect(x: textX, y: 10, width: textW, height: 20)
-        channelLabel.frame = CGRect(x: textX, y: 32, width: textW, height: 16)
-        playPauseBtn.frame = CGRect(x: w - 88, y: 0, width: 44, height: MiniPlayerBar.barHeight)
-        closeBtn.frame = CGRect(x: w - 44, y: 0, width: 44, height: MiniPlayerBar.barHeight)
-        openBtn.frame = CGRect(x: 0, y: 0, width: w - 88, height: MiniPlayerBar.barHeight)
+        layoutBar()
     }
     #endif
 
@@ -188,7 +240,8 @@ class MiniPlayerBar: UIView {
             shownIsAudio = DownloadManager.isAudioOnly(video.id)
             titleLabel.text = video.title
             channelLabel.text = video.channelName
-            if !video.thumbnailURL.isEmpty { thumbView.load(url: video.thumbnailURL) }
+            showThumbnail(video.thumbnailURL)
+            placeVideo()
         }
         takeVideoIfFree()
 
@@ -225,13 +278,148 @@ class MiniPlayerBar: UIView {
         if layer.superlayer === videoSlot.layer { layer.removeFromSuperlayer() }
     }
 
+    private func showThumbnail(_ url: String) {
+        shownThumbURL = url
+        guard !url.isEmpty else { return }
+        thumbView.load(url: url)
+        cardThumb?.load(url: url)   // the same URL: one download, one decode
+    }
+
+    // MARK: - Floating card (iPad)
+
+    // Puts the video slot where it belongs: in the card when floating a picture, else in the
+    // bar. Called when the shown content changes and from the toggle — not on every tick.
+    private func placeVideo(animated: Bool = false) {
+        guard let toggle = floatBtn, !moving else { return }   // iPhone: always in the bar
+        let hasPicture = !shownIsAudio && !shownCast
+        if toggle.isHidden == hasPicture {
+            toggle.isHidden = !hasPicture
+            layoutBar()
+        }
+        let inCard = floating && hasPicture
+        guard inCard != slotInCard, let host = superview,
+              let card = inCard ? buildCardIfNeeded() : self.card else { return }
+        slotInCard = inCard
+        let target: UIView = inCard ? card : self
+        let targetFrame = inCard ? card.bounds : thumbView.frame
+
+        guard animated, !isHidden else {
+            put(videoSlotIn: target, frame: targetFrame)
+            layoutBar()
+            syncCard()
+            return
+        }
+        // The trip: the slot is lifted into the window, slides to its new place with the text
+        // following, then settles into the card or the bar. Black while travelling, because a
+        // paused iOS 5/6 layer can draw nothing once moved.
+        let from = videoSlot.superview?.convert(videoSlot.frame, to: host) ?? .zero
+        let to = target.convert(targetFrame, to: host)
+        moving = true
+        put(videoSlotIn: host, frame: from)
+        videoSlot.backgroundColor = .black
+        syncCard()
+        if inCard { card.alpha = 0 }
+        CATransaction.begin()
+        // The video layer is not a view's layer, so it animates implicitly — on this clock.
+        CATransaction.setAnimationDuration(0.25)
+        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: CAMediaTimingFunctionName.easeInEaseOut))
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseInOut], animations: {
+            self.videoSlot.frame = to
+            self.sizeVideo(to: to.size)
+            self.layoutBar()
+            card.alpha = 1
+        }, completion: { _ in
+            self.moving = false
+            self.videoSlot.backgroundColor = .clear
+            self.videoSlot.isHidden = false
+            self.put(videoSlotIn: target, frame: targetFrame)
+            self.syncCard()
+            self.placeVideo()   // anything that changed during the trip
+        })
+        CATransaction.commit()
+    }
+
+    // In the bar: above the thumbnail, under the labels and buttons. In the card: between its
+    // thumbnail and its tap target. The layer inside follows the slot's new size.
+    private func put(videoSlotIn container: UIView, frame: CGRect) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if container === self {
+            insertSubview(videoSlot, aboveSubview: thumbView)
+        } else if container === card, let open = cardOpenBtn {
+            container.insertSubview(videoSlot, belowSubview: open)
+        } else {
+            container.addSubview(videoSlot)
+        }
+        videoSlot.frame = frame
+        sizeVideo(to: frame.size)
+        CATransaction.commit()
+    }
+
+    private func sizeVideo(to size: CGSize) {
+        let layer = VideoPlayer.shared.layer
+        if layer.superlayer === videoSlot.layer { layer.frame = CGRect(origin: .zero, size: size) }
+    }
+
+    // Visible exactly when the bar is and the video floats.
+    private func syncCard() {
+        guard let card = card else { return }
+        let show = !isHidden && slotInCard
+        if card.isHidden == show { card.isHidden = !show }
+    }
+
+    // Bottom-right, cardMargin from the screen edge and above the bar. Square corners and no
+    // shadow on purpose: a rounded clip over a playing video is an off-screen pass every frame.
+    private func buildCardIfNeeded() -> UIView? {
+        if let c = card { return c }
+        guard let host = superview else { return nil }
+        let s = MiniPlayerBar.cardSize, m = MiniPlayerBar.cardMargin
+        let c = UIView(frame: CGRect(x: frame.maxX - m - s.width, y: frame.minY - m - s.height,
+                                     width: s.width, height: s.height))
+        c.backgroundColor = UIColor(white: 0.2, alpha: 1)
+        c.clipsToBounds = true
+        c.layer.borderColor = UIColor(white: 1, alpha: 0.2).cgColor
+        c.layer.borderWidth = 1
+        // Stays in the corner when the iPad rotates (iOS 8; the older builds never rotate).
+        c.autoresizingMask = [.flexibleLeftMargin, .flexibleTopMargin]
+        c.isHidden = true
+
+        let thumb = AsyncImageView(frame: c.bounds)
+        thumb.contentMode = .scaleAspectFill
+        thumb.clipsToBounds = true
+        c.addSubview(thumb)
+
+        // Tapping the card opens the video, like the bar's title (a button, not a recognizer).
+        let open = UIButton(type: .custom)
+        open.frame = c.bounds
+        open.backgroundColor = .clear
+        open.addTarget(self, action: #selector(openTapped), for: .touchUpInside)
+        c.addSubview(open)
+
+        host.insertSubview(c, belowSubview: self)
+        card = c
+        cardThumb = thumb
+        cardOpenBtn = open
+        if !shownThumbURL.isEmpty { thumb.load(url: shownThumbURL) }
+        return c
+    }
+
+    @objc private func floatTapped() {
+        guard !moving else { return }
+        floating = !floating
+        UserDefaults.standard.set(floating ? "1" : "0", forKey: MiniPlayerBar.floatKey)
+        floatBtn?.setImage(UIImage(named: floating ? "float-in" : "float-out"), for: .normal)
+        placeVideo(animated: true)
+    }
+
     private func pollCast(_ cast: CastController, _ video: Video) {
         if isHidden { isHidden = false }
         if shownVideoId != video.id || !shownCast {
             shownVideoId = video.id
             shownCast = true
             titleLabel.text = video.title
-            if !video.thumbnailURL.isEmpty { thumbView.load(url: video.thumbnailURL) }
+            showThumbnail(video.thumbnailURL)
+            placeVideo()   // the picture is on the TV: back in the bar, no toggle
         }
         // Rewritten only on change: assigning the same text still relayouts the label twice a second.
         let status = cast.statusText
