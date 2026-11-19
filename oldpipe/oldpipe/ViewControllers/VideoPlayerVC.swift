@@ -320,6 +320,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             // playing from a recent answer for this video, so that one is read back if it is
             // still held (YoutubeAPI.recentAnswers) rather than asked for twice more.
             if !didRequestStreams { loadStreams(updateStatus: false, reuse: true) }
+            // Experiment: the watch for the MP4 route stopped with the page; take it up again.
+            prepareMP4IfNeeded()
         } else if !didRequestStreams {
             loadStreams()
         }
@@ -420,7 +422,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onHandover = nil
         // A hold does not outlive the page: the finger's release would land nowhere.
         holdEnded()
-        stopMP4Wait()
+        stopMP4Watch()
         sp.onStartSettled = nil
         sp.onAdvanceFailed = nil
         sp.onEnded = nil
@@ -3184,6 +3186,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                 self.relayout()
             }
             self.restoreCaptionSelection()
+            self.prefetchMP4Index()
             completion?()
             // A > tap held while this request was in flight. startPlay also reports an empty
             // response, so the held tap ends in either playback or YouTube's reason.
@@ -3420,10 +3423,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // MARK: - Experiment: speed on iOS 5/6 HD streams, through the MP4 route
 
     // An HD stream plays as HLS, which iOS 5/6 will only play at 1.0. With "Play HD as MP4" on,
-    // its moofs are read in the background once it plays (prepareMP4IfNeeded); a speed pick or
-    // a hold then moves it to one progressive MP4 at the same position (switchToMP4), which
-    // plays at any speed. Reading the moofs first is not optional and not quick — a cold hour of
-    // video takes about a minute — so a pick that comes earlier waits, saying how far along it is.
+    // its moofs — the MP4's index — are read in the background from the moment the page knows
+    // its streams (prefetchMP4Index), and from its playlist's first request if not by then. A
+    // stream whose index is in when it starts (read on the page's opening, from an earlier play,
+    // or kept on disk) starts on one progressive MP4 outright (playHLS); one that starts first
+    // moves to it by itself once the index is in (switchToMP4), at the same position. The MP4
+    // plays at any speed and costs no transmux. Reading the moofs is not optional and not quick
+    // — a cold hour of video takes about a minute — so a speed pick that comes earlier waits,
+    // saying how far along it is, and a hold is not offered yet.
 
     // The HD stream playing here when it is that case; nil for everything else (360p, a
     // download, the TV, iOS 7+, the experiment off, or already on the MP4 route).
@@ -3439,11 +3446,34 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
                                                videoIndexEnd: v.indexEnd, audioIndexEnd: a.indexEnd)
     }
 
-    // Start (or resume) reading the playing HD stream's moofs. Run whenever a stream turns ready.
+    // The page's streams are in: read the index of the HD stream a tap would play now, so that by
+    // the tap it is often ready. Not for a video already playing here (its own reading is under
+    // way), downloaded, or bound for the TV; and StreamProxy never lets it stop the reading for
+    // another video being played.
+    private func prefetchMP4Index() {
+        guard VideoPlayer.mp4RouteWanted, !cast.isActive, !sp.isActive(video.id),
+              !DownloadManager.isDownloaded(video.id), let v = hdStreamForTap(),
+              let a = audioStreamForHLS() else { return }
+        DebugLog.log("Player", "id=\(video.id) itag=\(v.itag) reads the MP4 index on page open")
+        StreamProxy.shared.prepareMP4(videoURL: v.url, audioURL: a.url, videoIndexEnd: v.indexEnd,
+                                      audioIndexEnd: a.indexEnd, forPlayback: false)
+    }
+
+    // The HD stream startPlay would pick right now; nil when it would play 360p.
+    private func hdStreamForTap() -> VideoStream? {
+        if let itag = activeItag {
+            return itag == StreamTiers.muxed360 ? nil : hlsQualityOptions().first(where: { $0.itag == itag })
+        }
+        return defaultQualityStream()
+    }
+
+    // Start (or resume) reading the playing HD stream's moofs, and watch for them to be in. Run
+    // whenever a stream turns ready, and when the page comes back over one.
     private func prepareMP4IfNeeded() {
         guard let v = mp4Candidate, let a = audioStreamForHLS() else { return }
         StreamProxy.shared.prepareMP4(videoURL: v.url, audioURL: a.url,
                                       videoIndexEnd: v.indexEnd, audioIndexEnd: a.indexEnd)
+        watchMP4()
     }
 
     // A speed picked while the HD stream is still HLS.
@@ -3452,15 +3482,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         case .ready:
             switchToMP4(rate: rate, boost: false)
         case .preparing(let pct):
-            prepareMP4IfNeeded()   // resumes the reading if a stream change stopped it
             mp4PendingRate = rate
             showMP4Wait(rate, preparing: pct)
-            if mp4WaitTimer == nil {
-                let t = Timer(timeInterval: 1, target: BlockTarget { [weak self] in self?.mp4WaitTick() },
-                              selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
-                RunLoop.main.add(t, forMode: .common)
-                mp4WaitTimer = t
-            }
+            prepareMP4IfNeeded()   // resumes the reading if a stream change stopped it
         case .unavailable:
             showSpeedAlert("This stream only plays at normal speed here.")
         }
@@ -3473,13 +3497,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @discardableResult
     private func switchToMP4(rate: Float?, boost: Bool) -> Bool {
         guard let v = mp4Candidate, let a = audioStreamForHLS() else { return false }
-        stopMP4Wait()
+        stopMP4Watch()
         let handing = sp.handOver(rate: rate, boost: boost) {
             StreamProxy.shared.mp4URL(videoURL: v.url, audioURL: a.url, videoIndexEnd: v.indexEnd,
                                       audioIndexEnd: a.indexEnd, supersede: false)
         }
-        DebugLog.log("Player", "id=\(video.id) itag=\(v.itag) moves to the MP4 route at \(Int(sp.currentSeconds))s for "
-            + (boost ? "a hold" : "speed \(rate ?? sp.playbackRate)") + (handing ? ", handed over" : ", by a reload"))
+        let why = boost ? "for a hold" : rate.map { "for speed \($0)" } ?? "by itself, prepared"
+        DebugLog.log("Player", "id=\(video.id) itag=\(v.itag) moves to the MP4 route at \(Int(sp.currentSeconds))s "
+            + why + String(format: " (HLS %.0fs ahead)", sp.bufferedAhead) + (handing ? ", handed over" : ", by a reload"))
         if !handing {
             reloadIntoMP4(v, rate: rate, boost: boost)
         } else if let r = rate {
@@ -3508,18 +3533,37 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     private var mp4PendingRate: Float?
-    private var mp4WaitTimer: Timer?
+    private var mp4WatchTimer: Timer?
 
-    private func mp4WaitTick() {
-        guard let rate = mp4PendingRate, mp4Candidate != nil else { stopMP4Wait(); return }
+    // The move by itself waits for this much loaded past the playing position: the HLS stream
+    // then plays on through the handover (seek lead plus a long fragment) without fetching.
+    private static let mp4SwitchBuffer: Double = 10
+
+    private func watchMP4() {
+        guard mp4WatchTimer == nil else { return }
+        let t = Timer(timeInterval: 1, target: BlockTarget { [weak self] in self?.mp4WatchTick() },
+                      selector: #selector(BlockTarget.fire), userInfo: nil, repeats: true)
+        RunLoop.main.add(t, forMode: .common)
+        mp4WatchTimer = t
+    }
+
+    // Once a second while the stream is still HLS. A speed pick waiting goes as soon as the file
+    // is laid out; otherwise the move waits for plain playback with some buffer, then happens.
+    private func mp4WatchTick() {
+        guard mp4Candidate != nil else { stopMP4Watch(); return }
         switch mp4Readiness() {
         case .ready:
-            switchToMP4(rate: rate, boost: false)
+            if let rate = mp4PendingRate {
+                switchToMP4(rate: rate, boost: false)
+            } else if sp.isPlaying, !sp.isHandingOver, sp.bufferedAhead >= VideoPlayerVC.mp4SwitchBuffer {
+                switchToMP4(rate: nil, boost: false)
+            }
         case .preparing(let pct):
-            showMP4Wait(rate, preparing: pct)
+            if let rate = mp4PendingRate { showMP4Wait(rate, preparing: pct) }
         case .unavailable:
-            stopMP4Wait()
-            showSpeedAlert("This stream only plays at normal speed here.")
+            let waiting = mp4PendingRate != nil
+            stopMP4Watch()
+            if waiting { showSpeedAlert("This stream only plays at normal speed here.") }
         }
     }
 
@@ -3533,10 +3577,15 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // Drop a pick still waiting, and the message of that or of a handover. Safe to call when
     // nothing waits.
     private func stopMP4Wait() {
-        mp4WaitTimer?.invalidate()
-        mp4WaitTimer = nil
         mp4PendingRate = nil
         if statusLabel?.text?.contains("in a moment") == true { statusLabel?.isHidden = true }
+    }
+
+    // Stop watching altogether: the stream is moving, has moved, or the page goes.
+    private func stopMP4Watch() {
+        mp4WatchTimer?.invalidate()
+        mp4WatchTimer = nil
+        stopMP4Wait()
     }
 
     // Second-level sheet, same shape as the captions one: current pick check-marked.
@@ -3774,22 +3823,26 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // head fetches + parse before AVPlayer even sees the segment list. A stream that never
     // becomes ready stops with a retry message, same as the proxied 360p path.
     //
-    // Experiment: `asMP4` sends the same pair out as one progressive MP4 instead
-    // (StreamProxy.mp4URL), which iOS 5/6 will play at other speeds than 1.0. Only switchToMP4
-    // asks for it, once the file's layout is ready.
+    // Experiment: the same pair goes out as one progressive MP4 instead (StreamProxy.mp4URL),
+    // which iOS 5/6 will play at other speeds than 1.0, whenever its file is laid out already
+    // (StreamProxy.hdURL), and always for `asMP4` — reloadIntoMP4, once the layout is ready.
     private func playHLS(_ vStream: VideoStream, asMP4: Bool = false) {
         guard let aStream = audioStreamForHLS(),
               let local = asMP4
                 ? StreamProxy.shared.mp4URL(videoURL: vStream.url, audioURL: aStream.url,
                                             videoIndexEnd: vStream.indexEnd, audioIndexEnd: aStream.indexEnd)
-                : StreamProxy.shared.hlsURL(videoURL: vStream.url, audioURL: aStream.url,
-                                            videoIndexEnd: vStream.indexEnd,
-                                            audioIndexEnd: aStream.indexEnd) else {
+                : StreamProxy.shared.hdURL(videoURL: vStream.url, audioURL: aStream.url,
+                                           videoIndexEnd: vStream.indexEnd,
+                                           audioIndexEnd: aStream.indexEnd,
+                                           mp4: VideoPlayer.mp4RouteWanted) else {
             statusLabel?.text = "Quality unavailable"
             statusLabel?.isHidden = false
             return
         }
-        if asMP4 { DebugLog.log("Player", "id=\(video.id) itag=\(vStream.itag) as one MP4 (speed experiment)") }
+        if local.path.hasPrefix("/mp4/") {
+            DebugLog.log("Player", "id=\(video.id) itag=\(vStream.itag) as one MP4 (speed experiment"
+                + (asMP4 ? ")" : ", laid out already)"))
+        }
         activeQualityLabel = qualityLabel(vStream)
         activeItag = vStream.itag
         playBtn?.isHidden = true

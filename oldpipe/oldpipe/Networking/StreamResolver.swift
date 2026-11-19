@@ -124,11 +124,14 @@ final class StreamResolver {
 
     // Wraps a chosen HLS video stream + its audio track into a local StreamProxy transmux URL.
     // Returns nil if the audio track is missing or the proxy couldn't build a route.
+    // Experiment: the MP4 route instead when the pair's file is laid out already, which keeps a
+    // reconnect on the route (and the speed) it was playing on.
     private static func hlsResolvedStream(_ vStream: VideoStream, _ streams: [VideoStream]) -> ResolvedStream? {
         guard let aStream = audioStreamForHLS(streams),
-              let local = StreamProxy.shared.hlsURL(videoURL: vStream.url, audioURL: aStream.url,
-                                                    videoIndexEnd: vStream.indexEnd,
-                                                    audioIndexEnd: aStream.indexEnd) else { return nil }
+              let local = StreamProxy.shared.hdURL(videoURL: vStream.url, audioURL: aStream.url,
+                                                   videoIndexEnd: vStream.indexEnd,
+                                                   audioIndexEnd: aStream.indexEnd,
+                                                   mp4: VideoPlayer.mp4RouteWanted) else { return nil }
         return ResolvedStream(url: local, isLocal: false)
     }
 

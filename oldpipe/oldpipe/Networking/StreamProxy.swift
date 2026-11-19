@@ -164,8 +164,12 @@ private final class HLSSession {
     // Retired on its own by closeSession, the generation unmoved: its fetches abort and no
     // read-ahead starts. Guarded by StreamProxy.lock.
     var closed = false
+    // Experiment: an HLS stream the MP4 route is to take over (hdURL). Its first playlist
+    // request starts the moof reading (prepareMP4), its heads being in hand from then on.
+    let prepareMP4: Bool
     init(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64,
-         gen: UInt64, localDir: String? = nil, headKey: String? = nil, progressive: Bool = false) {
+         gen: UInt64, localDir: String? = nil, headKey: String? = nil, progressive: Bool = false,
+         prepareMP4: Bool = false) {
         self.videoURL = videoURL
         self.audioURL = audioURL
         self.videoIndexEnd = videoIndexEnd
@@ -174,6 +178,7 @@ private final class HLSSession {
         self.localDir = localDir
         self.headKey = headKey
         self.progressive = progressive
+        self.prepareMP4 = prepareMP4
     }
 }
 
@@ -261,7 +266,9 @@ final class StreamProxy: NSObject {
     // local playlist URL for AVPlayer. indexEnd values come from the innertube indexRange —
     // bytes 0...indexEnd is each stream's init+sidx head. Bumps the generation exactly like
     // localURL(for:) so any previously playing stream is aborted at the switch moment.
-    func hlsURL(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) -> URL? {
+    // `prepareMP4`: see HLSSession.prepareMP4.
+    func hlsURL(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64,
+                prepareMP4: Bool = false) -> URL? {
         guard videoIndexEnd > 0, audioIndexEnd > 0, start() else { return nil }
         var key: String?
         if let v = StreamProxy.headKey(videoURL, indexEnd: videoIndexEnd),
@@ -273,7 +280,7 @@ final class StreamProxy: NSObject {
         let id = "\(routeSeq)"
         hlsSessions[id] = HLSSession(videoURL: videoURL, audioURL: audioURL,
                                      videoIndexEnd: videoIndexEnd, audioIndexEnd: audioIndexEnd,
-                                     gen: currentGen, headKey: key)
+                                     gen: currentGen, headKey: key, prepareMP4: prepareMP4)
         lock.unlock()
         return URL(string: "http://127.0.0.1:\(port)/hls/\(id)/index.m3u8")
     }
@@ -306,6 +313,22 @@ final class StreamProxy: NSObject {
         lock.unlock()
         DebugLog.log("StreamProxy", "mp4URL id=\(id) gen=\(gen)" + (supersede ? "" : " (alongside the playing stream)"))
         return URL(string: "http://127.0.0.1:\(port)/mp4/\(id)/video.mp4")
+    }
+
+    // Experiment: an HD pair as the MP4 when its layout is built already — read on the page's
+    // opening, kept from an earlier play, on disk — so it never goes through HLS; otherwise HLS,
+    // whose first playlist request starts the reading for the move. Plain HLS when `mp4` is
+    // false. Generation rules as hlsURL either way. A layout on disk is read in here, before
+    // AVPlayer is pointed at the file, so a file that cannot be read means HLS, not a failure.
+    func hdURL(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64, mp4: Bool) -> URL? {
+        if mp4, let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd),
+           layoutInMemory(key) || layoutFromDisk(key) != nil,
+           let u = mp4URL(videoURL: videoURL, audioURL: audioURL, videoIndexEnd: videoIndexEnd,
+                          audioIndexEnd: audioIndexEnd) {
+            return u
+        }
+        return hlsURL(videoURL: videoURL, audioURL: audioURL, videoIndexEnd: videoIndexEnd,
+                      audioIndexEnd: audioIndexEnd, prepareMP4: mp4)
     }
 
     // Experiment: retire ONE session, the generation unmoved — moving it would abort the
@@ -619,6 +642,10 @@ final class StreamProxy: NSObject {
         }
 
         if file == "index.m3u8" {
+            if session.prepareMP4 {
+                prepareMP4(videoURL: session.videoURL, audioURL: session.audioURL,
+                           videoIndexEnd: session.videoIndexEnd, audioIndexEnd: session.audioIndexEnd)
+            }
             session.parseLock.lock(); let text = session.playlistText ?? ""; session.parseLock.unlock()
             sendResponse(clientFd, contentType: "application/vnd.apple.mpegurl", body: Data(text.utf8))
             return
@@ -823,8 +850,9 @@ final class StreamProxy: NSObject {
         if let layout = session.layout { return layout }
         guard let key = session.headKey else { return nil }
         lock.lock()
-        let hit = layoutCache.first(where: { $0.key == key })?.layout
+        var hit = layoutCache.first(where: { $0.key == key })?.layout
         lock.unlock()
+        if hit == nil { hit = layoutFromDisk(key) }
         session.layout = hit
         DebugLog.log("StreamProxy", hit.map { "mp4 layout ready (\($0.totalSize / 1_048_576)MB)" }
                                         ?? "mp4 layout NOT READY — refusing the request")
@@ -855,6 +883,9 @@ final class StreamProxy: NSObject {
         var failed: String?
         var requests = 0, bytes = 0
         var started = Date()
+        // false while only a page opening asked for it: then it gives way to the next one, and
+        // never takes over the reading of a video being played.
+        var forPlayback = true
         init(key: String, videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64, gen: UInt64) {
             self.key = key
             self.videoURL = videoURL
@@ -893,27 +924,38 @@ final class StreamProxy: NSObject {
 
     func mp4Readiness(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) -> MP4Readiness {
         guard let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd) else { return .unavailable }
+        if layoutInMemory(key) || layoutOnDisk(key) { return .ready }
         lock.lock()
         defer { lock.unlock() }
-        if layoutCache.contains(where: { $0.key == key }) { return .ready }
         guard let p = prep, p.key == key else { return .preparing(0) }
         if p.failed != nil { return .unavailable }
         return .preparing(p.total > 0 ? p.done * 100 / p.total : 0)
     }
 
-    // Start (or resume) reading this pair's moofs in the background. Call once its HLS stream
-    // plays, so its heads are in headCache already; again whenever mp4Readiness is not ready
-    // and nothing may be reading (a stream change stopped it). A no-op when ready or running.
-    func prepareMP4(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) {
-        guard let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd) else { return }
+    // Start (or resume) reading this pair's moofs in the background: from the page's opening
+    // (`forPlayback` false), and again from its HLS stream's first playlist request and whenever
+    // mp4Readiness is not ready and nothing may be reading (a stream change stopped it). A no-op
+    // when ready or running. One pair at a time: a new one stops the last, except that a page
+    // never stops a video being played.
+    func prepareMP4(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64,
+                    forPlayback: Bool = true) {
+        guard let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd),
+              !layoutOnDisk(key) else { return }
         lock.lock()
         if layoutCache.contains(where: { $0.key == key }) { lock.unlock(); return }
         let p: MP4Prep
         if let cur = prep, cur.key == key, cur.failed == nil {
             p = cur
+            if forPlayback { p.forPlayback = true }
         } else {
+            if !forPlayback, let cur = prep, cur.forPlayback, cur.workers > 0 {
+                lock.unlock()
+                DebugLog.log("StreamProxy", "mp4 prep for a page left alone: a playing video's is under way")
+                return
+            }
             p = MP4Prep(key: key, videoURL: videoURL, audioURL: audioURL,
                         videoIndexEnd: videoIndexEnd, audioIndexEnd: audioIndexEnd, gen: currentGen)
+            p.forPlayback = forPlayback
             prep = p
         }
         p.gen = currentGen
@@ -921,7 +963,8 @@ final class StreamProxy: NSObject {
         p.workers = StreamProxy.prepQueues.count
         p.started = Date()
         lock.unlock()
-        DebugLog.log("StreamProxy", "mp4 prep \(p.total == 0 ? "start" : "resume at \(p.done)/\(p.total)")")
+        DebugLog.log("StreamProxy", "mp4 prep \(p.total == 0 ? "start" : "resume at \(p.done)/\(p.total)")"
+            + (forPlayback ? "" : " (page open)"))
         StreamProxy.prepQueues[0].async { StreamProxy.shared.prepFirst(p) }
     }
 
@@ -963,13 +1006,13 @@ final class StreamProxy: NSObject {
         prepRead(p)
     }
 
-    // One reader: batches off the shared list until it is empty or the stream moves on. The
-    // last reader to finish lays the file out.
+    // One reader: batches off the shared list until it is empty, the stream moves on, or another
+    // pair takes over. The last reader to finish lays the file out.
     private func prepRead(_ p: MP4Prep) {
         while true {
             lock.lock()
             let gen = p.gen
-            guard let info = p.info, p.failed == nil, gen >= currentGen, !p.pending.isEmpty else { break }
+            guard prep === p, let info = p.info, p.failed == nil, gen >= currentGen, !p.pending.isEmpty else { break }
             let batch = p.pending.removeFirst()
             lock.unlock()
 
@@ -1029,9 +1072,7 @@ final class StreamProxy: NSObject {
         let buildMs = Int(Date().timeIntervalSince(t0) * 1000)
         lock.lock()
         if let layout = built {
-            layoutCache.removeAll { $0.key == p.key }
-            layoutCache.append((key: p.key, layout: layout))
-            if layoutCache.count > StreamProxy.layoutCacheSize { layoutCache.removeFirst() }
+            rememberLayoutLocked(p.key, layout)
             if prep === p { prep = nil }   // done: the moof tables are not needed any more
         } else {
             p.failed = why
@@ -1041,9 +1082,99 @@ final class StreamProxy: NSObject {
             DebugLog.log("StreamProxy", "mp4 prep READY: \(p.video.count) video + \(p.audio.count) audio moofs in "
                 + "\(p.requests) requests, \(p.bytes / 1024)KB, read \(readMs)ms (this run), laid out in \(buildMs)ms; "
                 + "moov+head \(layout.head.count / 1024)KB, file \(layout.totalSize / 1_048_576)MB")
+            saveLayout(p.key, layout)
         } else {
             DebugLog.log("StreamProxy", "mp4 prep layout FAILED: \(why)")
         }
+    }
+
+    // MARK: - Layouts kept on disk (experiment)
+
+    // Every layout built is written to Caches/mp4-layouts as well, named after the pair it lays
+    // out (pairKey: the encoded files, not the urls), so a video played once starts on the MP4
+    // route outright the next time, after a relaunch too. The newest few are kept, and iOS may
+    // empty Caches when space runs low; a file that is gone or does not read back is not used.
+    private static let layoutDir: String = {
+        let caches = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true)[0]
+        return (caches as NSString).appendingPathComponent("mp4-layouts")
+    }()
+    private static let layoutsKept = 40   // 0.1-2 MB each, by the length of the video
+    private var diskLayouts: Set<String>?   // the file names there, listed on first use; guarded by lock
+
+    private static func layoutFileName(_ key: String) -> String {
+        return key.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "+", with: "-") + ".layout"
+    }
+
+    // Under lock: in memory as the newest, the oldest let go past layoutCacheSize.
+    private func rememberLayoutLocked(_ key: String, _ layout: MP4StreamLayout) {
+        layoutCache.removeAll { $0.key == key }
+        layoutCache.append((key: key, layout: layout))
+        if layoutCache.count > StreamProxy.layoutCacheSize { layoutCache.removeFirst() }
+    }
+
+    private func layoutInMemory(_ key: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return layoutCache.contains(where: { $0.key == key })
+    }
+
+    // Whether a file is there by that name; the first call lists the folder.
+    private func layoutOnDisk(_ key: String) -> Bool {
+        lock.lock(); var names = diskLayouts; lock.unlock()
+        if names == nil {
+            let listed = Set((try? FileManager.default.contentsOfDirectory(atPath: StreamProxy.layoutDir)) ?? [])
+            lock.lock()
+            if diskLayouts == nil { diskLayouts = listed }
+            names = diskLayouts
+            lock.unlock()
+        }
+        return names?.contains(StreamProxy.layoutFileName(key)) ?? false
+    }
+
+    // The layout read back into memory, or nil, in which case its file is dropped.
+    private func layoutFromDisk(_ key: String) -> MP4StreamLayout? {
+        guard layoutOnDisk(key) else { return nil }
+        let name = StreamProxy.layoutFileName(key)
+        let path = (StreamProxy.layoutDir as NSString).appendingPathComponent(name)
+        let t0 = Date()
+        guard let data = FileManager.default.contents(atPath: path),
+              let layout = MP4StreamLayout.decoded(data) else {
+            try? FileManager.default.removeItem(atPath: path)
+            lock.lock(); diskLayouts?.remove(name); lock.unlock()
+            DebugLog.log("StreamProxy", "mp4 layout on disk unreadable — dropped")
+            return nil
+        }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)   // kept longest
+        lock.lock(); rememberLayoutLocked(key, layout); lock.unlock()
+        DebugLog.log("StreamProxy", "mp4 layout read from disk in \(Int(Date().timeIntervalSince(t0) * 1000))ms "
+            + "(\(data.count / 1024)KB, file \(layout.totalSize / 1_048_576)MB)")
+        return layout
+    }
+
+    // On the prep queue that built it. Past layoutsKept, the least recently used go.
+    private func saveLayout(_ key: String, _ layout: MP4StreamLayout) {
+        let fm = FileManager.default
+        let dir = StreamProxy.layoutDir
+        try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true, attributes: nil)
+        let name = StreamProxy.layoutFileName(key)
+        let data = layout.encoded()
+        guard (try? data.write(to: URL(fileURLWithPath: (dir as NSString).appendingPathComponent(name)),
+                               options: .atomic)) != nil else {
+            DebugLog.log("StreamProxy", "mp4 layout NOT saved")
+            return
+        }
+        var names = (try? fm.contentsOfDirectory(atPath: dir)) ?? []
+        if names.count > StreamProxy.layoutsKept {
+            let used: [(name: String, at: Date)] = names.map { n in
+                let attrs = try? fm.attributesOfItem(atPath: (dir as NSString).appendingPathComponent(n))
+                return (n, attrs?[.modificationDate] as? Date ?? .distantPast)
+            }
+            for old in used.sorted(by: { $0.at < $1.at }).prefix(names.count - StreamProxy.layoutsKept) {
+                try? fm.removeItem(atPath: (dir as NSString).appendingPathComponent(old.name))
+                names.removeAll { $0 == old.name }
+            }
+        }
+        lock.lock(); diskLayouts = Set(names); lock.unlock()
+        DebugLog.log("StreamProxy", "mp4 layout saved (\(data.count / 1024)KB, \(names.count) kept)")
     }
 
     // What names a pair's files across fresh urls (see headKey); nil if either url doesn't say.

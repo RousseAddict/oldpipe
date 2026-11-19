@@ -465,6 +465,23 @@ class VideoPlayer {
     // iOS 5/6, so speed means moving the stream to the MP4 route (VideoPlayerVC.speedViaMP4).
     var speedNeedsMP4: Bool { return lastLoadWasHLS && VideoPlayer.osMajor < 7 }
 
+    // Experiment: HD streams belong on the MP4 route here ("Play HD as MP4" on, iOS 5/6).
+    static var mp4RouteWanted: Bool { return AppSettings.mp4SpeedTestEnabled && osMajor < 7 }
+
+    // Seconds the current item holds past the playing position, 0 when it says nothing.
+    // loadedTimeRanges is iOS 4; the CoreMedia C calls keep clear of the Swift overlay.
+    var bufferedAhead: Double {
+        guard let it = item else { return 0 }
+        let now = it.currentTime()
+        for v in it.loadedTimeRanges {
+            let r = v.timeRangeValue
+            if CMTimeRangeContainsTime(r, time: now) {
+                return CMTimeGetSeconds(CMTimeRangeGetEnd(r)) - CMTimeGetSeconds(now)
+            }
+        }
+        return 0
+    }
+
     // Experiment: a speed pick, or a hold, meant for the item about to replace this one, which
     // would refuse it. Called right before that load, on the same run-loop turn: load() stops
     // reconcileRate from judging the old item against it, and every start reads effectiveRate.

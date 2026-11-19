@@ -1106,6 +1106,89 @@ final class MP4StreamLayout {
                  UInt8(mdatSize & 0xFF), 0x6D, 0x64, 0x61, 0x74]
         return (MP4StreamLayout(head: Data(head), segStart: segStart.map { $0 + base }, runs: runs), "")
     }
+
+    // MARK: Kept on disk
+    // A layout costs the moof reads of the whole video — about a minute for a cold hour — and
+    // depends only on the two encoded files, so StreamProxy keeps it on disk and the next play
+    // of either starts on the MP4 route outright. "OPL1", the head, segStart, then each
+    // segment's runs, big-endian as everything else here, and a checksum of all that: a
+    // damaged run would otherwise cut the wrong bytes into the file without a sound.
+
+    func encoded() -> Data {
+        var b = BoxBuilder()
+        b.fourCC("OPL1")
+        b.u32(Int64(head.count))
+        b.u32(Int64(runs.count))
+        b.u32(Int64(runs.reduce(0) { $0 + $1.count }))
+        b.raw([UInt8](head))
+        for s in segStart { b.u32(s >> 32); b.u32(s) }
+        for seg in runs { b.u32(Int64(seg.count)) }
+        for seg in runs {
+            for r in seg { b.u32(r.src >> 32); b.u32(r.src); b.u32(Int64(r.count)); b.u8(r.video ? 1 : 0) }
+        }
+        b.u32(Int64(MP4StreamLayout.checksum(b.bytes, upTo: b.bytes.count)))
+        return Data(b.bytes)
+    }
+
+    // FNV-1a, 32 bits.
+    private static func checksum(_ b: [UInt8], upTo n: Int) -> UInt32 {
+        var h: UInt32 = 2_166_136_261
+        for i in 0..<n { h = (h ^ UInt32(b[i])) &* 16_777_619 }
+        return h
+    }
+
+    // nil for anything that does not read back as a whole, consistent layout: the checksum must
+    // match, and every segment's runs must add up to its place in the file.
+    static func decoded(_ d: Data) -> MP4StreamLayout? {
+        var b = [UInt8](d)
+        guard b.count >= 20 else { return nil }
+        let n = b.count - 4
+        let stored = UInt32(b[n]) << 24 | UInt32(b[n + 1]) << 16 | UInt32(b[n + 2]) << 8 | UInt32(b[n + 3])
+        guard stored == checksum(b, upTo: n) else { return nil }
+        b.removeLast(4)
+        var p = 4
+        func u32() -> Int64? {
+            guard p + 4 <= b.count else { return nil }
+            let v = Int64(b[p]) << 24 | Int64(b[p + 1]) << 16 | Int64(b[p + 2]) << 8 | Int64(b[p + 3])
+            p += 4
+            return v
+        }
+        func u64() -> Int64? {
+            guard let hi = u32(), let lo = u32() else { return nil }
+            return hi << 32 | lo
+        }
+        guard b.count >= 16, Array(b[0..<4]) == Array("OPL1".utf8),
+              let headLen = u32().map({ Int($0) }), let segs = u32().map({ Int($0) }),
+              let runCount = u32().map({ Int($0) }), segs > 0, p + headLen <= b.count else { return nil }
+        let head = Data(b[p..<(p + headLen)])
+        p += headLen
+        var segStart: [Int64] = []
+        for _ in 0...segs {
+            guard let s = u64() else { return nil }
+            segStart.append(s)
+        }
+        var counts: [Int] = []
+        for _ in 0..<segs {
+            guard let c = u32() else { return nil }
+            counts.append(Int(c))
+        }
+        guard counts.reduce(0, +) == runCount, segStart[0] == Int64(headLen) else { return nil }
+        var runs: [[Run]] = []
+        for (i, c) in counts.enumerated() {
+            var seg: [Run] = []
+            var bytes: Int64 = 0
+            for _ in 0..<c {
+                guard let src = u64(), let n = u32(), p < b.count else { return nil }
+                seg.append(Run(video: b[p] != 0, src: src, count: Int(n)))
+                p += 1
+                bytes += n
+            }
+            guard segStart[i + 1] - segStart[i] == bytes else { return nil }
+            runs.append(seg)
+        }
+        guard p == b.count else { return nil }
+        return MP4StreamLayout(head: head, segStart: segStart, runs: runs)
+    }
 }
 
 // MARK: - PES / NAL helpers
