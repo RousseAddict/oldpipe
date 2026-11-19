@@ -231,9 +231,10 @@ enum AppSettings {
 
     private static let mp4SpeedTestKey = "mp4_speed_test_enabled"
 
-    // Experiment, off by default: plays a >360p download as one flat .mp4 instead of its HLS
-    // bundle (see MP4SpeedTest), to find out whether iOS 5/6 AVPlayer will run the same HD
-    // media off-speed once it is no longer HLS.
+    // Experiment, off by default: plays >360p as one MP4 instead of HLS, which iOS 5/6 AVPlayer
+    // will run off normal speed. A download is converted to a flat .mp4 (see MP4SpeedTest); a
+    // stream starts as HLS and moves to one progressive MP4 served by StreamProxy at the first
+    // speed pick or hold (see VideoPlayerVC.switchToMP4, MP4StreamLayout).
     static var mp4SpeedTestEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: mp4SpeedTestKey) }
         set {

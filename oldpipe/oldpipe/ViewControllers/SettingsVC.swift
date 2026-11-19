@@ -249,8 +249,8 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
                      action: #selector(debugSwitchChanged(_:)),
                      at: &y, screenWidth: w, width: contentW, pad: pad)
 
-        addSwitchRow(subtitle: "Experiment: plays a downloaded 480p-1080p video as one MP4 file instead of HLS, to test playback speed. Converts on first play, using as much space as the download.",
-                     label: "Play HD Downloads as MP4",
+        addSwitchRow(subtitle: "Experiment, for playback speed in 480p-1080p on iOS 5/6. A download plays as one MP4 file, converted on first play (as much space again). A stream moves to MP4 at the first speed pick or hold, once prepared.",
+                     label: "Play HD as MP4",
                      isOn: AppSettings.mp4SpeedTestEnabled,
                      action: #selector(mp4TestSwitchChanged(_:)),
                      at: &y, screenWidth: w, width: contentW, pad: pad)

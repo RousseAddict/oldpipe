@@ -214,6 +214,116 @@ class CurlFetcher {
         return ctx.data
     }
 
+    // Several ranges of one googlevideo file in ONE request, answered as multipart/byteranges.
+    // What the streaming MP4 route needs to read every fragment's moof before playback starts
+    // (StreamProxy.fetchFragmentHeads): one request per fragment is ~330 round trips for a
+    // 20-minute 1080p video. googlevideo takes up to 48 ranges per request and answers 64 with a
+    // 416 (measured 2026-11-19), so the caller batches.
+    //
+    // Same rules as rangeFetch: the parts come back in the order asked, each exactly as long as
+    // asked, or the whole call returns nil.
+    //
+    // `pausesFeed` false skips rangeFetch's feed-lane pause. Background reads use it: a range
+    // googlevideo has to fetch from cold storage first can take a second or two to send its
+    // first byte, and holding the turnstile that long would stall every thumbnail and every
+    // segment fetch of the stream playing meanwhile.
+    static func multiRangeFetch(url: String, ranges: [(start: Int64, end: Int64)], timeout: Int = 60,
+                                pausesFeed: Bool = true, timing: CurlTiming? = nil,
+                                shouldAbort: @escaping () -> Bool = { false }) -> [Data]? {
+        guard let first = ranges.first else { return [] }
+        // One range is answered as a plain 206, not as a multipart body.
+        if ranges.count == 1 && pausesFeed {
+            return rangeFetch(url: url, start: first.start, end: first.end, timeout: timeout,
+                              timing: timing, shouldAbort: shouldAbort).map { [$0] }
+        }
+        _ = curlGlobalInit
+        let ctx = CurlRangeCtx(shouldAbort: shouldAbort)
+        let ctxPtr = Unmanaged.passUnretained(ctx).toOpaque()
+
+        guard let h = curl_bridge_init() else { return nil }
+        defer { curl_bridge_cleanup(h) }
+        url.withCString { curl_bridge_set_url(h, $0) }
+        curl_bridge_set_ssl_noverify(h)
+        curl_bridge_set_follow_redirects(h)
+        curl_bridge_set_timeout(h, CLong(timeout))
+        googlevideoUserAgent.withCString { curl_bridge_set_useragent(h, $0) }
+        let spec = ranges.map { "\($0.start)-\($0.end)" }.joined(separator: ",")
+        "Range: bytes=\(spec)".withCString { curl_bridge_add_header(h, $0) }
+        curl_bridge_set_write_fn(h, curlRangeWriteCallback, ctxPtr)
+        curl_bridge_set_progress_fn(h, curlRangeProgressCallback, ctxPtr)
+
+        if pausesFeed {
+            pauseFeed()
+        } else {
+            ctx.feedResumed = true   // nothing to reopen: the write callback must not signal
+        }
+        defer { if !ctx.feedResumed { ctx.feedResumed = true; resumeFeed() } }
+        ctx.firstByteDeadline = ProcessInfo.processInfo.systemUptime + 20
+
+        let rc = curl_bridge_perform(h)
+        let code = curl_bridge_response_code(h)
+        if let t = timing {
+            curl_bridge_timing(h, &t.namelookup, &t.connect, &t.appconnect, &t.total)
+        }
+        guard rc == 0, code == 206, !ctx.aborted else { return nil }
+        if ranges.count == 1 {
+            return Int64(ctx.data.count) == first.end - first.start + 1 ? [ctx.data] : nil
+        }
+        return multipartParts(ctx.data, ranges: ranges)
+    }
+
+    // Cut a multipart/byteranges body into the ranges asked for. Each part is
+    // "--<boundary>" CRLF, its headers, a blank line, then exactly the bytes its Content-Range
+    // names, so the media bytes are skipped by length and never searched for a boundary. A
+    // server may merge ranges that touch, so a range is looked up in whichever part covers it.
+    private static func multipartParts(_ body: Data, ranges: [(start: Int64, end: Int64)]) -> [Data]? {
+        let b = [UInt8](body)
+        let n = b.count
+        func lineEnd(from i: Int) -> Int? {
+            var j = i
+            while j + 1 < n {
+                if b[j] == 13 && b[j + 1] == 10 { return j }
+                j += 1
+            }
+            return nil
+        }
+        var parts: [(start: Int64, bytes: ArraySlice<UInt8>)] = []
+        var i = 0
+        while let e = lineEnd(from: i) {
+            // Anything but a boundary line (the CRLF closing a part, a preamble) is skipped.
+            guard e - i >= 2, b[i] == 45, b[i + 1] == 45 else { i = e + 2; continue }
+            if e - i >= 4, b[e - 1] == 45, b[e - 2] == 45 { break }   // "--<boundary>--": the end
+            var j = e + 2
+            var from: Int64?, to: Int64?
+            while true {
+                guard let he = lineEnd(from: j) else { return nil }
+                if he == j { j += 2; break }   // blank line: the part's bytes follow
+                let header = String(bytes: b[j..<he], encoding: .isoLatin1)?.lowercased() ?? ""
+                if header.hasPrefix("content-range:"), let r = header.range(of: "bytes ") {
+                    let span = header[r.upperBound...].components(separatedBy: "/")[0]
+                        .components(separatedBy: "-")
+                    if span.count == 2 {
+                        from = Int64(span[0].trimmingCharacters(in: .whitespaces))
+                        to = Int64(span[1].trimmingCharacters(in: .whitespaces))
+                    }
+                }
+                j = he + 2
+            }
+            guard let s = from, let t = to, t >= s, Int64(n - j) >= t - s + 1 else { return nil }
+            let len = Int(t - s + 1)
+            parts.append((s, b[j..<(j + len)]))
+            i = j + len
+        }
+        var out: [Data] = []
+        for r in ranges {
+            guard let p = parts.first(where: { $0.start <= r.start && $0.start + Int64($0.bytes.count) > r.end })
+            else { return nil }
+            let from = p.bytes.startIndex + Int(r.start - p.start)
+            out.append(Data(p.bytes[from..<(from + Int(r.end - r.start + 1))]))
+        }
+        return out
+    }
+
     // Submit background work. highPriority runs on the dedicated serial highQueue (its own thread)
     // and CLOSES the feed turnstile for its duration so no new feed transfer competes for TLS.
     // Normal work passes the turnstile (blocks while a player request holds it), then waits for a

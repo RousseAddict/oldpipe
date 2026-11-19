@@ -743,77 +743,368 @@ private final class RemuxSession {
         m.end()   // data
         m.end()   // the atom
     }
+}
 
-    private func writeTkhd(_ m: inout BoxBuilder, id: Int64, duration: Int64, audio: Bool,
-                           width: Int, height: Int, now: Int64) {
-        m.beginFull("tkhd", flags: 3)   // enabled + in movie; a disabled track is ignored
-        m.u32(now); m.u32(now); m.u32(id); m.u32(0); m.u32(duration)
-        m.zeros(8); m.u16(0); m.u16(0); m.u16(audio ? 0x0100 : 0); m.u16(0)
-        m.identityMatrix()
-        m.u32(Int64(width) << 16); m.u32(Int64(height) << 16)
-        m.end()
+// MARK: - Box helpers (the export above and the streaming layout below)
+
+private func writeTkhd(_ m: inout BoxBuilder, id: Int64, duration: Int64, audio: Bool,
+                       width: Int, height: Int, now: Int64) {
+    m.beginFull("tkhd", flags: 3)   // enabled + in movie; a disabled track is ignored
+    m.u32(now); m.u32(now); m.u32(id); m.u32(0); m.u32(duration)
+    m.zeros(8); m.u16(0); m.u16(0); m.u16(audio ? 0x0100 : 0); m.u16(0)
+    m.identityMatrix()
+    m.u32(Int64(width) << 16); m.u32(Int64(height) << 16)
+    m.end()
+}
+
+// media_time is in the track's own timescale, the durations in the movie's.
+private func writeEdts(_ m: inout BoxBuilder, emptyDur: Int64, editDur: Int64, mediaTime: Int64) {
+    m.begin("edts")
+    m.beginFull("elst")
+    m.u32(emptyDur > 0 ? 2 : 1)
+    if emptyDur > 0 { m.u32(emptyDur); m.u32(-1); m.u32(0x0001_0000) }
+    m.u32(editDur); m.u32(mediaTime); m.u32(0x0001_0000)
+    m.end()
+    m.end()
+}
+
+private func writeMdhd(_ m: inout BoxBuilder, timescale: Int64, duration: Int64, now: Int64) {
+    m.beginFull("mdhd")
+    m.u32(now); m.u32(now); m.u32(timescale); m.u32(duration)
+    m.u16(0x55C4); m.u16(0)   // language "und"
+    m.end()
+}
+
+private func writeHdlr(_ m: inout BoxBuilder, type: String, name: String) {
+    m.beginFull("hdlr")
+    m.u32(0); m.fourCC(type); m.zeros(12)
+    m.fourCC(name); m.u8(0)
+    m.end()
+}
+
+private func writeDinf(_ m: inout BoxBuilder) {
+    m.begin("dinf")
+    m.beginFull("dref"); m.u32(1)
+    m.beginFull("url ", flags: 1); m.end()   // flag 1: the media is in this file
+    m.end()
+    m.end()
+}
+
+// stts / ctts: run-length (count, value) pairs.
+private func writeRuns(_ m: inout BoxBuilder, _ type: String, _ values: [Int64]) {
+    var runs: [(count: Int64, value: Int64)] = []
+    for v in values {
+        if let last = runs.last, last.value == v { runs[runs.count - 1].count += 1 }
+        else { runs.append((1, v)) }
+    }
+    m.beginFull(type); m.u32(Int64(runs.count))
+    for r in runs { m.u32(r.count); m.u32(r.value) }
+    m.end()
+}
+
+private func writeChunkTables(_ m: inout BoxBuilder, sizes: [UInt32], chunks: [Chunk]) {
+    // stsc: a new entry only where samples-per-chunk changes.
+    var stsc: [(first: Int64, count: Int)] = []
+    for (i, c) in chunks.enumerated() where stsc.last?.count != c.count {
+        stsc.append((Int64(i + 1), c.count))
+    }
+    m.beginFull("stsc"); m.u32(Int64(stsc.count))
+    for e in stsc { m.u32(e.first); m.u32(Int64(e.count)); m.u32(1) }
+    m.end()
+    m.beginFull("stsz"); m.u32(0); m.u32(Int64(sizes.count))
+    for s in sizes { m.u32(Int64(s)) }
+    m.end()
+    m.beginFull("stco"); m.u32(Int64(chunks.count))
+    for c in chunks { m.u32(c.offset) }
+    m.end()
+}
+
+// MARK: - Streaming: a DASH pair as one virtual MP4
+
+// Experiment (exp/hd-speed-mp4). Before iOS 7 an HLS item refuses every speed but 1.0, and a
+// plain MP4 does not: the same 1080p media as one file holds 2x on a 4S. So StreamProxy can
+// serve a >360p stream as one progressive MP4 instead of a playlist, a file that exists only
+// as this layout. Its moov needs every sample's size and timing before the first byte of
+// media, and DASH keeps those in one moof per fragment, so StreamProxy reads them all first (a
+// few multi-range requests for a whole video) and this lays the file out. Serving it is then
+// pure copying: every byte after the moov is a googlevideo byte, placed where this says.
+//
+// ftyp, moov, mdat. The mdat holds the HLS route's segments in turn, one video fragment plus
+// the audio of its time window, cut by the same HLSTransmuxer.audioWindow, so StreamProxy
+// fetches and reads ahead exactly as for HLS. Inside a segment, ~1 s chunks of video then
+// audio, as writeInterleaved does. The moov goes first so AVPlayer can start without asking
+// for the end of the file; nothing is written in order here, so that costs nothing.
+final class MP4StreamLayout {
+
+    // Bytes of one segment copied from one of its two fetched blobs: the video fragment, or the
+    // audio range HLSTransmuxer.audioRange names for the segment.
+    private struct Run { let video: Bool; let src: Int64; let count: Int }
+
+    let head: Data                  // ftyp + moov + mdat header: the file's first head.count bytes
+    let totalSize: Int64
+    private let segStart: [Int64]   // file offset of each segment's first byte, then totalSize
+    private let runs: [[Run]]
+
+    var segmentCount: Int { return runs.count }
+
+    private init(head: Data, segStart: [Int64], runs: [[Run]]) {
+        self.head = head
+        self.segStart = segStart
+        self.runs = runs
+        totalSize = segStart.last ?? Int64(head.count)
     }
 
-    // media_time is in the track's own timescale, the durations in the movie's.
-    private func writeEdts(_ m: inout BoxBuilder, emptyDur: Int64, editDur: Int64, mediaTime: Int64) {
-        m.begin("edts")
-        m.beginFull("elst")
-        m.u32(emptyDur > 0 ? 2 : 1)
-        if emptyDur > 0 { m.u32(emptyDur); m.u32(-1); m.u32(0x0001_0000) }
-        m.u32(editDur); m.u32(mediaTime); m.u32(0x0001_0000)
-        m.end()
-        m.end()
-    }
-
-    private func writeMdhd(_ m: inout BoxBuilder, timescale: Int64, duration: Int64, now: Int64) {
-        m.beginFull("mdhd")
-        m.u32(now); m.u32(now); m.u32(timescale); m.u32(duration)
-        m.u16(0x55C4); m.u16(0)   // language "und"
-        m.end()
-    }
-
-    private func writeHdlr(_ m: inout BoxBuilder, type: String, name: String) {
-        m.beginFull("hdlr")
-        m.u32(0); m.fourCC(type); m.zeros(12)
-        m.fourCC(name); m.u8(0)
-        m.end()
-    }
-
-    private func writeDinf(_ m: inout BoxBuilder) {
-        m.begin("dinf")
-        m.beginFull("dref"); m.u32(1)
-        m.beginFull("url ", flags: 1); m.end()   // flag 1: the media is in this file
-        m.end()
-        m.end()
-    }
-
-    // stts / ctts: run-length (count, value) pairs.
-    private func writeRuns(_ m: inout BoxBuilder, _ type: String, _ values: [Int64]) {
-        var runs: [(count: Int64, value: Int64)] = []
-        for v in values {
-            if let last = runs.last, last.value == v { runs[runs.count - 1].count += 1 }
-            else { runs.append((1, v)) }
+    // The segment holding file offset `o`; nil inside the head or past the end.
+    func segment(at o: Int64) -> Int? {
+        guard o >= Int64(head.count), o < totalSize, !runs.isEmpty else { return nil }
+        var lo = 0, hi = runs.count - 1
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if segStart[mid] <= o { lo = mid } else { hi = mid - 1 }
         }
-        m.beginFull(type); m.u32(Int64(runs.count))
-        for r in runs { m.u32(r.count); m.u32(r.value) }
-        m.end()
+        return lo
     }
 
-    private func writeChunkTables(_ m: inout BoxBuilder, sizes: [UInt32], chunks: [Chunk]) {
-        // stsc: a new entry only where samples-per-chunk changes.
-        var stsc: [(first: Int64, count: Int)] = []
-        for (i, c) in chunks.enumerated() where stsc.last?.count != c.count {
-            stsc.append((Int64(i + 1), c.count))
+    func range(of seg: Int) -> (start: Int64, end: Int64) {
+        return (segStart[seg], segStart[seg + 1] - 1)
+    }
+
+    // Segment `seg`'s bytes, cut out of the two blobs fetched for it, which begin at
+    // `videoStart` and `audioStart` in their streams. nil if a run falls outside them.
+    func bytes(of seg: Int, video: Data, videoStart: Int64, audio: Data, audioStart: Int64) -> Data? {
+        let r = range(of: seg)
+        var out = Data()
+        out.reserveCapacity(Int(r.end - r.start + 1))
+        for run in runs[seg] {
+            let blob = run.video ? video : audio
+            let from = run.src - (run.video ? videoStart : audioStart)
+            guard from >= 0, from + Int64(run.count) <= Int64(blob.count) else { return nil }
+            let lo = blob.startIndex + Int(from)
+            out.append(blob[lo..<(lo + run.count)])
         }
-        m.beginFull("stsc"); m.u32(Int64(stsc.count))
-        for e in stsc { m.u32(e.first); m.u32(Int64(e.count)); m.u32(1) }
-        m.end()
-        m.beginFull("stsz"); m.u32(0); m.u32(Int64(sizes.count))
-        for s in sizes { m.u32(Int64(s)) }
-        m.end()
-        m.beginFull("stco"); m.u32(Int64(chunks.count))
-        for c in chunks { m.u32(c.offset) }
-        m.end()
+        return Int64(out.count) == r.end - r.start + 1 ? out : nil
+    }
+
+    // Lay the file out from every fragment's samples: `video[i]` is video fragment i, which is
+    // segment i, and `audio` is every audio fragment in turn. nil plus the reason when they
+    // don't make a file AVPlayer could play — the caller then falls back to HLS.
+    static func build(info: HLSStreamInfo, video: [[DASHSample]], audio: [[DASHSample]]) -> (MP4StreamLayout?, String) {
+        guard let vt = HLSTransmuxer.videoTrack(info), let sps0 = vt.sps.first, sps0.count >= 4,
+              !vt.pps.isEmpty, (1...4).contains(vt.nalLengthSize),
+              let dims = spsDimensions(sps0) else { return (nil, "no usable video track") }
+        let at = HLSTransmuxer.audioTrack(info)
+        guard at.freqIndex < aacRates.count else { return (nil, "unsupported AAC rate") }
+        let segs = info.segmentCount
+        guard segs > 0, video.count == segs else { return (nil, "\(video.count) video fragments for \(segs) segments") }
+        let vts = vt.timescale, ats = at.timescale
+        let aAll = audio.flatMap { $0 }
+
+        // Sample tables, as finish() keeps them; chunk offsets count from the mdat payload until
+        // the moov's size is known.
+        var vSizes: [UInt32] = [], vDurs: [Int64] = [], vCts: [Int64] = [], vSync: [Int64] = []
+        var aSizes: [UInt32] = [], aDurs: [Int64] = []
+        var vChunks: [Chunk] = [], aChunks: [Chunk] = []
+        var segStart: [Int64] = []
+        var runs: [[Run]] = []
+        var pos: Int64 = 0
+        // Where the next sample has to start. stts only lists durations, so a gap in either
+        // track could not be described and would slide everything after it.
+        var vNext: Int64?, aNext: Int64?
+        var aFirstDTS: Int64?
+        var minCts = Int64.max, minPTS = Int64.max, maxPTS = Int64.min
+        var aMaxFrame = 0, aBytes: Int64 = 0
+        var ai = 0
+
+        for seg in 0..<segs {
+            let vs = video[seg]
+            guard let firstV = vs.first else { return (nil, "empty video fragment \(seg)") }
+            let (a0, a1) = HLSTransmuxer.audioWindow(info, seg: seg)
+            while ai < aAll.count && aAll[ai].dts < a0 { ai += 1 }   // before the first window, as in HLS
+            var ae = ai
+            while ae < aAll.count && aAll[ae].dts < a1 { ae += 1 }
+            segStart.append(pos)
+            var segRuns: [Run] = []
+            func take(_ s: DASHSample, video: Bool) {
+                if let last = segRuns.last, last.video == video, last.src + Int64(last.count) == s.src {
+                    segRuns[segRuns.count - 1] = Run(video: video, src: last.src, count: last.count + s.size)
+                } else {
+                    segRuns.append(Run(video: video, src: s.src, count: s.size))
+                }
+                pos += Int64(s.size)
+            }
+            var vi = 0, aj = ai
+            var windowEnd = firstV.dts * 90000 / vts + 90000
+            while vi < vs.count || aj < ae {
+                let v0 = vi, vChunkAt = pos
+                while vi < vs.count && vs[vi].dts * 90000 / vts < windowEnd {
+                    let s = vs[vi]
+                    if let n = vNext, s.dts != n { return (nil, "video gap before sample \(vSizes.count + 1)") }
+                    vNext = s.dts + s.duration
+                    vSizes.append(UInt32(s.size))
+                    vDurs.append(s.duration)
+                    vCts.append(s.ctsOffset)
+                    if s.isSync { vSync.append(Int64(vSizes.count)) }
+                    minCts = min(minCts, s.ctsOffset)
+                    minPTS = min(minPTS, s.dts + s.ctsOffset)
+                    maxPTS = max(maxPTS, s.dts + s.ctsOffset)
+                    take(s, video: true)
+                    vi += 1
+                }
+                if vi > v0 { vChunks.append(Chunk(offset: vChunkAt, count: vi - v0)) }
+
+                let aj0 = aj, aChunkAt = pos
+                while aj < ae && aAll[aj].dts * 90000 / ats < windowEnd {
+                    let s = aAll[aj]
+                    if let n = aNext, s.dts != n { return (nil, "audio gap before frame \(aSizes.count + 1)") }
+                    aNext = s.dts + s.duration
+                    if aFirstDTS == nil { aFirstDTS = s.dts }
+                    aSizes.append(UInt32(s.size))
+                    aDurs.append(s.duration)
+                    aMaxFrame = max(aMaxFrame, s.size)
+                    aBytes += Int64(s.size)
+                    take(s, video: false)
+                    aj += 1
+                }
+                if aj > aj0 { aChunks.append(Chunk(offset: aChunkAt, count: aj - aj0)) }
+
+                if vi == v0 && aj == aj0 {
+                    // Nothing in this window — jump to whichever track comes next.
+                    let nextV = vi < vs.count ? vs[vi].dts * 90000 / vts : Int64.max
+                    let nextA = aj < ae ? aAll[aj].dts * 90000 / ats : Int64.max
+                    windowEnd = min(nextV, nextA) + 90000
+                } else {
+                    windowEnd += 90000
+                }
+            }
+            ai = ae
+            runs.append(segRuns)
+        }
+        segStart.append(pos)
+        guard let aStart = aFirstDTS, !vSizes.isEmpty, vSync.first == 1 else {
+            return (nil, "no audio, or the video does not start on a sync sample")
+        }
+
+        // The timeline, as finish() lines it up: video presentation starts at the first displayed
+        // frame, audio's zero is the video's first decode time.
+        let vDTS0 = video[0][0].dts
+        var vMediaDur: Int64 = 0
+        for d in vDurs { vMediaDur += d }
+        let cttsShift = max(0, -minCts)
+        let vMediaTime = minPTS - vDTS0 + cttsShift
+        let vEditDur = (maxPTS + (vDurs.last ?? 0) - minPTS) * movieTimescale / vts
+        var aMediaDur: Int64 = 0
+        for d in aDurs { aMediaDur += d }
+        let lead90 = aStart * 90000 / ats - vDTS0 * 90000 / vts
+        let aEmptyDur = lead90 > 0 ? lead90 * movieTimescale / 90000 : 0
+        let aMediaTime = lead90 < 0 ? -lead90 * ats / 90000 : 0
+        let aEditDur = (aMediaDur - aMediaTime) * movieTimescale / ats
+        let aTotal = aEmptyDur + aEditDur
+        let movieDur = max(vEditDur, aTotal)
+        guard vMediaTime >= 0, vEditDur > 0, aEditDur > 0 else { return (nil, "inconsistent timeline") }
+        let vOffsets = vCts.map { $0 + cttsShift }
+        let anyOffset = vOffsets.contains { $0 != 0 }
+        let rate = aacRates[at.freqIndex]
+        let avgBitrate = aMediaDur > 0 ? aBytes * 8 * ats / aMediaDur : 0
+        let now = Int64(Date().timeIntervalSince1970) + 2_082_844_800   // seconds since 1904
+
+        // The moov, its chunk offsets moved by `base`: where the mdat payload starts in the file.
+        func moov(base: Int64) -> [UInt8] {
+            var m = BoxBuilder()
+            m.begin("moov")
+            m.beginFull("mvhd")
+            m.u32(now); m.u32(now); m.u32(movieTimescale); m.u32(movieDur)
+            m.u32(0x0001_0000); m.u16(0x0100); m.zeros(10)
+            m.identityMatrix()
+            m.zeros(24); m.u32(3)
+            m.end()
+
+            m.begin("trak")
+            writeTkhd(&m, id: 1, duration: vEditDur, audio: false, width: dims.width, height: dims.height, now: now)
+            writeEdts(&m, emptyDur: 0, editDur: vEditDur, mediaTime: vMediaTime)
+            m.begin("mdia")
+            writeMdhd(&m, timescale: vts, duration: vMediaDur, now: now)
+            writeHdlr(&m, type: "vide", name: "VideoHandler")
+            m.begin("minf")
+            m.beginFull("vmhd", flags: 1); m.zeros(8); m.end()
+            writeDinf(&m)
+            m.begin("stbl")
+            m.beginFull("stsd"); m.u32(1)
+            m.begin("avc1")
+            m.zeros(6); m.u16(1); m.zeros(16)
+            m.u16(dims.width); m.u16(dims.height)
+            m.u32(0x0048_0000); m.u32(0x0048_0000); m.u32(0)
+            m.u16(1); m.zeros(32); m.u16(0x0018); m.u16(0xFFFF)
+            m.begin("avcC")   // as finish(): no High-profile extension bytes
+            m.u8(1); m.u8(Int(sps0[1])); m.u8(Int(sps0[2])); m.u8(Int(sps0[3]))
+            m.u8(0xFC | (vt.nalLengthSize - 1))
+            m.u8(0xE0 | vt.sps.count)
+            for s in vt.sps { m.u16(s.count); m.raw(s) }
+            m.u8(vt.pps.count)
+            for p in vt.pps { m.u16(p.count); m.raw(p) }
+            m.end()   // avcC
+            m.end()   // avc1
+            m.end()   // stsd
+            writeRuns(&m, "stts", vDurs)
+            if anyOffset { writeRuns(&m, "ctts", vOffsets) }
+            m.beginFull("stss"); m.u32(Int64(vSync.count))
+            for n in vSync { m.u32(n) }
+            m.end()
+            writeChunkTables(&m, sizes: vSizes, chunks: vChunks.map { Chunk(offset: $0.offset + base, count: $0.count) })
+            m.end(); m.end(); m.end()   // stbl, minf, mdia
+            m.end()   // trak
+
+            m.begin("trak")
+            writeTkhd(&m, id: 2, duration: aTotal, audio: true, width: 0, height: 0, now: now)
+            writeEdts(&m, emptyDur: aEmptyDur, editDur: aEditDur, mediaTime: aMediaTime)
+            m.begin("mdia")
+            writeMdhd(&m, timescale: ats, duration: aMediaDur, now: now)
+            writeHdlr(&m, type: "soun", name: "SoundHandler")
+            m.begin("minf")
+            m.beginFull("smhd"); m.zeros(4); m.end()
+            writeDinf(&m)
+            m.begin("stbl")
+            m.beginFull("stsd"); m.u32(1)
+            m.begin("mp4a")
+            m.zeros(6); m.u16(1); m.zeros(8)
+            m.u16(at.channels == 7 ? 8 : at.channels); m.u16(16); m.u16(0); m.u16(0)
+            m.u32(rate << 16)
+            m.beginFull("esds")
+            m.u8(0x03); m.u8(25); m.u16(0); m.u8(0)                 // ES_Descriptor
+            m.u8(0x04); m.u8(17); m.u8(0x40)                        // DecoderConfig, MPEG-4 audio
+            m.u8(0x15)                                              // streamType 5 << 2 | reserved 1
+            m.u8(aMaxFrame >> 16); m.u8(aMaxFrame >> 8); m.u8(aMaxFrame)
+            m.u32(avgBitrate); m.u32(avgBitrate)
+            m.u8(0x05); m.u8(2)                                     // AudioSpecificConfig
+            m.u8((at.profile + 1) << 3 | at.freqIndex >> 1)
+            m.u8((at.freqIndex & 1) << 7 | at.channels << 3)
+            m.u8(0x06); m.u8(1); m.u8(0x02)                         // SLConfig
+            m.end()   // esds
+            m.end()   // mp4a
+            m.end()   // stsd
+            writeRuns(&m, "stts", aDurs)
+            writeChunkTables(&m, sizes: aSizes, chunks: aChunks.map { Chunk(offset: $0.offset + base, count: $0.count) })
+            m.end(); m.end(); m.end()   // stbl, minf, mdia
+            m.end()   // trak
+            m.end()   // moov
+            return m.bytes
+        }
+
+        var f = BoxBuilder()
+        f.begin("ftyp")
+        f.fourCC("mp42"); f.u32(1)
+        f.fourCC("isom"); f.fourCC("mp41"); f.fourCC("mp42")
+        f.end()
+        // stco entries are fixed-width, so the moov's size does not depend on the offsets in it.
+        let sized = moov(base: 0)
+        let base = Int64(f.bytes.count + sized.count + 8)
+        let placed = moov(base: base)
+        let total = base + pos
+        guard placed.count == sized.count, total <= Int64(UInt32.max) else { return (nil, "file over 4 GB") }
+        let mdatSize = UInt32(8 + pos)
+        var head = f.bytes + placed
+        head += [UInt8(mdatSize >> 24), UInt8((mdatSize >> 16) & 0xFF), UInt8((mdatSize >> 8) & 0xFF),
+                 UInt8(mdatSize & 0xFF), 0x6D, 0x64, 0x61, 0x74]
+        return (MP4StreamLayout(head: Data(head), segStart: segStart.map { $0 + base }, runs: runs), "")
     }
 }
 

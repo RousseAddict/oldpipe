@@ -707,8 +707,9 @@ final class HLSTransmuxer {
         return w.data
     }
 
-    // Segment `seg`'s time window converted to the AUDIO track's timescale.
-    private static func audioWindow(_ info: HLSStreamInfo, seg: Int) -> (Int64, Int64) {
+    // Segment `seg`'s time window converted to the AUDIO track's timescale. Also how
+    // MP4StreamLayout deals audio samples out to segments, so both routes cut alike.
+    static func audioWindow(_ info: HLSStreamInfo, seg: Int) -> (Int64, Int64) {
         guard let vSidx = info.vSidx else { return (0, 0) }   // audio-only never reaches here
         let t0 = vSidx.startTimes[seg]
         let t1 = t0 + vSidx.entries[seg].duration
@@ -716,4 +717,133 @@ final class HLSTransmuxer {
         let a1 = t1 * info.aSidx.timescale / vSidx.timescale
         return (a0, a1)
     }
+}
+
+// MARK: - Fragment heads (the streaming MP4 route, see MP4StreamLayout)
+
+// One DASH sample the way a progressive MP4 needs it: where its bytes sit in the googlevideo
+// file, and its timing in the track's own timescale. No data: only the moof was read.
+struct DASHSample {
+    let src: Int64          // absolute offset in the stream
+    let size: Int
+    let dts: Int64
+    let ctsOffset: Int64
+    let duration: Int64
+    let isSync: Bool
+}
+
+// What the first bytes of one fragment gave.
+enum FragmentHead {
+    case samples([DASHSample])
+    case needs(Int)          // the moof runs past what was read: read this many bytes instead
+    case invalid(String)
+}
+
+extension HLSTransmuxer {
+
+    // Every fragment of one track as (offset, size), in stream order. Each starts with its moof.
+    static func fragments(_ info: HLSStreamInfo, video: Bool) -> [(offset: Int64, size: Int)] {
+        guard let sidx = video ? info.vSidx : info.aSidx else { return [] }
+        return sidx.entries.map { (offset: $0.offset, size: $0.size) }
+    }
+
+    // The samples of the fragment at `offset`, from its first bytes. Strict on purpose: the
+    // samples must fill the rest of the fragment exactly, which also rules out a fragment holding
+    // a second moof this would not see. Anything off sends the caller back to HLS.
+    static func fragmentSamples(head: Data, offset: Int64, size: Int, video: Bool,
+                                info: HLSStreamInfo) -> FragmentHead {
+        guard head.count >= 8, head.fourCC(4) == "moof" else { return .invalid("no moof at \(offset)") }
+        let moofSize = Int(head.be32(0))
+        guard moofSize > 8, moofSize + 8 <= size else { return .invalid("moof size \(moofSize) at \(offset)") }
+        guard head.count >= moofSize else { return .needs(moofSize) }
+        guard let defaults = video ? info.vInit?.defaults : info.aInit.defaults,
+              let moof = mp4Boxes(in: head.sub(0, moofSize)).first,
+              let samples = moofSamples(moof, fragmentOffset: offset, defaults: defaults),
+              let first = samples.first, let last = samples.last
+        else { return .invalid("unreadable moof at \(offset)") }
+        var bytes: Int64 = 0
+        for s in samples { bytes += Int64(s.size) }
+        let end = offset + Int64(size)
+        guard first.src >= offset + Int64(moofSize) + 8, last.src + Int64(last.size) == end,
+              end - first.src == bytes else { return .invalid("samples don't fill the fragment at \(offset)") }
+        return .samples(samples)
+    }
+
+    // What the moov needs to describe the video track: its timescale and the decoder setup.
+    static func videoTrack(_ info: HLSStreamInfo) -> (timescale: Int64, sps: [[UInt8]], pps: [[UInt8]],
+                                                      nalLengthSize: Int)? {
+        guard let v = info.vInit else { return nil }
+        return (v.timescale, v.sps.map { [UInt8]($0) }, v.pps.map { [UInt8]($0) }, v.nalLengthSize)
+    }
+
+    static func audioTrack(_ info: HLSStreamInfo) -> (timescale: Int64, profile: Int, freqIndex: Int,
+                                                      channels: Int) {
+        let a = info.aInit
+        return (a.timescale, a.aacProfile, a.freqIndex, a.channelConfig)
+    }
+}
+
+// parseFragments' trun walk, minus the sample bytes, which aren't there: only the moof was
+// fetched. Offsets come out absolute in the stream (default-base-is-moof, as YouTube writes).
+private func moofSamples(_ moof: MP4Box, fragmentOffset: Int64, defaults: TrexDefaults) -> [DASHSample]? {
+    guard let traf = mp4Boxes(in: moof.payload).first(where: { $0.type == "traf" }) else { return nil }
+    var samples: [DASHSample] = []
+    var baseDecode: Int64 = 0
+    var defaultDur = defaults.duration, defaultSize = defaults.size, defaultFlags = defaults.flags
+    for child in mp4Boxes(in: traf.payload) {
+        let p = child.payload
+        switch child.type {
+        case "tfhd":
+            guard p.count >= 8 else { return nil }
+            let flags = p.be32(0) & 0x00FF_FFFF
+            var o = 8
+            if flags & 0x01 != 0 { return nil }
+            if flags & 0x02 != 0 { o += 4 }
+            if flags & 0x08 != 0 { guard p.count >= o + 4 else { return nil }; defaultDur = p.be32(o); o += 4 }
+            if flags & 0x10 != 0 { guard p.count >= o + 4 else { return nil }; defaultSize = p.be32(o); o += 4 }
+            if flags & 0x20 != 0 { guard p.count >= o + 4 else { return nil }; defaultFlags = p.be32(o); o += 4 }
+        case "tfdt":
+            guard p.count >= 8 else { return nil }
+            if p[p.startIndex] == 1 {
+                guard p.count >= 12 else { return nil }
+                baseDecode = Int64(bitPattern: p.be64(4))
+            } else {
+                baseDecode = Int64(p.be32(4))
+            }
+        case "trun":
+            guard p.count >= 8 else { return nil }
+            let ver = p[p.startIndex]
+            let flags = p.be32(0) & 0x00FF_FFFF
+            let count = Int(p.be32(4))
+            var o = 8
+            var dataOffset: Int64 = 0
+            if flags & 0x001 != 0 { guard p.count >= o + 4 else { return nil }; dataOffset = Int64(Int32(bitPattern: p.be32(o))); o += 4 }
+            var firstSampleFlags: UInt32?
+            if flags & 0x004 != 0 { guard p.count >= o + 4 else { return nil }; firstSampleFlags = p.be32(o); o += 4 }
+            var pos = fragmentOffset + Int64(moof.fileOffset) + dataOffset
+            var dts = baseDecode
+            for i in 0..<count {
+                var dur = Int64(defaultDur)
+                var size = Int(defaultSize)
+                var sflags = defaultFlags
+                var cts: Int64 = 0
+                if flags & 0x100 != 0 { guard p.count >= o + 4 else { return nil }; dur = Int64(p.be32(o)); o += 4 }
+                if flags & 0x200 != 0 { guard p.count >= o + 4 else { return nil }; size = Int(p.be32(o)); o += 4 }
+                if flags & 0x400 != 0 { guard p.count >= o + 4 else { return nil }; sflags = p.be32(o); o += 4 }
+                if flags & 0x800 != 0 {
+                    guard p.count >= o + 4 else { return nil }
+                    cts = ver == 0 ? Int64(p.be32(o)) : Int64(Int32(bitPattern: p.be32(o)))
+                    o += 4
+                }
+                if i == 0, let f = firstSampleFlags { sflags = f }
+                guard size >= 0 else { return nil }
+                samples.append(DASHSample(src: pos, size: size, dts: dts, ctsOffset: cts, duration: dur,
+                                          isSync: (sflags & 0x0001_0000) == 0))
+                pos += Int64(size)
+                dts += dur
+            }
+        default: break
+        }
+    }
+    return samples
 }

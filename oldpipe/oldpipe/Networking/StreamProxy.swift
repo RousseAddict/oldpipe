@@ -145,8 +145,19 @@ private final class HLSSession {
     // The segment AVPlayer asked for most recently, -1 before the first. Only that request
     // may start a read-ahead (see startReadAhead). Guarded by StreamProxy.lock.
     var lastAsked = -1
+    // Experiment: serve the pair as ONE progressive MP4 (mp4URL) instead of a playlist. Same
+    // heads, same segment fetches and read-ahead; only what goes out on the socket differs.
+    let progressive: Bool
+    // The file's layout, taken from layoutCache on the first request (ensureLayout). Guarded
+    // by parseLock.
+    var layout: MP4StreamLayout?
+    // The segment last cut for the file. AVPlayer reads a file in overlapping requests, over
+    // more than one connection, so the next request often wants it again. Guarded by segLock,
+    // which also makes cutting one segment at a time.
+    var held: (seg: Int, bytes: Data)?
+    let segLock = NSLock()
     init(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64,
-         gen: UInt64, localDir: String? = nil, headKey: String? = nil) {
+         gen: UInt64, localDir: String? = nil, headKey: String? = nil, progressive: Bool = false) {
         self.videoURL = videoURL
         self.audioURL = audioURL
         self.videoIndexEnd = videoIndexEnd
@@ -154,6 +165,7 @@ private final class HLSSession {
         self.gen = gen
         self.localDir = localDir
         self.headKey = headKey
+        self.progressive = progressive
     }
 }
 
@@ -198,6 +210,11 @@ final class StreamProxy: NSObject {
     // Parsed heads of the last few stream pairs played, newest last. Same lock as routes.
     private var headCache: [CachedHeads] = []
     private static let headCacheSize = 4
+    // Layouts of the last progressive files prepareMP4 built, by the same key: what decides that
+    // the MP4 route can take over (mp4Readiness), and what reopening the video or a recovery
+    // reload finds again. Same lock as routes. Two, since a long video's moov runs to megabytes.
+    private var layoutCache: [(key: String, layout: MP4StreamLayout)] = []
+    private static let layoutCacheSize = 2
 
     // Return a local http:// URL that proxies to `remote`. Starts the listener on first use.
     // nil only if the socket could not be opened.
@@ -237,6 +254,30 @@ final class StreamProxy: NSObject {
                                      gen: currentGen, headKey: key)
         lock.unlock()
         return URL(string: "http://127.0.0.1:\(port)/hls/\(id)/index.m3u8")
+    }
+
+    // Experiment: the same pair as hlsURL, served as ONE progressive MP4 (see MP4StreamLayout),
+    // which iOS 5/6 will play at other speeds than 1.0. Only once mp4Readiness says .ready: the
+    // file's layout has to exist before AVPlayer's first request. Generation rules as hlsURL.
+    func mp4URL(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) -> URL? {
+        guard videoIndexEnd > 0, audioIndexEnd > 0, start() else { return nil }
+        let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd)
+        lock.lock()
+        routeSeq += 1
+        currentGen += 1
+        dropReadAheadLocked()
+        // Only the newest progressive session is read again. An older one would hold its layout
+        // and last segment for the life of the process; a connection still serving it keeps its
+        // own reference until it ends.
+        hlsSessions = hlsSessions.filter { !$0.value.progressive }
+        let id = "\(routeSeq)"
+        hlsSessions[id] = HLSSession(videoURL: videoURL, audioURL: audioURL,
+                                     videoIndexEnd: videoIndexEnd, audioIndexEnd: audioIndexEnd,
+                                     gen: currentGen, headKey: key, progressive: true)
+        let gen = currentGen
+        lock.unlock()
+        DebugLog.log("StreamProxy", "mp4URL id=\(id) gen=\(gen)")
+        return URL(string: "http://127.0.0.1:\(port)/mp4/\(id)/video.mp4")
     }
 
     // Serve a DOWNLOADED HLS bundle (downloads/<id>/) back to AVPlayer. Offline playback still
@@ -473,6 +514,24 @@ final class StreamProxy: NSObject {
             return
         }
 
+        // Progressive MP4 of a DASH pair: "mp4/<id>/video.mp4", read by byte range.
+        if token.hasPrefix("mp4/") {
+            let comps = token.components(separatedBy: "/")
+            lock.lock()
+            let session = comps.count == 3 ? hlsSessions[comps[1]] : nil
+            lock.unlock()
+            guard let session = session, session.progressive else {
+                StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
+                return
+            }
+            var rangeHeader: String?
+            for line in lines.dropFirst() where line.lowercased().hasPrefix("range:") {
+                rangeHeader = line
+            }
+            serveMP4(session, rangeHeader: rangeHeader, headOnly: parts[0] == "HEAD", clientFd: clientFd)
+            return
+        }
+
         lock.lock(); let route = routes[token]; lock.unlock()
         guard let route = route else {
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
@@ -537,6 +596,21 @@ final class StreamProxy: NSObject {
     // TLS handshake, 1-3 s on an iPhone 4S. A request for any other segment (a seek) drops the
     // read-ahead without waiting for it.
     private func makeSegment(_ session: HLSSession, info: HLSStreamInfo, seg: Int, gen: UInt64) -> Data? {
+        guard let got = fetchSegment(session, info: info, seg: seg, gen: gen, label: "hls") else { return nil }
+        let mux0 = Date()
+        let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: got.v, audioBlob: got.a)
+        let muxMs = Int(Date().timeIntervalSince(mux0) * 1000)
+        // wait = how long AVPlayer waited for the bytes, ~0 when the read-ahead was in time.
+        DebugLog.log("StreamProxy", "hls seg \(seg)/\(info.segmentCount) \(got.wasAhead ? "ahead" : "inline") "
+            + "wait=\(got.waitMs)ms \(got.timings) mux=\(muxMs)ms \((ts?.count ?? 0) / 1024)KB")
+        return ts
+    }
+
+    // Segment `seg`'s two fetches, taken from the read-ahead when it has them, and the read-ahead
+    // of the next one started. Shared by the HLS and progressive routes; `label` names the route
+    // in the log. `timings` reads "(v <ms>, a <ms>)", with any fresh TLS handshake called out.
+    private func fetchSegment(_ session: HLSSession, info: HLSStreamInfo, seg: Int, gen: UInt64,
+                              label: String) -> (v: Data, a: Data, wasAhead: Bool, waitMs: Int, timings: String)? {
         guard let vr = HLSTransmuxer.videoRange(info, seg: seg),
               let ar = HLSTransmuxer.audioRange(info, seg: seg) else { return nil }
         let wait0 = Date()
@@ -552,7 +626,7 @@ final class StreamProxy: NSObject {
                 slot = a
             } else {
                 a.abandon()
-                DebugLog.log("StreamProxy", "hls seg \(seg) asked, read-ahead had seg \(a.seg) — dropped")
+                DebugLog.log("StreamProxy", "\(label) seg \(seg) asked, read-ahead had seg \(a.seg) — dropped")
             }
         }
         var got: (v: Data?, a: Data?) = (nil, nil)
@@ -569,23 +643,320 @@ final class StreamProxy: NSObject {
         }
         let waitMs = Int(Date().timeIntervalSince(wait0) * 1000)
         guard let v = got.v, let a = got.a, let done = slot else {
-            DebugLog.log("StreamProxy", "hls seg \(seg)/\(info.segmentCount) FETCH FAILED after \(waitMs)ms"
+            DebugLog.log("StreamProxy", "\(label) seg \(seg)/\(info.segmentCount) FETCH FAILED after \(waitMs)ms"
                 + (isSuperseded(gen) ? " (superseded)" : ""))
             return nil
         }
 
         startReadAhead(session, info: info, after: seg, gen: gen)
 
-        let mux0 = Date()
-        let ts = HLSTransmuxer.muxSegment(info, seg: seg, videoBlob: v, audioBlob: a)
-        let muxMs = Int(Date().timeIntervalSince(mux0) * 1000)
-        // wait = how long AVPlayer waited for the bytes, ~0 when the read-ahead was in time.
         let vt = done.vTiming, at = done.aTiming
-        DebugLog.log("StreamProxy", "hls seg \(seg)/\(info.segmentCount) \(wasAhead ? "ahead" : "inline") "
-            + "wait=\(waitMs)ms (v \(vt.ms)ms\(vt.reusedConnection ? "" : " FRESH tls \(vt.tlsMs)ms"), "
-            + "a \(at.ms)ms\(at.reusedConnection ? "" : " FRESH tls \(at.tlsMs)ms")) "
-            + "mux=\(muxMs)ms \((ts?.count ?? 0) / 1024)KB")
-        return ts
+        let timings = "(v \(vt.ms)ms\(vt.reusedConnection ? "" : " FRESH tls \(vt.tlsMs)ms"), "
+            + "a \(at.ms)ms\(at.reusedConnection ? "" : " FRESH tls \(at.tlsMs)ms"))"
+        return (v, a, wasAhead, waitMs, timings)
+    }
+
+    // MARK: - Progressive MP4 serving (experiment)
+
+    // Answer one byte-range request on a progressive session's file. The layout was built in the
+    // background (prepareMP4) before the player was pointed here; the head is served from
+    // memory, everything after it segment by segment, each the HLS route's two fetches cut into
+    // the layout's order. Blocking sends pace the fetching to AVPlayer, which closes the socket
+    // when it has read enough or seeks.
+    private func serveMP4(_ session: HLSSession, rangeHeader: String?, headOnly: Bool, clientFd: Int32) {
+        lock.lock(); let gen = session.gen; lock.unlock()
+        guard let info = ensureParsed(session, gen: gen),
+              let layout = ensureLayout(session) else {
+            StreamProxy.sendAll(clientFd, Array("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        let total = layout.totalSize
+        guard let asked = StreamProxy.parseByteRange(rangeHeader), asked.start < total else {
+            StreamProxy.sendAll(clientFd, Array(("HTTP/1.1 416 Range Not Satisfiable\r\n"
+                + "Content-Range: bytes */\(total)\r\nConnection: close\r\n\r\n").utf8))
+            return
+        }
+        let end = min(asked.end ?? total - 1, total - 1)
+        var head = rangeHeader == nil ? "HTTP/1.1 200 OK\r\n" : "HTTP/1.1 206 Partial Content\r\n"
+        head += "Content-Type: video/mp4\r\nAccept-Ranges: bytes\r\n"
+        if rangeHeader != nil { head += "Content-Range: bytes \(asked.start)-\(end)/\(total)\r\n" }
+        head += "Content-Length: \(end - asked.start + 1)\r\nConnection: close\r\n\r\n"
+        guard StreamProxy.sendAll(clientFd, Array(head.utf8)), !headOnly else { return }
+
+        var pos = asked.start
+        let headLen = Int64(layout.head.count)
+        if pos < headLen {
+            let upto = min(headLen, end + 1)
+            guard StreamProxy.sendSlice(clientFd, layout.head, from: Int(pos), to: Int(upto)) else { return }
+            pos = upto
+        }
+        while pos <= end {
+            guard let seg = layout.segment(at: pos),
+                  let bytes = mp4Segment(session, info: info, layout: layout, seg: seg, gen: gen) else { return }
+            let r = layout.range(of: seg)
+            let upto = min(r.end, end) + 1
+            guard StreamProxy.sendSlice(clientFd, bytes, from: Int(pos - r.start), to: Int(upto - r.start)) else { return }
+            pos = upto
+        }
+    }
+
+    // One segment of the file: fetched like an HLS segment, then cut instead of muxed. One at a
+    // time per session (segLock), and the last one kept for the next request that wants it.
+    private func mp4Segment(_ session: HLSSession, info: HLSStreamInfo, layout: MP4StreamLayout,
+                            seg: Int, gen: UInt64) -> Data? {
+        session.segLock.lock()
+        defer { session.segLock.unlock() }
+        if let held = session.held, held.seg == seg { return held.bytes }
+        guard let vr = HLSTransmuxer.videoRange(info, seg: seg),
+              let ar = HLSTransmuxer.audioRange(info, seg: seg),
+              let got = fetchSegment(session, info: info, seg: seg, gen: gen, label: "mp4") else { return nil }
+        let bytes = layout.bytes(of: seg, video: got.v, videoStart: vr.start, audio: got.a, audioStart: ar.start)
+        DebugLog.log("StreamProxy", "mp4 seg \(seg)/\(info.segmentCount) \(got.wasAhead ? "ahead" : "inline") "
+            + "wait=\(got.waitMs)ms \(got.timings) \((bytes?.count ?? 0) / 1024)KB"
+            + (bytes == nil ? " CUT FAILED" : ""))
+        if let b = bytes { session.held = (seg: seg, bytes: b) } else { session.held = nil }
+        return bytes
+    }
+
+    // The file's layout, which must already exist: built in the background by prepareMP4, the
+    // only way to get one. Nothing is read here — AVPlayer allows its first request ~10 s and
+    // blocks the main thread meanwhile, and reading a cold hour of moofs takes a minute. The
+    // first device try built it right here and AVPlayer gave up 128 moofs in.
+    private func ensureLayout(_ session: HLSSession) -> MP4StreamLayout? {
+        session.parseLock.lock()
+        defer { session.parseLock.unlock() }
+        if let layout = session.layout { return layout }
+        guard let key = session.headKey else { return nil }
+        lock.lock()
+        let hit = layoutCache.first(where: { $0.key == key })?.layout
+        lock.unlock()
+        session.layout = hit
+        DebugLog.log("StreamProxy", hit.map { "mp4 layout ready (\($0.totalSize / 1_048_576)MB)" }
+                                        ?? "mp4 layout NOT READY — refusing the request")
+        return hit
+    }
+
+    // MARK: - Reading the moofs in the background (experiment)
+
+    // One pair's moofs, read while it plays as HLS, so the MP4 route can take over at once when a
+    // speed is picked (mp4Readiness). A cold googlevideo range costs 75-140 ms (measured
+    // 2026-11-19: the edge pulls it from deeper storage first; read again it costs 1-4 ms), so a
+    // 1-hour video takes about a minute even read three requests at a time.
+    //
+    // Resumable: whatever was read survives an interruption (a stream change aborts the reads,
+    // like any other transfer of the old generation), and the next prepareMP4 for the same pair
+    // reads only what is missing.
+    private final class MP4Prep {
+        let key: String
+        let videoURL: String, audioURL: String
+        let videoIndexEnd: Int64, audioIndexEnd: Int64
+        var gen: UInt64
+        var info: HLSStreamInfo?
+        var video: [[DASHSample]?] = []
+        var audio: [[DASHSample]?] = []
+        // Batches not read yet: which fragments of which track, and how much of each.
+        var pending: [(video: Bool, items: [(frag: Int, count: Int)])] = []
+        var workers = 0
+        var failed: String?
+        var requests = 0, bytes = 0
+        var started = Date()
+        init(key: String, videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64, gen: UInt64) {
+            self.key = key
+            self.videoURL = videoURL
+            self.audioURL = audioURL
+            self.videoIndexEnd = videoIndexEnd
+            self.audioIndexEnd = audioIndexEnd
+            self.gen = gen
+        }
+        var total: Int { return video.count + audio.count }
+        var done: Int { return video.filter { $0 != nil }.count + audio.filter { $0 != nil }.count }
+    }
+    private var prep: MP4Prep?   // the latest pair asked for; guarded by lock
+
+    // Three requests in flight: a cold read waits on Google's storage, not on the link, so
+    // parallel ones overlap their waits (3 connections ~1.9x faster than 1, measured).
+    private static let prepQueues = [AppQueue(label: "com.oldpipe.proxy.mp4prep.0"),
+                                     AppQueue(label: "com.oldpipe.proxy.mp4prep.1"),
+                                     AppQueue(label: "com.oldpipe.proxy.mp4prep.2")]
+    // googlevideo answers up to 48 ranges in one request and refuses 64 (2026-11-19). Cold,
+    // 32 per request cost about half what 8 did per moof.
+    private static let rangesPerRequest = 32
+    // What is first read of each fragment. A 1080p30 moof measured 0.5-2.6 KB and an audio one
+    // up to 1.8 KB; a longer one is read again whole.
+    private static let moofProbeBytes = 4096
+
+    enum MP4Readiness {
+        case ready
+        case preparing(Int)   // percent of the moofs read
+        case unavailable      // the urls name no file to key a layout by, or it cannot be built
+
+        var isReady: Bool {
+            if case .ready = self { return true }
+            return false
+        }
+    }
+
+    func mp4Readiness(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) -> MP4Readiness {
+        guard let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd) else { return .unavailable }
+        lock.lock()
+        defer { lock.unlock() }
+        if layoutCache.contains(where: { $0.key == key }) { return .ready }
+        guard let p = prep, p.key == key else { return .preparing(0) }
+        if p.failed != nil { return .unavailable }
+        return .preparing(p.total > 0 ? p.done * 100 / p.total : 0)
+    }
+
+    // Start (or resume) reading this pair's moofs in the background. Call once its HLS stream
+    // plays, so its heads are in headCache already; again whenever mp4Readiness is not ready
+    // and nothing may be reading (a stream change stopped it). A no-op when ready or running.
+    func prepareMP4(videoURL: String, audioURL: String, videoIndexEnd: Int64, audioIndexEnd: Int64) {
+        guard let key = StreamProxy.pairKey(videoURL, videoIndexEnd, audioURL, audioIndexEnd) else { return }
+        lock.lock()
+        if layoutCache.contains(where: { $0.key == key }) { lock.unlock(); return }
+        let p: MP4Prep
+        if let cur = prep, cur.key == key, cur.failed == nil {
+            p = cur
+        } else {
+            p = MP4Prep(key: key, videoURL: videoURL, audioURL: audioURL,
+                        videoIndexEnd: videoIndexEnd, audioIndexEnd: audioIndexEnd, gen: currentGen)
+            prep = p
+        }
+        p.gen = currentGen
+        guard p.workers == 0 else { lock.unlock(); return }
+        p.workers = StreamProxy.prepQueues.count
+        p.started = Date()
+        lock.unlock()
+        DebugLog.log("StreamProxy", "mp4 prep \(p.total == 0 ? "start" : "resume at \(p.done)/\(p.total)")")
+        StreamProxy.prepQueues[0].async { StreamProxy.shared.prepFirst(p) }
+    }
+
+    // On the first queue: the heads (from headCache when the HLS stream already read them) and
+    // the batch list, then the other readers are let go.
+    private func prepFirst(_ p: MP4Prep) {
+        if p.info == nil {
+            lock.lock(); let gen = p.gen; lock.unlock()
+            let s = HLSSession(videoURL: p.videoURL, audioURL: p.audioURL, videoIndexEnd: p.videoIndexEnd,
+                               audioIndexEnd: p.audioIndexEnd, gen: gen, headKey: p.key)
+            guard let info = ensureParsed(s, gen: gen) else {
+                lock.lock(); p.workers = 0; lock.unlock()
+                DebugLog.log("StreamProxy", "mp4 prep stopped: heads unavailable" + (isSuperseded(gen) ? " (superseded)" : ""))
+                return
+            }
+            var batches: [(video: Bool, items: [(frag: Int, count: Int)])] = []
+            for video in [true, false] {
+                let frags = HLSTransmuxer.fragments(info, video: video)
+                var k = 0
+                while k < frags.count {
+                    let upto = min(k + StreamProxy.rangesPerRequest, frags.count)
+                    batches.append((video, (k..<upto).map { (frag: $0, count: min(StreamProxy.moofProbeBytes, frags[$0].size)) }))
+                    k = upto
+                }
+            }
+            lock.lock()
+            p.info = info
+            p.video = [[DASHSample]?](repeating: nil, count: HLSTransmuxer.fragments(info, video: true).count)
+            p.audio = [[DASHSample]?](repeating: nil, count: HLSTransmuxer.fragments(info, video: false).count)
+            // Video and audio batches alternated, so the readers never all queue on one file.
+            var v = batches.filter { $0.video }, a = batches.filter { !$0.video }
+            while !v.isEmpty || !a.isEmpty {
+                if !v.isEmpty { p.pending.append(v.removeFirst()) }
+                if !a.isEmpty { p.pending.append(a.removeFirst()) }
+            }
+            lock.unlock()
+        }
+        for q in StreamProxy.prepQueues.dropFirst() { q.async { StreamProxy.shared.prepRead(p) } }
+        prepRead(p)
+    }
+
+    // One reader: batches off the shared list until it is empty or the stream moves on. The
+    // last reader to finish lays the file out.
+    private func prepRead(_ p: MP4Prep) {
+        while true {
+            lock.lock()
+            let gen = p.gen
+            guard let info = p.info, p.failed == nil, gen >= currentGen, !p.pending.isEmpty else { break }
+            let batch = p.pending.removeFirst()
+            lock.unlock()
+
+            let frags = HLSTransmuxer.fragments(info, video: batch.video)
+            let ranges = batch.items.map { (start: frags[$0.frag].offset, end: frags[$0.frag].offset + Int64($0.count) - 1) }
+            let parts = CurlFetcher.multiRangeFetch(url: batch.video ? p.videoURL : p.audioURL, ranges: ranges,
+                                                    pausesFeed: false,
+                                                    shouldAbort: { StreamProxy.shared.isSuperseded(gen) })
+            var read: [(frag: Int, samples: [DASHSample])] = []
+            var again: [(frag: Int, count: Int)] = []
+            var failure: String?
+            if let parts = parts {
+                for (part, item) in zip(parts, batch.items) {
+                    let f = frags[item.frag]
+                    switch HLSTransmuxer.fragmentSamples(head: part, offset: f.offset, size: f.size,
+                                                         video: batch.video, info: info) {
+                    case .samples(let s): read.append((item.frag, s))
+                    case .needs(let n) where n > item.count: again.append((item.frag, n))
+                    case .needs: failure = "moof still short at fragment \(item.frag)"
+                    case .invalid(let why): failure = why
+                    }
+                }
+            }
+            lock.lock()
+            if parts == nil {
+                // Put back for the resume: superseded, or a network error a later prepareMP4 retries.
+                p.pending.insert(batch, at: 0)
+                lock.unlock()
+                DebugLog.log("StreamProxy", "mp4 prep \(batch.video ? "video" : "audio") batch FETCH FAILED"
+                    + (isSuperseded(gen) ? " (superseded)" : ""))
+                lock.lock()
+                break
+            }
+            p.requests += 1
+            for part in parts ?? [] { p.bytes += part.count }
+            for r in read {
+                if batch.video { p.video[r.frag] = r.samples } else { p.audio[r.frag] = r.samples }
+            }
+            if !again.isEmpty { p.pending.append((batch.video, again)) }
+            if let f = failure { p.failed = f }
+            lock.unlock()
+            if let f = failure { DebugLog.log("StreamProxy", "mp4 prep FAILED: \(f)") }
+        }
+        // Still holding lock here.
+        p.workers -= 1
+        let last = p.workers == 0
+        let complete = p.info != nil && p.failed == nil && p.pending.isEmpty && p.done == p.total
+        lock.unlock()
+        guard last, complete, let info = p.info else {
+            if last { DebugLog.log("StreamProxy", "mp4 prep paused at \(p.done)/\(p.total) moofs") }
+            return
+        }
+        let readMs = Int(Date().timeIntervalSince(p.started) * 1000)
+        let t0 = Date()
+        let (built, why) = MP4StreamLayout.build(info: info, video: p.video.map { $0 ?? [] },
+                                                 audio: p.audio.map { $0 ?? [] })
+        let buildMs = Int(Date().timeIntervalSince(t0) * 1000)
+        lock.lock()
+        if let layout = built {
+            layoutCache.removeAll { $0.key == p.key }
+            layoutCache.append((key: p.key, layout: layout))
+            if layoutCache.count > StreamProxy.layoutCacheSize { layoutCache.removeFirst() }
+            if prep === p { prep = nil }   // done: the moof tables are not needed any more
+        } else {
+            p.failed = why
+        }
+        lock.unlock()
+        if let layout = built {
+            DebugLog.log("StreamProxy", "mp4 prep READY: \(p.video.count) video + \(p.audio.count) audio moofs in "
+                + "\(p.requests) requests, \(p.bytes / 1024)KB, read \(readMs)ms (this run), laid out in \(buildMs)ms; "
+                + "moov+head \(layout.head.count / 1024)KB, file \(layout.totalSize / 1_048_576)MB")
+        } else {
+            DebugLog.log("StreamProxy", "mp4 prep layout FAILED: \(why)")
+        }
+    }
+
+    // What names a pair's files across fresh urls (see headKey); nil if either url doesn't say.
+    private static func pairKey(_ videoURL: String, _ videoIndexEnd: Int64,
+                                _ audioURL: String, _ audioIndexEnd: Int64) -> String? {
+        guard let v = headKey(videoURL, indexEnd: videoIndexEnd),
+              let a = headKey(audioURL, indexEnd: audioIndexEnd) else { return nil }
+        return v + "+" + a
     }
 
     // Start fetching the segment after `asked`, for when AVPlayer asks for it. Not if the stream
@@ -814,6 +1185,15 @@ final class StreamProxy: NSObject {
     @discardableResult
     static func sendAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
         return bytes.withUnsafeBufferPointer { sendAll(fd, $0.baseAddress!, $0.count) }
+    }
+
+    // Bytes from..<to of `d`.
+    static func sendSlice(_ fd: Int32, _ d: Data, from: Int, to: Int) -> Bool {
+        guard from >= 0, to <= d.count, from < to else { return from == to }
+        return d.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return sendAll(fd, base.assumingMemoryBound(to: UInt8.self) + from, to - from)
+        }
     }
 
     @discardableResult

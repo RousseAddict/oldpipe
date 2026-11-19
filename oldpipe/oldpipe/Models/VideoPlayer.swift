@@ -446,7 +446,25 @@ class VideoPlayer {
     var canBoost: Bool {
         guard isReady, wantsPlayback, isPlaying, !recovering, !isBoosting,
               playbackRate < VideoPlayer.boostRate else { return false }
-        return !(lastLoadWasHLS && VideoPlayer.osMajor < 7)
+        return !speedNeedsMP4
+    }
+
+    // Experiment (exp/hd-speed-mp4): the item refuses every speed but 1.0 because it is HLS on
+    // iOS 5/6, so speed means moving the stream to the MP4 route (VideoPlayerVC.speedViaMP4).
+    var speedNeedsMP4: Bool { return lastLoadWasHLS && VideoPlayer.osMajor < 7 }
+
+    // Experiment: a speed pick, or a hold, meant for the item about to replace this one, which
+    // would refuse it. Called right before that load, on the same run-loop turn: load() stops
+    // reconcileRate from judging the old item against it, and every start reads effectiveRate.
+    // The position is saved first, which is where the next load resumes.
+    func carrySpeedIntoReload(rate: Float?, boost: Bool) {
+        saveResume()
+        if let r = rate { playbackRate = r }
+        if boost {
+            isBoosting = true
+            rateZeroTicks = 0
+        }
+        DebugLog.log("VideoPlayer", "speed carried into the reload: rate \(playbackRate), boost \(isBoosting)")
     }
 
     @discardableResult
