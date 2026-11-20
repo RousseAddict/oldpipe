@@ -22,13 +22,14 @@ import AVFoundation
 // play/pause acting on the TV, and close stopping the cast. The phone's own player is stopped
 // in cast mode, so there is never a local video competing for the bar.
 //
-// iPad: a 106x60 picture is tiny on that screen, so the video can float as a 320x180 card in
-// the bottom-right corner, just above the bar. A toggle on the bar moves it between the bar
-// and the card, and the choice is remembered (floating by default). Only the video slot moves
-// — the same view, carrying the one layer — so the three rules above do not change. The card
+// iPad: a 106x60 picture is tiny on that screen, so the video can float as a 320x180 card,
+// bottom-right above the bar to begin with. A toggle on the bar moves it between the bar and
+// the card, and the choice is remembered (floating by default). Only the video slot moves —
+// the same view, carrying the one layer — so the three rules above do not change. The card
 // shows and hides with the bar, and is not used when there is no picture to enlarge (an
-// audio-only download, a cast): those stay in the bar as on the iPhone. Bottom-right, because
-// the side menu opens from the left. The iPhone never builds any of it.
+// audio-only download, a cast): those stay in the bar as on the iPhone. The card can be
+// dragged: let go, it sticks to the nearer side at that height (remembered); dropped onto the
+// bar, the video goes back into it. The iPhone never builds any of it.
 
 class MiniPlayerBar: UIView {
 
@@ -37,9 +38,18 @@ class MiniPlayerBar: UIView {
     // Read once: on an iPhone the toggle and the card are never created.
     static let canFloat = UIDevice.current.userInterfaceIdiom == .pad
     private static let cardSize = CGSize(width: 320, height: 180)
-    private static let cardMargin: CGFloat = 12          // from the screen's right edge and the bar
+    private static let cardMargin: CGFloat = 12          // from the screen's side edge and the bar
     // "1" = floating, "0" = in the bar; absent = floating, the default.
     private static let floatKey = "miniplayer_floating"
+    // Where the card rests: "L" / "R" (absent = right), and its height as a fraction of the band
+    // it may use, "0" just under the nav bar to "1" just above this bar (absent = 1). A fraction
+    // rather than points, so a rotation keeps it in proportion.
+    private static let sideKey = "miniplayer_card_side"
+    private static let heightKey = "miniplayer_card_y"
+    private static let navBottom: CGFloat = 64           // status bar + nav bar: never covered
+    private static let flickSpeed: CGFloat = 500          // pt/s sideways that picks the side
+    private static let cardBorder = UIColor(white: 1, alpha: 0.2).cgColor
+    private static let liftedBorder = UIColor(white: 1, alpha: 0.6).cgColor
 
     // Posted by a page that just changed whether it shows its video: poll now.
     static let refreshNotification = Notification.Name("oldpipe.miniPlayerBar.refresh")
@@ -72,11 +82,19 @@ class MiniPlayerBar: UIView {
     private var floatBtn: UIButton?
     private var card: UIView?
     private var cardThumb: AsyncImageView?
-    private var cardOpenBtn: UIButton?
+    private var cardTouch: CardTouchView?
     private var floating = MiniPlayerBar.canFloat
         && UserDefaults.standard.string(forKey: MiniPlayerBar.floatKey) != "0"
     private var slotInCard = false      // where the video slot is right now
     private var moving = false          // the slot is on its way between the bar and the card
+    private var cardOnLeft = UserDefaults.standard.string(forKey: MiniPlayerBar.sideKey) == "L"
+    private var cardHeight: CGFloat = {
+        guard let s = UserDefaults.standard.string(forKey: MiniPlayerBar.heightKey),
+              let v = Double(s) else { return 1 }
+        return CGFloat(max(0, min(1, v)))
+    }()
+    private var draggingCard = false
+    private var dragOrigin = CGPoint.zero   // the card's centre when the drag began
 
     // The card shows and hides with the bar, whoever hides it.
     override var isHidden: Bool {
@@ -201,6 +219,8 @@ class MiniPlayerBar: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         layoutBar()
+        // A rotation resizes the bar; the card keeps its side and relative height.
+        if let c = card, !draggingCard, !moving { c.frame = cardRestFrame() }
     }
     #endif
 
@@ -290,7 +310,8 @@ class MiniPlayerBar: UIView {
     // Puts the video slot where it belongs: in the card when floating a picture, else in the
     // bar. Called when the shown content changes and from the toggle — not on every tick.
     private func placeVideo(animated: Bool = false) {
-        guard let toggle = floatBtn, !moving else { return }   // iPhone: always in the bar
+        // iPhone: always in the bar. Mid-trip or mid-drag: the end of either calls back here.
+        guard let toggle = floatBtn, !moving, !draggingCard else { return }
         let hasPicture = !shownIsAudio && !shownCast
         if toggle.isHidden == hasPicture {
             toggle.isHidden = !hasPicture
@@ -300,6 +321,8 @@ class MiniPlayerBar: UIView {
         guard inCard != slotInCard, let host = superview,
               let card = inCard ? buildCardIfNeeded() : self.card else { return }
         slotInCard = inCard
+        // Where it rests now: a card last dropped onto the bar was left there, hidden.
+        if inCard { card.frame = cardRestFrame() }
         let target: UIView = inCard ? card : self
         let targetFrame = inCard ? card.bounds : thumbView.frame
 
@@ -346,8 +369,8 @@ class MiniPlayerBar: UIView {
         CATransaction.setDisableActions(true)
         if container === self {
             insertSubview(videoSlot, aboveSubview: thumbView)
-        } else if container === card, let open = cardOpenBtn {
-            container.insertSubview(videoSlot, belowSubview: open)
+        } else if container === card, let touch = cardTouch {
+            container.insertSubview(videoSlot, belowSubview: touch)
         } else {
             container.addSubview(videoSlot)
         }
@@ -368,20 +391,17 @@ class MiniPlayerBar: UIView {
         if card.isHidden == show { card.isHidden = !show }
     }
 
-    // Bottom-right, cardMargin from the screen edge and above the bar. Square corners and no
-    // shadow on purpose: a rounded clip over a playing video is an off-screen pass every frame.
+    // Square corners and no shadow on purpose: a rounded clip over a playing video is an
+    // off-screen pass every frame. No autoresizing: on a rotation layoutSubviews re-pins it from
+    // its side and relative height, which a margin mask could only do for one side.
     private func buildCardIfNeeded() -> UIView? {
         if let c = card { return c }
         guard let host = superview else { return nil }
-        let s = MiniPlayerBar.cardSize, m = MiniPlayerBar.cardMargin
-        let c = UIView(frame: CGRect(x: frame.maxX - m - s.width, y: frame.minY - m - s.height,
-                                     width: s.width, height: s.height))
+        let c = UIView(frame: cardRestFrame())
         c.backgroundColor = UIColor(white: 0.2, alpha: 1)
         c.clipsToBounds = true
-        c.layer.borderColor = UIColor(white: 1, alpha: 0.2).cgColor
+        c.layer.borderColor = MiniPlayerBar.cardBorder
         c.layer.borderWidth = 1
-        // Stays in the corner when the iPad rotates (iOS 8; the older builds never rotate).
-        c.autoresizingMask = [.flexibleLeftMargin, .flexibleTopMargin]
         c.isHidden = true
 
         let thumb = AsyncImageView(frame: c.bounds)
@@ -389,26 +409,107 @@ class MiniPlayerBar: UIView {
         thumb.clipsToBounds = true
         c.addSubview(thumb)
 
-        // Tapping the card opens the video, like the bar's title (a button, not a recognizer).
-        let open = UIButton(type: .custom)
-        open.frame = c.bounds
-        open.backgroundColor = .clear
-        open.addTarget(self, action: #selector(openTapped), for: .touchUpInside)
-        c.addSubview(open)
+        // The whole card: a tap opens the video, like the bar's title; a drag moves the card.
+        let touch = CardTouchView(frame: c.bounds)
+        touch.backgroundColor = .clear
+        touch.canDrag = { [weak self] in self.map { !$0.moving && $0.slotInCard && !$0.isHidden } ?? false }
+        touch.onTap = { [weak self] in self?.openTapped() }
+        touch.onDragBegan = { [weak self] in self?.cardDragBegan() }
+        touch.onDragMoved = { [weak self] travel in self?.cardDragMoved(travel) }
+        touch.onDragEnded = { [weak self] velocity, cancelled in self?.cardDragEnded(velocity, cancelled: cancelled) }
+        c.addSubview(touch)
 
         host.insertSubview(c, belowSubview: self)
         card = c
         cardThumb = thumb
-        cardOpenBtn = open
+        cardTouch = touch
         if !shownThumbURL.isEmpty { thumb.load(url: shownThumbURL) }
         return c
     }
 
+    // The band the card may rest in: just under the nav bar to just above this bar.
+    private func cardBand() -> (top: CGFloat, bottom: CGFloat) {
+        let top = MiniPlayerBar.navBottom + MiniPlayerBar.cardMargin
+        let bottom = frame.minY - MiniPlayerBar.cardMargin - MiniPlayerBar.cardSize.height
+        return (top, max(top, bottom))
+    }
+
+    // Against its side, at its height in the band. The bar spans the window, so its frame gives
+    // the screen's width in the card's coordinates.
+    private func cardRestFrame() -> CGRect {
+        let s = MiniPlayerBar.cardSize, m = MiniPlayerBar.cardMargin
+        let band = cardBand()
+        let x = cardOnLeft ? frame.minX + m : frame.maxX - m - s.width
+        let y = band.top + (band.bottom - band.top) * cardHeight
+        return CGRect(x: x, y: floor(y), width: s.width, height: s.height)
+    }
+
+    // MARK: Dragging the card
+
+    // Dropped with at least half the bar covered: the video goes back into the bar.
+    private func cardOverBar(_ c: UIView) -> Bool {
+        return c.frame.maxY >= frame.minY + MiniPlayerBar.barHeight / 2
+    }
+
+    private func cardDragBegan() {
+        guard let c = card else { return }
+        draggingCard = true
+        dragOrigin = c.center
+        c.layer.borderColor = MiniPlayerBar.liftedBorder
+    }
+
+    // Follows the finger, kept wholly on screen. Over the bar the border turns the accent colour:
+    // letting go there docks the video. Only the card's position changes — the video inside is
+    // neither resized nor moved to another layer.
+    private func cardDragMoved(_ travel: CGPoint) {
+        guard let c = card, let host = superview, !isHidden else { return }
+        let hw = c.bounds.width / 2, hh = c.bounds.height / 2
+        c.center = CGPoint(x: min(max(dragOrigin.x + travel.x, hw), host.bounds.width - hw),
+                           y: min(max(dragOrigin.y + travel.y, hh), host.bounds.height - hh))
+        c.layer.borderColor = cardOverBar(c) ? Theme.accent.cgColor : MiniPlayerBar.liftedBorder
+    }
+
+    // Onto the bar: dock, as the toggle does. Anywhere else: glide to the nearer side (or the
+    // side flicked towards) at the height it was let go, and remember both. Cancelled, or the
+    // bar hid mid-drag: back to where it rested, nothing saved.
+    private func cardDragEnded(_ velocity: CGPoint, cancelled: Bool) {
+        guard let c = card else { return }
+        draggingCard = false
+        c.layer.borderColor = MiniPlayerBar.cardBorder
+        let usable = !cancelled && !isHidden
+        if usable && cardOverBar(c) {
+            setFloating(false)
+            return
+        }
+        if usable {
+            if abs(velocity.x) > MiniPlayerBar.flickSpeed {
+                cardOnLeft = velocity.x < 0
+            } else {
+                cardOnLeft = c.center.x < frame.midX
+            }
+            let band = cardBand()
+            let y = min(max(c.frame.minY, band.top), band.bottom)
+            cardHeight = band.bottom > band.top ? (y - band.top) / (band.bottom - band.top) : 1
+            let d = UserDefaults.standard
+            d.set(cardOnLeft ? "L" : "R", forKey: MiniPlayerBar.sideKey)
+            d.set(String(format: "%.3f", Double(cardHeight)), forKey: MiniPlayerBar.heightKey)
+        }
+        // Plain ease-out: the spring variant is iOS 7+.
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState],
+                       animations: { c.frame = self.cardRestFrame() }, completion: nil)
+        placeVideo()   // anything that changed during the drag
+    }
+
     @objc private func floatTapped() {
-        guard !moving else { return }
-        floating = !floating
-        UserDefaults.standard.set(floating ? "1" : "0", forKey: MiniPlayerBar.floatKey)
-        floatBtn?.setImage(UIImage(named: floating ? "float-in" : "float-out"), for: .normal)
+        setFloating(!floating)
+    }
+
+    // The toggle, and a card dropped onto the bar.
+    private func setFloating(_ on: Bool) {
+        guard !moving, !draggingCard, on != floating else { return }
+        floating = on
+        UserDefaults.standard.set(on ? "1" : "0", forKey: MiniPlayerBar.floatKey)
+        floatBtn?.setImage(UIImage(named: on ? "float-in" : "float-out"), for: .normal)
         placeVideo(animated: true)
     }
 
@@ -463,6 +564,76 @@ class MiniPlayerBar: UIView {
         let cast = CastController.shared
         guard let video = cast.isActive ? cast.video : VideoPlayer.shared.currentVideo else { return }
         onOpen?(video)
+    }
+}
+
+// The floating card's surface (iPad). One view tells a tap from a drag with raw touches, like
+// the player's SeekTapView: a gesture recognizer next to buttons misfires on iOS 6, and this
+// way nothing runs between touches. A touch that travels more than `slop` is a drag and never
+// a tap. Positions are in window coordinates, which the card shares.
+private final class CardTouchView: UIView {
+    var canDrag: (() -> Bool)?
+    var onTap: (() -> Void)?
+    var onDragBegan: (() -> Void)?
+    var onDragMoved: ((CGPoint) -> Void)?            // finger travel since touch-down
+    var onDragEnded: ((CGPoint, Bool) -> Void)?      // velocity in pt/s, cancelled
+
+    private static let slop: CGFloat = 10
+    private var start = CGPoint.zero
+    private var travelled = false
+    private var dragging = false
+    private var last = CGPoint.zero
+    private var lastTime: TimeInterval = 0
+    private var velocity = CGPoint.zero
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let t = touches.first else { return }
+        start = t.location(in: nil)
+        last = start
+        lastTime = t.timestamp
+        travelled = false
+        dragging = false
+        velocity = .zero
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let t = touches.first else { return }
+        let p = t.location(in: nil)
+        if !travelled {
+            let dx = p.x - start.x, dy = p.y - start.y
+            guard dx * dx + dy * dy > CardTouchView.slop * CardTouchView.slop else { return }
+            travelled = true
+            dragging = canDrag?() ?? false
+            if dragging { onDragBegan?() }
+        }
+        guard dragging else { return }
+        let dt = t.timestamp - lastTime
+        if dt > 0 {
+            // Lightly smoothed: one 16 ms step on its own is noisy.
+            let vx = (p.x - last.x) / CGFloat(dt), vy = (p.y - last.y) / CGFloat(dt)
+            velocity = CGPoint(x: velocity.x * 0.3 + vx * 0.7, y: velocity.y * 0.3 + vy * 0.7)
+        }
+        last = p
+        lastTime = t.timestamp
+        onDragMoved?(CGPoint(x: p.x - start.x, y: p.y - start.y))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let t = touches.first else { return }
+        if dragging {
+            dragging = false
+            // A finger that stopped before lifting threw nothing.
+            onDragEnded?(t.timestamp - lastTime > 0.1 ? .zero : velocity, false)
+        } else if !travelled, bounds.contains(t.location(in: self)) {
+            onTap?()
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if dragging {
+            dragging = false
+            onDragEnded?(.zero, true)
+        }
     }
 }
 
