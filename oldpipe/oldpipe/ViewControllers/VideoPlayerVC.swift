@@ -110,6 +110,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var descExpanded = false { didSet { descContentDirty = true } }
     private var relatedVideos: [Video] = []
     private var relatedState = LoadState.idle
+    // Further pages of related videos, 20 at a time, on a tap of "Load more videos" (as on a
+    // channel page — nothing loads by itself while a video plays). relatedMoreState is the
+    // state of the next page: idle, loading, or failed (the button then retries).
+    private var relatedToken = ""        // next page ("" = none left)
+    private var relatedMoreState = LoadState.idle
+    // Related rows are never recycled: each one keeps its thumbnail and its text bitmaps for
+    // as long as it is on the page, about 0.4 MB a row. Past this many, no more pages are
+    // offered.
+    private static let relatedLimit = 100
+    // Related rows already built, by position. Loading a page rebuilds the tab's content;
+    // without this every earlier row (and its thumbnail) would be made again each time.
+    // Freed with the comments' cache rules: on a width change, on a video swap, and when the
+    // Comments tab takes over.
+    private var relatedRowCache: [Int: (id: String, row: UIView)] = [:]
 
     // Chapters, shown as tappable rows above the description. The watch-page list and the
     // description arrive from two different calls in either order, so the authored list is
@@ -687,6 +701,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         chapters = []
         chaptersExpanded = false
         relatedVideos = []
+        relatedToken = ""
+        relatedMoreState = .idle
+        relatedRowCache.removeAll()
         detailTab = 0
         comments = []
         commentsToken = ""
@@ -1264,13 +1281,17 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private func loadRelated() {
         relatedState = .loading
         let gen = contentGen
-        YoutubeAPI.getRelated(videoId: video.id, priority: true) { [weak self] vids, cToken, chaps in
+        YoutubeAPI.getRelated(videoId: video.id, priority: true) { [weak self] next in
             guard let self = self, gen == self.contentGen else { return }
             self.relatedState = .ready
-            self.relatedVideos = Array(vids.prefix(12))
-            self.apiChapters = chaps
+            // The whole first page (20), as every later page is: the list grows by 20 a tap.
+            self.relatedVideos = Array(next.related.prefix(VideoPlayerVC.relatedLimit))
+            self.relatedToken = next.relatedToken
+            self.relatedMoreState = .idle
+            self.relatedRowCache.removeAll()
+            self.apiChapters = next.chapters
             self.refreshChapters()
-            if let cToken = cToken {
+            if let cToken = next.commentsToken {
                 self.commentsToken = cToken
                 // No comment section on this watch page (comments off, or an age/region gate):
                 // mark it resolved so the tab stops saying "Loading".
@@ -1581,6 +1602,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             tabContentWidth = w
             commentBodyHeights.removeAll()
             commentRowCache.removeAll()
+            relatedRowCache.removeAll()
             tabContentDirty = true
         }
         if tabContentDirty {
@@ -1638,13 +1660,14 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     @objc private func detailTabTapped(_ sender: UIButton) {
         guard sender.tag != detailTab else { return }
         detailTab = sender.tag
-        if detailTab == 0 { commentRowCache.removeAll() }   // see commentRowCache
+        // Each list's rows are freed when the other tab takes over (see the two caches).
+        if detailTab == 0 { commentRowCache.removeAll() } else { relatedRowCache.removeAll() }
         tabContentDirty = true
         if detailTab == 1 && commentsState == .idle { loadMoreComments() }
         relayout()
     }
 
-    // Related-videos list. Returns the y after the last row.
+    // Related-videos list, then the next page's button or status. Returns the y after it.
     private func buildRelatedRows(startY: CGFloat, width w: CGFloat, into sv: UIView) -> CGFloat {
         guard !relatedVideos.isEmpty else {
             if relatedState == .ready {
@@ -1655,12 +1678,68 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         }
         var y = startY
         for (i, v) in relatedVideos.enumerated() {
-            let row = makeRelatedRow(v, index: i, width: w)
+            let row: UIView
+            if let hit = relatedRowCache[i], hit.id == v.id {
+                row = hit.row
+            } else {
+                row = makeRelatedRow(v, index: i, width: w)
+                relatedRowCache[i] = (id: v.id, row: row)
+            }
             row.frame = CGRect(x: 0, y: y, width: w, height: 80)
             sv.addSubview(row)
             y += 80
         }
+
+        switch relatedMoreState {
+        case .loading:
+            y = addPlaceholder("Loading more\u{2026}", startY: y, width: w, into: sv, busy: true)
+        case .failed:
+            y = addPlaceholder("Couldn't load more videos.", startY: y, width: w, into: sv)
+            y = addWideButton("Retry", startY: y, width: w, into: sv,
+                              action: #selector(loadMoreRelatedTapped))
+        default:
+            if !relatedToken.isEmpty {
+                y = addWideButton("Load more videos", startY: y, width: w, into: sv,
+                                  action: #selector(loadMoreRelatedTapped))
+            }
+        }
         return y
+    }
+
+    @objc private func loadMoreRelatedTapped() {
+        loadMoreRelated()
+    }
+
+    // The next 20 related videos, appended under the ones shown. A failed request keeps the
+    // token, so the Retry that replaces the button asks for the same page again.
+    private func loadMoreRelated() {
+        guard relatedMoreState != .loading, !relatedToken.isEmpty else { return }
+        relatedMoreState = .loading
+        let token = relatedToken
+        let gen = contentGen
+        tabContentDirty = true
+        relayout()
+        YoutubeAPI.getRelatedContinuation(token: token, excludeId: video.id) { [weak self] vids, next in
+            guard let self = self, gen == self.contentGen else { return }
+            if let next = next {
+                var seen = Set(self.relatedVideos.map { $0.id })
+                for v in vids where !seen.contains(v.id) {
+                    seen.insert(v.id)
+                    self.relatedVideos.append(v)
+                }
+                if self.relatedVideos.count >= VideoPlayerVC.relatedLimit {
+                    self.relatedVideos = Array(self.relatedVideos.prefix(VideoPlayerVC.relatedLimit))
+                    self.relatedToken = ""
+                } else {
+                    self.relatedToken = next
+                }
+                self.relatedMoreState = .idle
+            } else {
+                self.relatedMoreState = .failed
+            }
+            self.tabContentDirty = true
+            self.relayout()
+        }
     }
 
     // MARK: - Comments

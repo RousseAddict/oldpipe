@@ -8,6 +8,23 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
     private var isLoading = false
     private var pendingQuery: String?   // see search(for:)
 
+    // Further pages load by themselves as the end of the list comes near (see
+    // loadMoreIfNearEnd), one at a time. A failure stops that: the footer turns into a
+    // tap-to-retry, and pages load by themselves again once a retry has worked.
+    private var nextToken = ""          // next page ("" = none left)
+    private var moreLoading = false
+    private var moreFailed = false
+    private var seen = Set<String>()    // ids listed so far — a later page can repeat one
+    private var emptyPages = 0          // pages in a row that added nothing (see appendPage)
+    // Bumped by every new search: a page still on its way for the previous query is dropped.
+    private var searchGen = 0
+
+    private lazy var moreFooter: SearchMoreFooter = {
+        let f = SearchMoreFooter(frame: CGRect(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 56))
+        f.addTarget(self, action: #selector(retryMoreTapped), for: .touchUpInside)
+        return f
+    }()
+
     // Set by Navigator's Search button. An empty page brings the keyboard up; one still
     // holding results is shown as it was, keyboard down, since iOS 6 has no way to put the
     // keyboard away by scrolling the results.
@@ -136,27 +153,106 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
     private func performSearch(query: String) {
         guard !isLoading else { return }
         isLoading = true
+        searchGen += 1
+        let gen = searchGen
         results = []
+        seen.removeAll()
+        nextToken = ""
+        moreLoading = false
+        moreFailed = false
+        emptyPages = 0
+        updateFooter()
         tableView.reloadData()
         tableView.setContentOffset(CGPoint(x: 0, y: 0), animated: false)   // new results start at the top
         emptyView.isHidden = true
         spinner.startAnimating()
         statusLabel.isHidden = false
 
-        YoutubeAPI.search(query: query) { [weak self] videos in
-            guard let self = self else { return }
+        YoutubeAPI.search(query: query) { [weak self] videos, next in
+            guard let self = self, gen == self.searchGen else { return }
             self.isLoading = false
             self.spinner.stopAnimating()
             self.statusLabel.isHidden = true
-            self.results = videos
-            self.tableView.reloadData()
-            if videos.isEmpty {
+            self.appendPage(videos, next: next ?? "")
+            if self.results.isEmpty {
                 // A failed request comes back empty too, so this can't promise there is nothing.
                 self.emptyView.setText(title: "No results",
                                        body: "Nothing came back. Check your connection or try other words.")
                 self.emptyView.isHidden = false
             }
         }
+    }
+
+    // MARK: - Further pages
+
+    // Asks for the next page once the bottom of the list is within three rows of the screen,
+    // so it has usually arrived by the time the last row is reached.
+    private func loadMoreIfNearEnd() {
+        guard !nextToken.isEmpty, !moreLoading, !moreFailed, !isLoading, !results.isEmpty else { return }
+        let visibleBottom = tableView.contentOffset.y + tableView.bounds.height - tableView.contentInset.bottom
+        guard visibleBottom >= tableView.contentSize.height - VideoRowCell.rowHeight * 3 else { return }
+        loadMore()
+    }
+
+    private func loadMore() {
+        guard !nextToken.isEmpty, !moreLoading else { return }
+        moreLoading = true
+        moreFailed = false
+        updateFooter()
+        let gen = searchGen
+        YoutubeAPI.searchContinuation(token: nextToken) { [weak self] videos, next in
+            guard let self = self, gen == self.searchGen else { return }
+            self.moreLoading = false
+            if let next = next {
+                self.appendPage(videos, next: next)
+                // Still at the end (a short page, a tall iPad screen): carry on.
+                self.loadMoreIfNearEnd()
+            } else {
+                // Failed. nextToken is kept: it is the page that still has to be asked for.
+                self.moreFailed = true
+                self.updateFooter()
+            }
+        }
+    }
+
+    // A page that lists nothing new still moves the token on, and the next one is asked for
+    // straight away if the end is still in view. Three such pages in a row are taken as the
+    // end of the results rather than asked for indefinitely.
+    private func appendPage(_ videos: [Video], next: String) {
+        let before = results.count
+        for v in videos where !seen.contains(v.id) {
+            seen.insert(v.id)
+            results.append(v)
+        }
+        emptyPages = (results.count == before) ? emptyPages + 1 : 0
+        nextToken = (emptyPages >= 3) ? "" : next
+        tableView.reloadData()
+        updateFooter()
+    }
+
+    @objc private func retryMoreTapped() {
+        guard moreFailed else { return }
+        loadMore()
+    }
+
+    // The footer is there only while there is a next page: "Loading more…" with a spinner,
+    // or a tap-to-retry after a failure. Without one, a plain view, which also stops the
+    // table drawing empty separator rows under a short list.
+    private func updateFooter() {
+        guard !results.isEmpty, !nextToken.isEmpty else {
+            moreFooter.spinner.stopAnimating()
+            if tableView.tableFooterView === moreFooter { tableView.tableFooterView = UIView() }
+            return
+        }
+        moreFooter.showFailed(moreFailed)
+        if tableView.tableFooterView !== moreFooter { tableView.tableFooterView = moreFooter }
+    }
+
+    // UITableViewDelegate inherits the scroll view's callbacks. Only a few comparisons until
+    // the end is near.
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === tableView else { return }
+        loadMoreIfNearEnd()
     }
 
     // MARK: - UITableViewDataSource
@@ -180,5 +276,44 @@ class SearchVC: UIViewController, UISearchBarDelegate, UITableViewDataSource, UI
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         navigationController?.openVideo(results[indexPath.row])
+    }
+}
+
+// The search list's footer while more results exist: "Loading more…" with a spinner just
+// left of the text, or, after a failed page, a tap-to-retry. A button in both states so the
+// retry needs no second view; disabled while loading, so a tap then does nothing.
+final class SearchMoreFooter: UIButton {
+    let spinner: UIActivityIndicatorView = {
+        let s = UIActivityIndicatorView(style: .white)
+        s.hidesWhenStopped = true
+        s.isUserInteractionEnabled = false   // a touch on it must still reach the button
+        return s
+    }()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        autoresizingMask = iPadFlexWidth
+        backgroundColor = .clear
+        titleLabel?.font = UIFont.systemFont(ofSize: 14)
+        setTitleColor(UIColor(white: 0.5, alpha: 1), for: .disabled)
+        setTitleColor(.white, for: .normal)
+        setTitle("Loading more\u{2026}", for: .disabled)
+        setTitle("Couldn't load more \u{2022} Tap to retry", for: .normal)
+        addSubview(spinner)
+        showFailed(false)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func showFailed(_ failed: Bool) {
+        isEnabled = failed
+        if failed { spinner.stopAnimating() } else { spinner.startAnimating() }
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let t = titleLabel else { return }
+        spinner.center = CGPoint(x: floor(t.frame.minX - 16), y: floor(bounds.midY))
     }
 }

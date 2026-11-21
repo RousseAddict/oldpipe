@@ -138,19 +138,38 @@ class YoutubeAPI {
 
     // MARK: - Search
 
-    static func search(query: String, completion: @escaping ([Video]) -> Void) {
+    // completion: (videos, token for the next page — "" when there is none, nil when the
+    // request failed; the caller must keep the token it used on nil, or the list can never
+    // ask for that page again)
+    static func search(query: String, completion: @escaping ([Video], String?) -> Void) {
         let payload = body(client: webClient, extra: ["query": query])
-        guard let jsonStr = toJSON(payload) else { completion([]); return }
+        guard let jsonStr = toJSON(payload) else { completion([], nil); return }
         let url = "\(baseURL)/search?prettyPrint=false"
         // Search is always user-initiated — use the high-priority lane so it preempts
         // any in-flight background feed load (see CurlFetcher feedTurnstile).
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: webUserAgent, timeout: 30, priority: true) { data in
-            guard let data = data else { completion([]); return }
+            guard let data = data else { completion([], nil); return }
             // Parse off main thread, on the interactive lane (search is always user-initiated).
             interactiveParseQueue.async {
-                let results = parseSearchResults(data)
-                AppQueue.main.async { completion(results) }
+                let result = parseSearchResults(data)
+                AppQueue.main.async { completion(result.0, result.1) }
+            }
+        }
+    }
+
+    // The next page of a search, from the token the previous page ended with. The token
+    // carries the query, so none is sent. Same completion contract as search().
+    static func searchContinuation(token: String, completion: @escaping ([Video], String?) -> Void) {
+        let payload = body(client: webClient, extra: ["continuation": token])
+        guard let jsonStr = toJSON(payload) else { completion([], nil); return }
+        let url = "\(baseURL)/search?prettyPrint=false"
+        CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
+                             userAgent: webUserAgent, timeout: 30, priority: true) { data in
+            guard let data = data else { completion([], nil); return }
+            interactiveParseQueue.async {
+                let result = parseSearchContinuation(data)
+                AppQueue.main.async { completion(result.0, result.1) }
             }
         }
     }
@@ -387,31 +406,41 @@ class YoutubeAPI {
 
     // MARK: - Related videos (Next endpoint)
 
+    // What the watch-page call brings back besides the player: one request, four answers.
+    struct WatchNext {
+        var related: [Video] = []
+        // Next page of related videos, for getRelatedContinuation — "" when there is none.
+        var relatedToken = ""
+        // First batch of comments — "" when the video genuinely has no comment section, nil
+        // when the request failed and nothing is known either way; the caller must not treat
+        // nil as "comments are off".
+        var commentsToken: String? = nil
+        var chapters: [Chapter] = []
+    }
+
     // Related ("Up next") videos for a watch page. WEB client returns the related panel
-    // under twoColumnWatchNextResults.secondaryResults as lockupViewModel items.
+    // under twoColumnWatchNextResults.secondaryResults as lockupViewModel items, 20 at a time,
+    // ending in the token for the next 20.
     // The same watch-page response also carries the continuation token for the comment
     // section, so it is handed back here: opening a video gets the token for free and the
     // Comments tab then costs exactly one request per batch instead of two.
-    // completion: (related videos, comments continuation token — "" when the video genuinely
-    // has no comment section, nil when the request failed and nothing is known either way;
-    // the caller must not treat nil as "comments are off")
-    static func getRelated(videoId: String, priority: Bool = false, completion: @escaping ([Video], String?, [Chapter]) -> Void) {
+    static func getRelated(videoId: String, priority: Bool = false, completion: @escaping (WatchNext) -> Void) {
         let payload = body(client: webClient, extra: ["videoId": videoId])
-        guard let jsonStr = toJSON(payload) else { completion([], nil, []); return }
+        guard let jsonStr = toJSON(payload) else { completion(WatchNext()); return }
         let url = "\(baseURL)/next?prettyPrint=false"
         CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
                              userAgent: webUserAgent, timeout: 30, priority: priority) { data in
-            guard let data = data else { completion([], nil, []); return }
+            guard let data = data else { completion(WatchNext()); return }
             (priority ? interactiveParseQueue : parseQueue).async {
                 let result = parseRelated(data, excludeId: videoId)
-                AppQueue.main.async { completion(result.0, result.1, result.2) }
+                AppQueue.main.async { completion(result) }
             }
         }
     }
 
-    private static func parseRelated(_ data: Data, excludeId: String) -> ([Video], String?, [Chapter]) {
+    private static func parseRelated(_ data: Data, excludeId: String) -> WatchNext {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            return ([], nil, [])
+            return WatchNext()
         }
         captureVisitorData(root)
         // The related panel lives under the secondaryResults column; walking just that
@@ -420,9 +449,71 @@ class YoutubeAPI {
         let secondary = twoCol?["secondaryResults"]
         var seen = Set<String>()
         seen.insert(excludeId)   // never list the video we're already watching
+        var out = WatchNext()
+        collectVideoItems(secondary, fallbackChannelId: "", fallbackChannelName: "", seen: &seen, into: &out.related)
+        out.relatedToken = listToken(arr(dict(dict(secondary)?["secondaryResults"])?["results"]))
+        out.commentsToken = findCommentsToken(root)
+        out.chapters = parseChapters(root)
+        return out
+    }
+
+    // The next page of related videos. Asked of the same `next` endpoint as the comments,
+    // with a token of its own; the page comes back as an append action of lockups ending in
+    // the token for the page after it.
+    // completion: (videos, next token — "" when there is none, nil when the request failed)
+    static func getRelatedContinuation(token: String, excludeId: String, completion: @escaping ([Video], String?) -> Void) {
+        let payload = body(client: webClient, extra: ["continuation": token])
+        guard let jsonStr = toJSON(payload) else { completion([], nil); return }
+        let url = "\(baseURL)/next?prettyPrint=false"
+        CurlFetcher.postJSON(url: url, body: jsonStr, headers: jsonHeaders,
+                             userAgent: webUserAgent, timeout: 30, priority: true) { data in
+            guard let data = data else { completion([], nil); return }
+            interactiveParseQueue.async {
+                let result = parseRelatedContinuation(data, excludeId: excludeId)
+                AppQueue.main.async { completion(result.0, result.1) }
+            }
+        }
+    }
+
+    private static func parseRelatedContinuation(_ data: Data, excludeId: String) -> ([Video], String?) {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            return ([], nil)
+        }
+        captureVisitorData(root)
+        let endpoints = root["onResponseReceivedEndpoints"]
+        var seen = Set<String>()
+        seen.insert(excludeId)
         var results: [Video] = []
-        collectVideoItems(secondary, fallbackChannelId: "", fallbackChannelName: "", seen: &seen, into: &results)
-        return (results, findCommentsToken(root), parseChapters(root))
+        collectVideoItems(endpoints, fallbackChannelId: "", fallbackChannelName: "", seen: &seen, into: &results)
+        return (results, listToken(appendedItems(endpoints)))
+    }
+
+    // The items of every appendContinuationItemsAction in an onResponseReceived... list —
+    // the shape every continuation page (search, related, channel) arrives in.
+    private static func appendedItems(_ list: Any?) -> [[String: Any]] {
+        var items: [[String: Any]] = []
+        for entry in arr(list) ?? [] {
+            if let ci = arr(dict(entry["appendContinuationItemsAction"])?["continuationItems"]) {
+                items += ci
+            }
+        }
+        return items
+    }
+
+    // The paging token of a list: its own continuationItemRenderer, one of the list's entries
+    // (always the last one, in every response probed). Read from the list itself rather than
+    // by searching the tree, which could find a token belonging to something nested in an
+    // item — and dictionary order, hence "first found", is not stable in Swift. "" when the
+    // list has none, which is how the last page says so.
+    private static func listToken(_ items: [[String: Any]]?) -> String {
+        for item in items ?? [] {
+            if let cir = dict(item["continuationItemRenderer"]),
+               let cc = dict(dict(cir["continuationEndpoint"])?["continuationCommand"]),
+               let t = str(cc["token"]), !t.isEmpty {
+                return t
+            }
+        }
+        return ""
     }
 
     // Chapters are published on the watch page as the markers drawn under the scrubber, so
@@ -650,9 +741,11 @@ class YoutubeAPI {
 
     // MARK: - Search response parsing
 
-    private static func parseSearchResults(_ data: Data) -> [Video] {
+    // Returns (videos, next-page token — "" when there is none, nil when the response did
+    // not parse).
+    private static func parseSearchResults(_ data: Data) -> ([Video], String?) {
         guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
-            return []
+            return ([], nil)
         }
 
         captureVisitorData(root)
@@ -662,24 +755,33 @@ class YoutubeAPI {
         let twoCol = dict(contents?["twoColumnSearchResultsRenderer"])
         let primary = dict(twoCol?["primaryContents"])
         let sectionList = dict(primary?["sectionListRenderer"])
-        let sections = arr(sectionList?["contents"])
+        return searchPage(arr(sectionList?["contents"]) ?? [])
+    }
 
-        // Find itemSectionRenderer in sections (may not be the first item)
-        var items: [[String: Any]] = []
-        for section in (sections ?? []) {
-            if let itemSection = dict(section["itemSectionRenderer"]),
-               let sectionItems = arr(itemSection["contents"]) {
-                items = sectionItems
-                break
+    // Pages after the first come back as an append action, not under `contents` — and under
+    // onResponseReceivedCommands, where channel and playlist pages use ...Actions, so
+    // parseContinuation cannot read them.
+    private static func parseSearchContinuation(_ data: Data) -> ([Video], String?) {
+        guard let root = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            return ([], nil)
+        }
+        captureVisitorData(root)
+        return searchPage(appendedItems(root["onResponseReceivedCommands"]))
+    }
+
+    // One page of search results, first or later: a list of item sections followed by the
+    // token for the next page. Only the sections' own videoRenderers are listed — Shorts
+    // shelves, "people also search for" cards and the like sit beside them and are left out.
+    private static func searchPage(_ sections: [[String: Any]]) -> ([Video], String?) {
+        var results: [Video] = []
+        for section in sections {
+            guard let items = arr(dict(section["itemSectionRenderer"])?["contents"]) else { continue }
+            for item in items {
+                guard let vr = dict(item["videoRenderer"]) else { continue }
+                if let v = videoFromRenderer(vr, fallbackChannelId: "") { results.append(v) }
             }
         }
-
-        var results: [Video] = []
-        for item in items {
-            guard let vr = dict(item["videoRenderer"]) else { continue }
-            if let v = videoFromRenderer(vr, fallbackChannelId: "") { results.append(v) }
-        }
-        return results
+        return (results, listToken(sections))
     }
 
     // Build a Video from a videoRenderer / gridVideoRenderer dict.
