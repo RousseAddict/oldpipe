@@ -224,7 +224,7 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         sheet.addButton(withTitle: "Cancel")
         sheet.destructiveButtonIndex = 2
         sheet.cancelButtonIndex = 3
-        sheet.show(in: view)
+        AppMenu.show(sheet, from: self)
     }
 
     func actionSheet(_ actionSheet: UIActionSheet, clickedButtonAt buttonIndex: Int) {

@@ -404,19 +404,30 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     // What a tap on a control does: its actions are sent, so the page runs its own code path.
-    // Bar items first (Home's menu is one), then any visible button in the page's view whose
-    // touch-up action is named `action`, with or without the colon of a sender argument.
+    // The target is any visible button whose touch-up action is named `action`, with or
+    // without the colon of a sender argument.
+    // - An open menu (AppMenu) covers everything under it, so a press goes to the menu alone:
+    //   press/menuRowTapped/<n> picks its n-th row, press/menuCancelTapped closes it.
+    // - Otherwise bar items come first (Home's menu is one), then the page's view, then what
+    //   sits in the window above the page: the fullscreen overlay's controls (its gear opens
+    //   the Playback menu) and the mini bar. Last, a method of the page itself (below).
     private func press(_ action: String, nth: Int, on page: UIViewController) {
         CrashLog.mark("url: press \(action) \(nth)")
         func wired(_ name: String) -> Bool { return name == action || name == action + ":" }
         var skip = nth
-        let items = (page.navigationItem.leftBarButtonItems ?? []) + (page.navigationItem.rightBarButtonItems ?? [])
-        if let item = items.first(where: { $0.action.map { wired(NSStringFromSelector($0)) } ?? false }),
-           let sel = item.action {
-            UIApplication.shared.sendAction(sel, to: item.target, from: item, for: nil)
-            return
+        var queue: [UIView]
+        if let menu = AppMenu.current {
+            queue = [menu]
+        } else {
+            let items = (page.navigationItem.leftBarButtonItems ?? []) + (page.navigationItem.rightBarButtonItems ?? [])
+            if let item = items.first(where: { $0.action.map { wired(NSStringFromSelector($0)) } ?? false }),
+               let sel = item.action {
+                UIApplication.shared.sendAction(sel, to: item.target, from: item, for: nil)
+                return
+            }
+            let root = window?.rootViewController?.view
+            queue = [page.view] + (window?.subviews.filter { $0 !== root && !$0.isHidden } ?? [])
         }
-        var queue: [UIView] = [page.view]
         while !queue.isEmpty {
             let v = queue.removeFirst()
             if let b = v as? UIButton, b.isEnabled,
@@ -431,6 +442,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             // while the list is showing).
             queue.append(contentsOf: v.subviews.filter { !$0.isHidden })
         }
+        // No visible button carries it: the page's own method of that name, when it takes no
+        // argument. A tap on the video is a touch view rather than a button, so this is how
+        // press/videoAreaTapped brings back the auto-hidden control bar (gear, fullscreen).
+        let sel = NSSelectorFromString(action)
+        if AppMenu.current == nil, page.responds(to: sel) { _ = page.perform(sel) }
     }
 
     // Breadth-first, so the page's own list wins over one nested further down.

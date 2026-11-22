@@ -326,81 +326,92 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
     // 10 = playback quality, 11 = caption size, 12 = frame rate, 13 = caption language (13 was
     // the download quality sheet before that setting was removed), 14 = double-tap seek.
     //
+    // What each choice menu offers: the values stored, the rows that name them (index-aligned),
+    // and the value in force, which gets the tick. The menu and its answer both read this, so
+    // the two lists can't drift apart.
+    private func choices(for tag: Int) -> (values: [String], rows: [String], current: String)? {
+        switch tag {
+        case 10:
+            return (["auto", "480", "720", "1080"], ["Auto (360p)", "480p", "720p", "1080p"],
+                    AppSettings.defaultQuality)
+        case 11:
+            return (["auto", "small", "medium", "large", "xlarge"],
+                    ["Auto", "Small", "Medium", "Large", "Extra Large"], AppSettings.captionSize)
+        case 12:
+            return (["30", "60"], ["30 fps", "60 fps"], AppSettings.defaultFps)
+        case 13:
+            let codes = AppSettings.captionLanguageChoices()
+            return (codes, codes.map { AppSettings.captionLanguageName($0) }, AppSettings.captionLanguage)
+        case 14:
+            return (AppSettings.seekStepChoices, AppSettings.seekStepChoices.map { "\($0) seconds" },
+                    AppSettings.seekStep)
+        default:
+            return nil
+        }
+    }
+
     // Empty init + addButton, NOT the variadic otherButtonTitles: convenience init, which
-    // crashes on the 5.1.5 runtime.
-    private func showChoiceSheet(tag: Int, title: String, options: [String]) {
+    // crashes on the 5.1.5 runtime. The sheet only describes the menu: AppMenu draws it, with
+    // the "✓ " row in red and scrolled into view, as the player's Speed and Captions menus are.
+    private func showChoiceSheet(tag: Int, title: String) {
+        guard let c = choices(for: tag) else { return }
         let sheet = UIActionSheet()
         sheet.delegate = self
         sheet.tag = tag
         sheet.title = title
-        for o in options { sheet.addButton(withTitle: o) }
+        for (i, row) in c.rows.enumerated() {
+            sheet.addButton(withTitle: (c.values[i] == c.current ? "\u{2713} " : "") + row)
+        }
         sheet.addButton(withTitle: "Cancel")
-        sheet.cancelButtonIndex = options.count
-        sheet.show(in: view)
+        sheet.cancelButtonIndex = c.rows.count
+        AppMenu.show(sheet, from: self)
     }
 
     @objc private func qualityTapped() {
-        showChoiceSheet(tag: 10, title: "Default Video Quality",
-                        options: ["Auto (360p)", "480p", "720p", "1080p"])
+        showChoiceSheet(tag: 10, title: "Default Video Quality")
     }
 
     @objc private func fpsTapped() {
-        showChoiceSheet(tag: 12, title: "Frame Rate", options: ["30 fps", "60 fps"])
+        showChoiceSheet(tag: 12, title: "Frame Rate")
     }
 
     @objc private func captionSizeTapped() {
-        showChoiceSheet(tag: 11, title: "Caption Size",
-                        options: ["Auto", "Small", "Medium", "Large", "Extra Large"])
+        showChoiceSheet(tag: 11, title: "Caption Size")
     }
 
     @objc private func captionLanguageTapped() {
-        showChoiceSheet(tag: 13, title: "Caption Language",
-                        options: AppSettings.captionLanguageChoices().map { AppSettings.captionLanguageName($0) })
+        showChoiceSheet(tag: 13, title: "Caption Language")
     }
 
     @objc private func seekStepTapped() {
-        showChoiceSheet(tag: 14, title: "Double-Tap Seek",
-                        options: AppSettings.seekStepChoices.map { "\($0) seconds" })
+        showChoiceSheet(tag: 14, title: "Double-Tap Seek")
     }
 
-    // The sheets all have the same shape: an index-aligned value list, then store + retitle.
-    // The Cancel button sits one past the end of `values`, so an out-of-range index — Cancel,
-    // or a dismissal — falls through apply() and changes nothing.
+    // Every menu has the same shape: store the picked value, then retitle its button. Cancel
+    // sits one past the end of the values, so its index, like any out-of-range one, changes
+    // nothing.
     func actionSheet(_ actionSheet: UIActionSheet, clickedButtonAt buttonIndex: Int) {
+        guard let c = choices(for: actionSheet.tag), buttonIndex >= 0, buttonIndex < c.values.count else { return }
+        let value = c.values[buttonIndex]
         switch actionSheet.tag {
         case 10:
-            apply(["auto", "480", "720", "1080"], buttonIndex) {
-                AppSettings.defaultQuality = $0
-                self.qualityBtn?.setTitle("Default Quality: \(AppSettings.defaultQualityLabel())", for: .normal)
-            }
+            AppSettings.defaultQuality = value
+            qualityBtn?.setTitle("Default Quality: \(AppSettings.defaultQualityLabel())", for: .normal)
         case 11:
-            apply(["auto", "small", "medium", "large", "xlarge"], buttonIndex) {
-                AppSettings.captionSize = $0
-                self.captionSizeBtn?.setTitle("Caption Size: \(AppSettings.captionSizeLabel())", for: .normal)
-            }
+            AppSettings.captionSize = value
+            captionSizeBtn?.setTitle("Caption Size: \(AppSettings.captionSizeLabel())", for: .normal)
         case 12:
-            apply(["30", "60"], buttonIndex) {
-                AppSettings.defaultFps = $0
-                self.fpsBtn?.setTitle("Frame Rate: \(AppSettings.defaultFpsLabel())", for: .normal)
-            }
+            AppSettings.defaultFps = value
+            fpsBtn?.setTitle("Frame Rate: \(AppSettings.defaultFpsLabel())", for: .normal)
         case 13:
-            apply(AppSettings.captionLanguageChoices(), buttonIndex) {
-                AppSettings.captionLanguage = $0
-                self.captionLangBtn?.setTitle("Caption Language: \(AppSettings.captionLanguageLabel())", for: .normal)
-            }
+            AppSettings.captionLanguage = value
+            captionLangBtn?.setTitle("Caption Language: \(AppSettings.captionLanguageLabel())", for: .normal)
         case 14:
-            apply(AppSettings.seekStepChoices, buttonIndex) {
-                AppSettings.seekStep = $0
-                self.seekStepBtn?.setTitle("Double-Tap Seek: \(AppSettings.seekStepLabel())", for: .normal)
-            }
+            AppSettings.seekStep = value
+            seekStepBtn?.setTitle("Double-Tap Seek: \(AppSettings.seekStepLabel())", for: .normal)
         default:
             break
         }
-    }
-
-    private func apply(_ values: [String], _ index: Int, _ set: (String) -> Void) {
-        guard index >= 0, index < values.count else { return }
-        set(values[index])
     }
 
     // MARK: - Debug
