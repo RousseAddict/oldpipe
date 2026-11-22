@@ -29,7 +29,8 @@ import AVFoundation
 // shows and hides with the bar, and is not used when there is no picture to enlarge (an
 // audio-only download, a cast): those stay in the bar as on the iPhone. The card can be
 // dragged: let go, it sticks to the nearer side at that height (remembered); dropped onto the
-// bar, the video goes back into it. The iPhone never builds any of it.
+// bar, the video goes back into it. Pinched with two fingers it takes a new size, 240 to 512 pt
+// wide (remembered), and settles the way a dropped card does. The iPhone never builds any of it.
 
 class MiniPlayerBar: UIView {
 
@@ -37,7 +38,12 @@ class MiniPlayerBar: UIView {
 
     // Read once: on an iPhone the toggle and the card are never created.
     static let canFloat = UIDevice.current.userInterfaceIdiom == .pad
-    private static let cardSize = CGSize(width: 320, height: 180)
+    // The card is 16:9, 320 pt wide to begin with; a pinch takes it from 240 to 512 — two thirds
+    // of a portrait iPad, half of a landscape one. Saved in whole points; absent = 320.
+    private static let cardDefaultWidth: CGFloat = 320
+    private static let cardMinWidth: CGFloat = 240
+    private static let cardMaxWidth: CGFloat = 512
+    private static let widthKey = "miniplayer_card_w"
     private static let cardMargin: CGFloat = 12          // from the screen's side edge and the bar
     // "1" = floating, "0" = in the bar; absent = floating, the default.
     private static let floatKey = "miniplayer_floating"
@@ -93,8 +99,16 @@ class MiniPlayerBar: UIView {
               let v = Double(s) else { return 1 }
         return CGFloat(max(0, min(1, v)))
     }()
-    private var draggingCard = false
+    private var cardWidth: CGFloat = {
+        guard let s = UserDefaults.standard.string(forKey: MiniPlayerBar.widthKey),
+              let v = Double(s) else { return MiniPlayerBar.cardDefaultWidth }
+        return CGFloat(v)   // clamped where it is used
+    }()
+    private var draggingCard = false        // a drag or a pinch: the card is in the user's hands
     private var dragOrigin = CGPoint.zero   // the card's centre when the drag began
+    private var pinchWidth: CGFloat = 0     // the card's width when the pinch began
+    private var pinchScale: CGFloat = 1     // its scale now
+    private var pinchAnchor = CGPoint.zero  // its centre from the fingers' midpoint, at the start
 
     // The card shows and hides with the bar, whoever hides it.
     override var isHidden: Bool {
@@ -220,7 +234,11 @@ class MiniPlayerBar: UIView {
         super.layoutSubviews()
         layoutBar()
         // A rotation resizes the bar; the card keeps its side and relative height.
-        if let c = card, !draggingCard, !moving { c.frame = cardRestFrame() }
+        if let c = card, !draggingCard, !moving {
+            let resized = c.bounds.size != cardSize()
+            c.frame = cardRestFrame()
+            if resized { fitSlotToCard() }
+        }
     }
     #endif
 
@@ -384,6 +402,17 @@ class MiniPlayerBar: UIView {
         if layer.superlayer === videoSlot.layer { layer.frame = CGRect(origin: .zero, size: size) }
     }
 
+    // The card took a new size: the video slot and its layer follow. The card's thumbnail and
+    // touch surface resize themselves; the slot cannot, since it also lives in the bar.
+    private func fitSlotToCard() {
+        guard let c = card, videoSlot.superview === c else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoSlot.frame = c.bounds
+        sizeVideo(to: c.bounds.size)
+        CATransaction.commit()
+    }
+
     // Visible exactly when the bar is and the video floats.
     private func syncCard() {
         guard let card = card else { return }
@@ -407,16 +436,23 @@ class MiniPlayerBar: UIView {
         let thumb = AsyncImageView(frame: c.bounds)
         thumb.contentMode = .scaleAspectFill
         thumb.clipsToBounds = true
+        thumb.autoresizingMask = [.flexibleWidth, .flexibleHeight]   // a pinch resizes the card
         c.addSubview(thumb)
 
-        // The whole card: a tap opens the video, like the bar's title; a drag moves the card.
+        // The whole card: a tap opens the video, like the bar's title; a drag moves the card;
+        // two fingers resize it.
         let touch = CardTouchView(frame: c.bounds)
         touch.backgroundColor = .clear
+        touch.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        touch.isMultipleTouchEnabled = true   // off by default: the view would only see one finger
         touch.canDrag = { [weak self] in self.map { !$0.moving && $0.slotInCard && !$0.isHidden } ?? false }
         touch.onTap = { [weak self] in self?.openTapped() }
         touch.onDragBegan = { [weak self] in self?.cardDragBegan() }
         touch.onDragMoved = { [weak self] travel in self?.cardDragMoved(travel) }
         touch.onDragEnded = { [weak self] velocity, cancelled in self?.cardDragEnded(velocity, cancelled: cancelled) }
+        touch.onPinchBegan = { [weak self] mid in self?.cardPinchBegan(mid) }
+        touch.onPinchMoved = { [weak self] scale, mid in self?.cardPinchMoved(scale, mid) }
+        touch.onPinchEnded = { [weak self] cancelled in self?.cardPinchEnded(cancelled: cancelled) }
         c.addSubview(touch)
 
         host.insertSubview(c, belowSubview: self)
@@ -427,17 +463,29 @@ class MiniPlayerBar: UIView {
         return c
     }
 
+    // A width kept within the pinch range, and on screen. The bar spans the window, so its width
+    // is the screen's.
+    private func clampedCardWidth(_ w: CGFloat) -> CGFloat {
+        let fit = max(MiniPlayerBar.cardMinWidth, frame.width - 2 * MiniPlayerBar.cardMargin)
+        return min(max(w, MiniPlayerBar.cardMinWidth), MiniPlayerBar.cardMaxWidth, fit)
+    }
+
+    private func cardSize() -> CGSize {
+        let w = floor(clampedCardWidth(cardWidth))
+        return CGSize(width: w, height: floor(w * 9 / 16))
+    }
+
     // The band the card may rest in: just under the nav bar to just above this bar.
     private func cardBand() -> (top: CGFloat, bottom: CGFloat) {
         let top = MiniPlayerBar.navBottom + MiniPlayerBar.cardMargin
-        let bottom = frame.minY - MiniPlayerBar.cardMargin - MiniPlayerBar.cardSize.height
+        let bottom = frame.minY - MiniPlayerBar.cardMargin - cardSize().height
         return (top, max(top, bottom))
     }
 
     // Against its side, at its height in the band. The bar spans the window, so its frame gives
     // the screen's width in the card's coordinates.
     private func cardRestFrame() -> CGRect {
-        let s = MiniPlayerBar.cardSize, m = MiniPlayerBar.cardMargin
+        let s = cardSize(), m = MiniPlayerBar.cardMargin
         let band = cardBand()
         let x = cardOnLeft ? frame.minX + m : frame.maxX - m - s.width
         let y = band.top + (band.bottom - band.top) * cardHeight
@@ -481,23 +529,81 @@ class MiniPlayerBar: UIView {
             setFloating(false)
             return
         }
-        if usable {
-            if abs(velocity.x) > MiniPlayerBar.flickSpeed {
-                cardOnLeft = velocity.x < 0
-            } else {
-                cardOnLeft = c.center.x < frame.midX
-            }
-            let band = cardBand()
-            let y = min(max(c.frame.minY, band.top), band.bottom)
-            cardHeight = band.bottom > band.top ? (y - band.top) / (band.bottom - band.top) : 1
-            let d = UserDefaults.standard
-            d.set(cardOnLeft ? "L" : "R", forKey: MiniPlayerBar.sideKey)
-            d.set(String(format: "%.3f", Double(cardHeight)), forKey: MiniPlayerBar.heightKey)
+        if usable { rememberRestPlace(of: c, velocity: velocity) }
+        glideToRest(c)
+    }
+
+    // Let go away from the bar: the side flicked towards, else the nearer one, at the height it
+    // was let go. Both remembered.
+    private func rememberRestPlace(of c: UIView, velocity: CGPoint) {
+        if abs(velocity.x) > MiniPlayerBar.flickSpeed {
+            cardOnLeft = velocity.x < 0
+        } else {
+            cardOnLeft = c.center.x < frame.midX
         }
-        // Plain ease-out: the spring variant is iOS 7+.
+        let band = cardBand()
+        let y = min(max(c.frame.minY, band.top), band.bottom)
+        cardHeight = band.bottom > band.top ? (y - band.top) / (band.bottom - band.top) : 1
+        let d = UserDefaults.standard
+        d.set(cardOnLeft ? "L" : "R", forKey: MiniPlayerBar.sideKey)
+        d.set(String(format: "%.3f", Double(cardHeight)), forKey: MiniPlayerBar.heightKey)
+    }
+
+    // Plain ease-out: the spring variant is iOS 7+.
+    private func glideToRest(_ c: UIView) {
         UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState],
                        animations: { c.frame = self.cardRestFrame() }, completion: nil)
-        placeVideo()   // anything that changed during the drag
+        placeVideo()   // anything that changed during the drag or the pinch
+    }
+
+    // MARK: Pinching the card
+
+    // Two fingers resize the card around the point between them, and it follows them as they
+    // move. Meanwhile only a scale transform changes, which the GPU applies to what is already
+    // drawn: the video layer is not relaid out on every touch. Its real size is set once, when
+    // a finger lifts. A drag the second finger turned into a pinch carries on from where the
+    // card is.
+    private func cardPinchBegan(_ mid: CGPoint) {
+        guard let c = card else { return }
+        draggingCard = true
+        pinchWidth = c.bounds.width
+        pinchScale = 1
+        pinchAnchor = CGPoint(x: c.center.x - mid.x, y: c.center.y - mid.y)
+        c.layer.borderColor = MiniPlayerBar.liftedBorder
+    }
+
+    // Kept within the size range and wholly on screen.
+    private func cardPinchMoved(_ scale: CGFloat, _ mid: CGPoint) {
+        guard let c = card, let host = superview, !isHidden, pinchWidth > 0 else { return }
+        pinchScale = clampedCardWidth(pinchWidth * scale) / pinchWidth
+        c.transform = CGAffineTransform(scaleX: pinchScale, y: pinchScale)
+        let hw = c.bounds.width * pinchScale / 2, hh = c.bounds.height * pinchScale / 2
+        c.center = CGPoint(x: min(max(mid.x + pinchAnchor.x * pinchScale, hw), host.bounds.width - hw),
+                           y: min(max(mid.y + pinchAnchor.y * pinchScale, hh), host.bounds.height - hh))
+    }
+
+    // The new width is kept and remembered (cancelled, or the bar hid: the old one). The
+    // transform gives way to the real size where the card is, and it settles as a dropped card
+    // does — but never docks: only a drag onto the bar does that.
+    private func cardPinchEnded(cancelled: Bool) {
+        guard let c = card else { return }
+        draggingCard = false
+        c.layer.borderColor = MiniPlayerBar.cardBorder
+        let usable = !cancelled && !isHidden
+        if usable {
+            cardWidth = clampedCardWidth((pinchWidth * pinchScale).rounded())
+            UserDefaults.standard.set(String(format: "%.0f", Double(cardWidth)), forKey: MiniPlayerBar.widthKey)
+        }
+        let center = c.center, s = cardSize()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        c.transform = .identity   // before the frame: a frame under a transform is undefined
+        c.frame = CGRect(x: floor(center.x - s.width / 2), y: floor(center.y - s.height / 2),
+                         width: s.width, height: s.height)
+        fitSlotToCard()
+        CATransaction.commit()
+        if usable { rememberRestPlace(of: c, velocity: .zero) }
+        glideToRest(c)
     }
 
     @objc private func floatTapped() {
@@ -567,37 +673,82 @@ class MiniPlayerBar: UIView {
     }
 }
 
-// The floating card's surface (iPad). One view tells a tap from a drag with raw touches, like
-// the player's SeekTapView: a gesture recognizer next to buttons misfires on iOS 6, and this
-// way nothing runs between touches. A touch that travels more than `slop` is a drag and never
-// a tap. Positions are in window coordinates, which the card shares.
+// The floating card's surface (iPad). One view tells a tap, a drag and a pinch apart with raw
+// touches, like the player's SeekTapView: a gesture recognizer next to buttons misfires on
+// iOS 6, and a pinch recognizer would cancel these touches the moment it fired, snapping a drag
+// back. A touch that travels more than `slop` is a drag and never a tap. A second finger makes
+// it a pinch — a drag in progress becomes one — until either finger lifts; then nothing more
+// happens until the last one does. Positions are in window coordinates, which the card shares.
 private final class CardTouchView: UIView {
     var canDrag: (() -> Bool)?
     var onTap: (() -> Void)?
     var onDragBegan: (() -> Void)?
     var onDragMoved: ((CGPoint) -> Void)?            // finger travel since touch-down
     var onDragEnded: ((CGPoint, Bool) -> Void)?      // velocity in pt/s, cancelled
+    var onPinchBegan: ((CGPoint) -> Void)?           // the fingers' midpoint
+    var onPinchMoved: ((CGFloat, CGPoint) -> Void)?  // scale since the pinch began, midpoint now
+    var onPinchEnded: ((Bool) -> Void)?              // cancelled
 
     private static let slop: CGFloat = 10
+    private var fingers: [UITouch] = []   // down on this view, in the order they landed
+    private var multi = false             // a second finger came down: no tap or drag till all lift
     private var start = CGPoint.zero
     private var travelled = false
     private var dragging = false
+    private var pinching = false
+    private var pinchDistance: CGFloat = 1
     private var last = CGPoint.zero
     private var lastTime: TimeInterval = 0
     private var velocity = CGPoint.zero
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let t = touches.first else { return }
-        start = t.location(in: nil)
-        last = start
-        lastTime = t.timestamp
-        travelled = false
+        // A finger whose lift was never reported is not down any more.
+        let stale = fingers.filter { $0.phase == .ended || $0.phase == .cancelled }
+        if !stale.isEmpty { finish(Set(stale), cancelled: true) }
+        let wasEmpty = fingers.isEmpty
+        for t in touches where !fingers.contains(t) { fingers.append(t) }
+        if wasEmpty, let t = fingers.first {
+            multi = false
+            start = t.location(in: nil)
+            last = start
+            lastTime = t.timestamp
+            travelled = false
+            velocity = .zero
+        }
+        if fingers.count >= 2 && !multi { beginPinch() }
+    }
+
+    // From wherever the card is now: a drag in progress becomes the pinch.
+    private func beginPinch() {
+        multi = true
+        let wasDragging = dragging
         dragging = false
-        velocity = .zero
+        guard canDrag?() ?? false else {
+            if wasDragging { onDragEnded?(.zero, true) }
+            return
+        }
+        pinching = true
+        pinchDistance = max(1, fingerDistance())
+        onPinchBegan?(fingerMidpoint())
+    }
+
+    private func fingerDistance() -> CGFloat {
+        let a = fingers[0].location(in: nil), b = fingers[1].location(in: nil)
+        let dx = a.x - b.x, dy = a.y - b.y
+        return (dx * dx + dy * dy).squareRoot()
+    }
+
+    private func fingerMidpoint() -> CGPoint {
+        let a = fingers[0].location(in: nil), b = fingers[1].location(in: nil)
+        return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let t = touches.first else { return }
+        if pinching {
+            if fingers.count >= 2 { onPinchMoved?(fingerDistance() / pinchDistance, fingerMidpoint()) }
+            return
+        }
+        guard !multi, let t = fingers.first else { return }
         let p = t.location(in: nil)
         if !travelled {
             let dx = p.x - start.x, dy = p.y - start.y
@@ -619,21 +770,28 @@ private final class CardTouchView: UIView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let t = touches.first else { return }
-        if dragging {
-            dragging = false
-            // A finger that stopped before lifting threw nothing.
-            onDragEnded?(t.timestamp - lastTime > 0.1 ? .zero : velocity, false)
-        } else if !travelled, bounds.contains(t.location(in: self)) {
-            onTap?()
-        }
+        finish(touches, cancelled: false)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if dragging {
+        finish(touches, cancelled: true)
+    }
+
+    // Any finger up ends a pinch. A drag or a tap only ever had the one finger.
+    private func finish(_ touches: Set<UITouch>, cancelled: Bool) {
+        guard let t = fingers.first(where: { touches.contains($0) }) else { return }
+        fingers = fingers.filter { !touches.contains($0) }
+        if pinching {
+            pinching = false
+            onPinchEnded?(cancelled)
+        } else if dragging {
             dragging = false
-            onDragEnded?(.zero, true)
+            // A finger that stopped before lifting threw nothing.
+            onDragEnded?(cancelled || t.timestamp - lastTime > 0.1 ? .zero : velocity, cancelled)
+        } else if !cancelled, !multi, !travelled, bounds.contains(t.location(in: self)) {
+            onTap?()
         }
+        if fingers.isEmpty { multi = false }
     }
 }
 
