@@ -230,6 +230,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var fsOverlay: UIView?
     // Hosts action sheets while fullscreen is up on iOS 8+ (see ensureSheetWindow).
     private var sheetWindow: UIWindow?
+    // The playback menu as drawn over a landscape fullscreen before iOS 8 (see presentPlaybackSheet).
+    private var overlayMenu: OverlayMenu?
 
     // Playback controls (play/pause + scrubber)
     private var controlsView: UIView?
@@ -3333,7 +3335,34 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 4
-        sheet.show(in: sheetHost)
+        presentPlaybackSheet(sheet)
+    }
+
+    // The Playback menu and its three submenus all show through here.
+    //
+    // Before iOS 8 a UIActionSheet sizes itself for the portrait screen. On iPhone the app is
+    // portrait-locked and landscape fullscreen is fsOverlay turned 90 degrees by hand, so the
+    // sheet never learns it has only 320pt of height: its scrolling layout never kicks in, and
+    // a long list (Speed: six rates + Cancel) runs off the top of the screen (iOS 5.1.1 and
+    // 6). Over a landscape overlay the same rows are drawn by OverlayMenu instead, which
+    // measures the view it sits in. The sheet is still built: it holds the rows, the tag and
+    // the cancel index, and a pick goes through the same delegate method a tap on it would.
+    private func presentPlaybackSheet(_ sheet: UIActionSheet) {
+        guard let overlay = fsOverlay, overlay.bounds.width > overlay.bounds.height,
+              (UIDevice.current.systemVersion as NSString).floatValue < 8.0 else {
+            sheet.show(in: sheetHost)
+            return
+        }
+        overlayMenu?.removeFromSuperview()
+        let menu = OverlayMenu(sheet: sheet, frame: overlay.bounds)
+        menu.onPick = { [weak self, weak menu] index in
+            guard let self = self else { return }
+            if self.overlayMenu === menu { self.overlayMenu = nil }
+            self.actionSheet(sheet, clickedButtonAt: index)
+        }
+        overlay.addSubview(menu)
+        overlayMenu = menu
+        menu.present()
     }
 
     // Host view for the player's action sheets.
@@ -3412,7 +3441,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 7
-        sheet.show(in: sheetHost)
+        presentPlaybackSheet(sheet)
     }
 
     // YouTube's own qualityLabel already distinguishes the frame rate — the 60fps tiers come
@@ -3469,7 +3498,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 6
-        sheet.show(in: sheetHost)
+        presentPlaybackSheet(sheet)
     }
 
     // MARK: - Captions
@@ -3492,7 +3521,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         let cancelIdx = sheet.addButton(withTitle: "Cancel")
         sheet.cancelButtonIndex = cancelIdx
         sheet.tag = 5
-        sheet.show(in: sheetHost)
+        presentPlaybackSheet(sheet)
     }
 
     // Re-apply the track held by the singleton. This VC is built from scratch every time the
@@ -4450,6 +4479,9 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             layoutControls(width: w)
         }
         if let container = videoContainer { layoutStatusViews(in: container, fullscreen: false) }
+        // An open menu leaves with the overlay, unanswered — as a sheet shown in it would.
+        overlayMenu?.removeFromSuperview()
+        overlayMenu = nil
         overlay.removeFromSuperview()
         fsOverlay = nil
         teardownSheetWindow()
@@ -4530,6 +4562,145 @@ private class PassthroughWindow: UIWindow {
         if hit === self || hit === rootViewController?.view { return nil }
         return hit
     }
+}
+
+// A UIActionSheet's rows, drawn inside the landscape fullscreen overlay before iOS 8 (see
+// presentPlaybackSheet): a panel centred over the video, as tall as the rows need and no
+// taller than the overlay, the rows scrolling when they don't all fit. The checked row comes
+// in pre-scrolled into view. A pick reports the row's index in the sheet; Cancel and a tap
+// off the panel report the sheet's cancel index — what its delegate would have been told.
+private class OverlayMenu: UIView {
+    var onPick: ((Int) -> Void)?
+    private let cancelIndex: Int
+    private var scroll: UIScrollView?
+    private static let rowH: CGFloat = 40
+    private static let titleH: CGFloat = 34
+    private static let cancelH: CGFloat = 44
+    private static let margin: CGFloat = 12
+    private static let lineColor = UIColor(white: 1, alpha: 0.12)
+    private static let rowHighlight = UIColor(white: 1, alpha: 0.14)
+
+    init(sheet: UIActionSheet, frame: CGRect) {
+        cancelIndex = sheet.cancelButtonIndex
+        super.init(frame: frame)
+        backgroundColor = .clear
+
+        // Off the panel is Cancel. A button, not a gesture recognizer: on iOS 6 a recognizer
+        // fires alongside the buttons above it.
+        let backdrop = UIButton(type: .custom)
+        backdrop.frame = bounds
+        backdrop.backgroundColor = UIColor(white: 0, alpha: 0.5)
+        backdrop.addTarget(self, action: #selector(overlayCancelTapped), for: .touchUpInside)
+        addSubview(backdrop)
+
+        var rows: [(index: Int, title: String)] = []
+        for i in 0..<sheet.numberOfButtons where i != cancelIndex {
+            rows.append((i, sheet.buttonTitle(at: i) ?? ""))
+        }
+        let title = sheet.title
+        let cancelTitle = cancelIndex >= 0 ? (sheet.buttonTitle(at: cancelIndex) ?? "Cancel") : "Cancel"
+
+        let line = 1 / UIScreen.main.scale
+        let pw = min(bounds.width - 40, 320)
+        // Without a title the first row would meet the rounded top corner, where its square
+        // highlight would show — a little padding keeps it clear.
+        let topH = title.isEmpty ? 6 : OverlayMenu.titleH
+        let allRowsH = CGFloat(rows.count) * OverlayMenu.rowH
+        let roomH = bounds.height - 2 * OverlayMenu.margin - topH - line - OverlayMenu.cancelH
+        let rowsH = max(min(allRowsH, roomH), min(allRowsH, OverlayMenu.rowH))
+        let ph = topH + rowsH + line + OverlayMenu.cancelH
+
+        let panel = UIView(frame: CGRect(x: floor((bounds.width - pw) / 2), y: floor((bounds.height - ph) / 2),
+                                         width: pw, height: ph))
+        panel.backgroundColor = UIColor(white: 0.12, alpha: 0.97)
+        // No clipsToBounds (an off-screen pass on every frame): the layer's own background
+        // rounds fine, and nothing filled reaches a corner — Cancel highlights by colour.
+        panel.layer.cornerRadius = 10
+        addSubview(panel)
+
+        if !title.isEmpty {
+            let lbl = UILabel(frame: CGRect(x: 12, y: 0, width: pw - 24, height: topH))
+            lbl.backgroundColor = .clear     // iOS 6 defaults UILabel backgrounds to WHITE
+            lbl.textColor = UIColor(white: 0.6, alpha: 1)
+            lbl.font = UIFont.boldSystemFont(ofSize: 13)
+            lbl.textAlignment = .center
+            lbl.text = title
+            panel.addSubview(lbl)
+        }
+
+        let sv = UIScrollView(frame: CGRect(x: 0, y: topH, width: pw, height: rowsH))
+        sv.backgroundColor = .clear
+        sv.contentSize = CGSize(width: pw, height: allRowsH)
+        sv.indicatorStyle = .white
+        sv.isScrollEnabled = allRowsH > rowsH
+        panel.addSubview(sv)
+        scroll = sv
+
+        var checkedY: CGFloat = -1
+        for (n, row) in rows.enumerated() {
+            let y = CGFloat(n) * OverlayMenu.rowH
+            let checked = row.title.hasPrefix("\u{2713}")
+            if checked { checkedY = y }
+            let b = UIButton(type: .custom)
+            b.frame = CGRect(x: 0, y: y, width: pw, height: OverlayMenu.rowH)
+            b.tag = row.index
+            b.setTitle(row.title, for: .normal)
+            b.setTitleColor(checked ? Theme.accent : .white, for: .normal)
+            b.titleLabel?.font = checked ? UIFont.boldSystemFont(ofSize: 16) : UIFont.systemFont(ofSize: 16)
+            b.titleLabel?.lineBreakMode = .byTruncatingTail
+            b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
+            b.addTarget(self, action: #selector(overlayRowDown(_:)), for: [.touchDown, .touchDragEnter])
+            b.addTarget(self, action: #selector(overlayRowUp(_:)), for: [.touchUpOutside, .touchCancel, .touchDragExit])
+            b.addTarget(self, action: #selector(overlayRowTapped(_:)), for: .touchUpInside)
+            sv.addSubview(b)
+            let sep = UIView(frame: CGRect(x: 0, y: y, width: pw, height: line))
+            sep.backgroundColor = OverlayMenu.lineColor
+            sep.isUserInteractionEnabled = false
+            sv.addSubview(sep)
+        }
+        if sv.isScrollEnabled, checkedY >= 0 {
+            let centred = checkedY + OverlayMenu.rowH / 2 - rowsH / 2
+            sv.contentOffset = CGPoint(x: 0, y: min(max(centred, 0), allRowsH - rowsH))
+        }
+
+        let cancelLine = UIView(frame: CGRect(x: 0, y: topH + rowsH, width: pw, height: line))
+        cancelLine.backgroundColor = UIColor(white: 1, alpha: 0.25)
+        panel.addSubview(cancelLine)
+        let cancel = UIButton(type: .custom)
+        cancel.frame = CGRect(x: 0, y: topH + rowsH + line, width: pw, height: OverlayMenu.cancelH)
+        cancel.setTitle(cancelTitle, for: .normal)
+        cancel.setTitleColor(.white, for: .normal)
+        cancel.setTitleColor(UIColor(white: 0.5, alpha: 1), for: .highlighted)
+        cancel.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+        cancel.addTarget(self, action: #selector(overlayCancelTapped), for: .touchUpInside)
+        panel.addSubview(cancel)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func present() {
+        alpha = 0
+        UIView.animate(withDuration: 0.2, animations: { self.alpha = 1 }, completion: { _ in
+            // The rows run past the panel: the indicator says there is more below.
+            if self.scroll?.isScrollEnabled == true { self.scroll?.flashScrollIndicators() }
+        })
+    }
+
+    // One answer per menu, however fast the taps come.
+    private func finish(_ index: Int?) {
+        isUserInteractionEnabled = false
+        let pick = onPick
+        onPick = nil
+        UIView.animate(withDuration: 0.15, animations: { self.alpha = 0 }, completion: { _ in
+            self.removeFromSuperview()
+        })
+        if let i = index { pick?(i) }
+    }
+
+    @objc private func overlayRowTapped(_ sender: UIButton) { finish(sender.tag) }
+    @objc private func overlayCancelTapped() { finish(cancelIndex >= 0 ? cancelIndex : nil) }
+    @objc private func overlayRowDown(_ sender: UIButton) { sender.backgroundColor = OverlayMenu.rowHighlight }
+    @objc private func overlayRowUp(_ sender: UIButton) { sender.backgroundColor = .clear }
 }
 
 // Holding still for half a second is a hold (2x while the finger stays down). canHold is
