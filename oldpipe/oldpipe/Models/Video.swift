@@ -66,9 +66,17 @@ struct Video {
         let lower = text.lowercased()
         if lower.isEmpty { return .infinity }
         var digits = ""
+        var afterDigits = ""   // the letters straight after the number: "mo" in "1mo ago"
+        var pastNumber = false
         for ch in lower {
-            if ch.isNumber { digits.append(ch) }
-            else if !digits.isEmpty { break }
+            if !pastNumber {
+                if ch.isNumber { digits.append(ch); continue }
+                if digits.isEmpty { continue }
+                pastNumber = true
+            }
+            if ch == " " && afterDigits.isEmpty { continue }
+            guard ch.isLetter else { break }
+            afterDigits.append(ch)
         }
         let num = Double(digits) ?? 1
         let unit: Double
@@ -79,9 +87,23 @@ struct Video {
         else if lower.contains("hour")   { unit = 3_600 }
         else if lower.contains("minute") { unit = 60 }
         else if lower.contains("second") { unit = 1 }
+        else if lower.contains("ago"), !digits.isEmpty,
+                let short = shortUnits[afterDigits] { unit = short }
         else { return .infinity }
         return num * unit
     }
+
+    // The related list writes its dates short: "1mo ago", "2w ago", "9d ago". Matched as the
+    // whole word after the number, so "m" (minutes) and "mo" (months) stay apart.
+    private static let shortUnits: [String: Double] = [
+        "y": 31_536_000, "yr": 31_536_000, "yrs": 31_536_000,
+        "mo": 2_592_000, "mos": 2_592_000,
+        "w": 604_800, "wk": 604_800, "wks": 604_800,
+        "d": 86_400,
+        "h": 3_600, "hr": 3_600, "hrs": 3_600,
+        "m": 60, "min": 60, "mins": 60,
+        "s": 1, "sec": 1, "secs": 1
+    ]
 
     // Build a fresh relative string ("3 days ago") from an absolute epoch.
     static func relativeString(from ts: Double) -> String {

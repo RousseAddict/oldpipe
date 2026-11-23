@@ -272,15 +272,8 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         // The crash log is separate from the debug log above: always recorded, written straight
         // to disk, and it covers the launch path — so it is the one to ask a user for when the
         // app dies before it can show anything.
-        let crashHint = UILabel(frame: CGRect(x: pad, y: y, width: contentW, height: 34))
-        crashHint.backgroundColor = .clear
-        crashHint.textColor = UIColor(white: 0.55, alpha: 1)
-        crashHint.font = UIFont.systemFont(ofSize: 11)
-        crashHint.numberOfLines = 2
-        crashHint.autoresizingMask = iPadFlexWidth
-        crashHint.text = "Crash log is always on. If the app won't start, copy the file(s) named oldpipe-launch*.log from the app's Documents folder."
-        scrollView.addSubview(crashHint)
-        y += 34 + 6
+        y = addSubtitle("Crash log is always on. If the app won't start, copy the file(s) named oldpipe-launch*.log from the app's Documents folder.",
+                        at: y, width: contentW, pad: pad, fontSize: 11)
 
         let copyCrash = makeButton("Copy Crash Log", at: y, width: contentW, pad: pad, accent: false)
         copyCrash.addTarget(self, action: #selector(copyCrashTapped), for: .touchUpInside)
@@ -551,16 +544,23 @@ class SettingsVC: UIViewController, UIGestureRecognizerDelegate, UIAlertViewDele
         return y + 26 + 4
     }
 
-    private func addSubtitle(_ text: String, at y: CGFloat, width: CGFloat, pad: CGFloat) -> CGFloat {
-        let l = UILabel(frame: CGRect(x: pad, y: y, width: width, height: 44))
+    // As tall as its text. A fixed two-line box cut the longer ones off with "..." on an
+    // iPhone. Before iOS 7, sizeThatFits measures one line unless BOTH numberOfLines 0 and
+    // word wrapping are set.
+    private func addSubtitle(_ text: String, at y: CGFloat, width: CGFloat, pad: CGFloat,
+                             fontSize: CGFloat = 13) -> CGFloat {
+        let l = UILabel()
         l.backgroundColor = .clear
         l.textColor = UIColor(white: 0.55, alpha: 1)
-        l.font = UIFont.systemFont(ofSize: 13)
+        l.font = UIFont.systemFont(ofSize: fontSize)
         l.numberOfLines = 0
+        l.lineBreakMode = .byWordWrapping
         l.text = text
+        let h = ceil(l.sizeThatFits(CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)).height)
+        l.frame = CGRect(x: pad, y: y, width: width, height: h)
         l.autoresizingMask = iPadFlexWidth
         scrollView.addSubview(l)
-        return y + 44 + 8
+        return y + h + 8
     }
 
     private func makeButton(_ title: String, at y: CGFloat, width: CGFloat, pad: CGFloat, accent isAccent: Bool) -> UIButton {

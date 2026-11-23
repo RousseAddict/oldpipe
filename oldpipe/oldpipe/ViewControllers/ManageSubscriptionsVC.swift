@@ -297,10 +297,27 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         let cell = tableView.dequeueCell(ChannelCell.self, ChannelCell.reuseId, for: indexPath)
         let channel = rows[indexPath.row]
         cell.configure(with: channel)
-        cell.accessoryType = isEditingMembership
-            ? (memberIds.contains(channel.id) ? .checkmark : .none)
-            : .detailDisclosureButton
+        cell.accessoryView = isEditingMembership
+            ? (memberIds.contains(channel.id) ? Theme.checkmark() : nil)
+            : groupsButton()
         return cell
+    }
+
+    // The way into "which groups is this channel in". A labelled pill in the strip's own
+    // style, where the stock blue detail-disclosure circle used to be (the only blue in the app,
+    // and it didn't say what it opened).
+    private func groupsButton() -> UIButton {
+        let b = UIButton(type: .custom)
+        b.titleLabel?.font = UIFont.boldSystemFont(ofSize: 12)
+        b.setTitle("Groups", for: .normal)
+        b.setTitleColor(UIColor(white: 0.7, alpha: 1), for: .normal)
+        b.setTitleColor(UIColor(white: 0.45, alpha: 1), for: .highlighted)
+        b.sizeToFit()
+        b.frame = CGRect(x: 0, y: 0, width: b.bounds.width + 20, height: 26)
+        b.backgroundColor = UIColor(white: 0.18, alpha: 1)
+        b.layer.cornerRadius = 13   // no clipsToBounds, as the pills above
+        b.addTarget(self, action: #selector(groupsTapped(_:)), for: .touchUpInside)
+        return b
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
@@ -340,8 +357,8 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
                 memberIds.insert(channel.id)
                 ChannelGroupManager.add(channelId: channel.id, to: g.id)
             }
-            tableView.cellForRow(at: indexPath)?.accessoryType =
-                memberIds.contains(channel.id) ? .checkmark : .none
+            tableView.cellForRow(at: indexPath)?.accessoryView =
+                memberIds.contains(channel.id) ? Theme.checkmark() : nil
             groups = ChannelGroupManager.all()
             updateNavItems()
             return
@@ -350,11 +367,13 @@ class ManageSubscriptionsVC: UIViewController, UITableViewDataSource, UITableVie
         navigationController?.openChannel(id: channel.id, name: channel.name)
     }
 
-    // The inverse of the pill filter: which groups is this one channel in.
-    func tableView(_ tableView: UITableView, accessoryButtonTappedForRowWith indexPath: IndexPath) {
-        guard !isEditingMembership else { return }
-        navigationController?.pushViewController(
-            ChannelGroupsVC(channel: rows[indexPath.row]), animated: true)
+    // The inverse of the pill filter: which groups is this one channel in. The row is found
+    // from where the pill sits, as a reused cell's button carries no row of its own.
+    @objc private func groupsTapped(_ sender: UIButton) {
+        guard !isEditingMembership, let tv = tableView else { return }
+        let centre = sender.convert(CGPoint(x: sender.bounds.midX, y: sender.bounds.midY), to: tv)
+        guard let ip = tv.indexPathForRow(at: centre), ip.row < rows.count else { return }
+        navigationController?.pushViewController(ChannelGroupsVC(channel: rows[ip.row]), animated: true)
     }
 }
 
@@ -445,12 +464,12 @@ class ChannelGroupsVC: UIViewController, UITableViewDataSource, UITableViewDeleg
         if indexPath.row == groups.count {
             cell.textLabel?.text = "New Group..."
             cell.textLabel?.textColor = UIColor(red: 0.98, green: 0.27, blue: 0.27, alpha: 1)
-            cell.accessoryType = .none
+            cell.accessoryView = nil
         } else {
             let g = groups[indexPath.row]
             cell.textLabel?.text = g.name
             cell.textLabel?.textColor = UIColor(white: 0.95, alpha: 1)
-            cell.accessoryType = g.channelIds.contains(channel.id) ? .checkmark : .none
+            cell.accessoryView = g.channelIds.contains(channel.id) ? Theme.checkmark() : nil
         }
 
         let sel = UIView()
@@ -553,7 +572,8 @@ private class ChannelCell: UITableViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        nameLbl.frame = CGRect(x: 64, y: 0, width: contentView.bounds.width - 64 - 44,
+        // The content view already stops short of the accessory (the Groups pill or the tick).
+        nameLbl.frame = CGRect(x: 64, y: 0, width: max(0, contentView.bounds.width - 64 - 8),
                                height: contentView.bounds.height)
     }
 }

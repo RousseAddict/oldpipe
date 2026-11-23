@@ -156,7 +156,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
             b.frame = CGRect(x: bw * CGFloat(i), y: 0, width: bw, height: tabBarH)
             b.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
             b.setTitle(t, for: .normal)
-            b.setTitleColor(UIColor(white: 0.55, alpha: 1), for: .normal)
+            b.setTitleColor(Theme.tabIdle, for: .normal)
             b.tag = i
             b.addTarget(self, action: #selector(tabTapped(_:)), for: .touchUpInside)
             tabBar.addSubview(b)
@@ -260,7 +260,7 @@ class ChannelVC: UIViewController, UITableViewDataSource, UITableViewDelegate {
 
     private func updateTabIndicator() {
         for (i, b) in tabButtons.enumerated() {
-            b.setTitleColor(i == selectedTab ? accent : UIColor(white: 0.55, alpha: 1), for: .normal)
+            b.setTitleColor(i == selectedTab ? Theme.tabSelected : Theme.tabIdle, for: .normal)
         }
         let bw = UIScreen.main.bounds.width / CGFloat(max(tabButtons.count, 1))
         tabIndicator.frame = CGRect(x: bw * CGFloat(selectedTab), y: tabBarH - 2, width: bw, height: 2)
@@ -517,7 +517,7 @@ private class YTPlaylistRowCell: UITableViewCell {
         countLabel.font = UIFont.systemFont(ofSize: 12)
         contentView.addSubview(countLabel)
 
-        accessoryType = .disclosureIndicator
+        accessoryView = Theme.chevron()
         let sel = UIView()
         sel.backgroundColor = UIColor(white: 0.15, alpha: 1)
         selectedBackgroundView = sel

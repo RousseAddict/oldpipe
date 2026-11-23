@@ -423,8 +423,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         sp.onBoostEnded = nil
         // A hold does not outlive the page: the finger's release would land nowhere.
         holdEnded()
-        // Nor does a menu (autoplay can move on to the next video under one).
+        // Nor does a menu or the Download picker (autoplay can move on to the next video
+        // under one).
         AppMenu.dismiss(ownedBy: self)
+        DownloadOptionsView.dismiss(ownedBy: self)
         sp.onStartSettled = nil
         sp.onAdvanceFailed = nil
         sp.onEnded = nil
@@ -1636,8 +1638,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             let b = UIButton(type: .custom)
             b.frame = CGRect(x: padding + CGFloat(i) * tabW, y: y, width: tabW, height: tabH)
             b.setTitle(title, for: .normal)
-            b.setTitleColor(selected ? UIColor(white: 0.95, alpha: 1) : UIColor(white: 0.45, alpha: 1),
-                            for: .normal)
+            b.setTitleColor(selected ? Theme.tabSelected : Theme.tabIdle, for: .normal)
             b.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
             b.tag = i
             b.addTarget(self, action: #selector(detailTabTapped(_:)), for: .touchUpInside)
@@ -3991,7 +3992,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             modal.setConfirmTitle(toPhotos || toFile ? "Download & Save" : "Download")
         }
 
-        DownloadOptionsView.present(in: view, title: "Download", sections: sections,
+        DownloadOptionsView.present(from: self, title: "Download", sections: sections,
                                     confirmTitle: "Download", onChange: onChange) { [weak self] picked in
             guard let self = self, picked.count == sections.count else { return }
 
@@ -4276,9 +4277,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     private func enterFullscreen() {
         guard sp.isActive(video.id), let window = view.window else { return }
-        // A menu open on the page would end up under the overlay (turning the phone sideways
-        // enters fullscreen with one up). It goes, unanswered.
+        // A menu or the Download picker open on the page would end up under the overlay
+        // (turning the phone sideways enters fullscreen with one up). It goes, unanswered.
         AppMenu.dismiss(ownedBy: self)
+        DownloadOptionsView.dismiss(ownedBy: self)
         let pLayer = sp.layer
 
         // The app is portrait-locked, so UIScreen.main.bounds is always the portrait

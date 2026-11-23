@@ -2,19 +2,24 @@ import UIKit
 
 // MARK: - DownloadOptionsView
 //
-// The "Download" modal: a card over a dimmed backdrop, built from a list of SECTIONS of rows.
-// The video page fills it with Save to, Video, Audio and Captions; they slot in by appending
-// another Section — the layout and hit-testing walk the array and know nothing about what a
-// section means. The one place a caller reacts to a tap is onChange (Photos greys out Audio
-// and Captions).
+// The Download picker: sections of rows over a dimmed screen, confirmed with Download. The
+// video page fills it with Save to, Video, Audio and Captions; another section slots in by
+// appending another Section — the layout and hit-testing walk the array and know nothing
+// about what a section means. The one place a caller reacts to a tap is onChange (Photos
+// greys out Audio and Captions).
 //
-// A real view rather than a UIActionSheet because a sheet is a flat list of buttons: it can't
-// carry a per-row size estimate, a section header, or the extra sections coming later.
+// A view of its own rather than an AppMenu: a menu is a flat list answered by one tap, while
+// this carries a size per row, section headings, several ticks at once and a confirm step.
+// It is drawn as an AppMenu all the same (panel, heading, rows, red ticks, the Cancel bar) on
+// every iOS, and opens where one does: over the whole window. Inside the page's view, the mini
+// bar of another video sat on top of its buttons.
 //
-// iOS 6 house rules observed throughout: every UILabel gets an explicit clear background (the
-// default is WHITE, which is invisible-on-invisible here), buttons are .custom (.system
-// overrides title colours), no tintColor (unrecognized selector on iOS 6), and taps are plain
-// UIButton targets — a UITapGestureRecognizer on this view would fire alongside the row buttons.
+// iOS 5/6 rules followed throughout, as in AppMenu:
+//  - Every UILabel gets a clear background (the default is white).
+//  - Buttons are .custom, and no tintColor (an unrecognized selector on iOS 6).
+//  - Taps are button targets, not recognizers (on iOS 6 a recognizer fires alongside the
+//    buttons above it).
+//  - No clipsToBounds with a corner radius (an off-screen render pass on every frame).
 
 struct DownloadOptionRow {
     let title: String       // "720p"
@@ -48,32 +53,24 @@ struct DownloadOptionSection {
 
 final class DownloadOptionsView: UIView {
 
-    // MARK: - Look
-    //
-    // iOS 6 is flat and fully opaque with hard edges; iOS 7+ gets the lighter, rounder treatment
-    // the rest of that build uses. Compile-time rather than a runtime version check, so each IPA
-    // carries exactly one look — the same split the rest of the player VC uses.
-    #if IOS6_TARGET
-    private static let cardCorner: CGFloat = 0
-    private static let rowCorner: CGFloat = 0
-    private static let backdropAlpha: CGFloat = 0.55
-    private static let cardBG = UIColor(red: 0.13, green: 0.13, blue: 0.13, alpha: 1)
-    private static let rowBG = UIColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1)
-    private static let separator = UIColor(white: 1, alpha: 0.10)
-    #else
-    private static let cardCorner: CGFloat = 12
-    private static let rowCorner: CGFloat = 6
-    private static let backdropAlpha: CGFloat = 0.70
-    private static let cardBG = UIColor(red: 0.11, green: 0.11, blue: 0.11, alpha: 1)
-    private static let rowBG = UIColor(red: 0.18, green: 0.18, blue: 0.18, alpha: 1)
-    private static let separator = UIColor(white: 1, alpha: 0.07)
-    #endif
+    // The picker up right now, if any. (Also how the iOS 5 build's press/ hook finds it.)
+    private(set) static weak var current: DownloadOptionsView?
 
-    private static let rowHeight: CGFloat = 46
-    private static let headerHeight: CGFloat = 26
-    private static let footerHeight: CGFloat = 56
-    private static let cardPadding: CGFloat = 12
-    private static let maxCardWidth: CGFloat = 400   // keeps the card sane on an iPad
+    // AppMenu's measures, so the two read as one.
+    private static let rowH: CGFloat = 40
+    private static let headerH: CGFloat = 26
+    private static let titleH: CGFloat = 34
+    private static let footH: CGFloat = 44
+    private static let margin: CGFloat = 12
+    private static let maxWidth: CGFloat = 320
+    private static let markW: CGFloat = 28
+    private static let detailW: CGFloat = 90
+    private static let lineColor = UIColor(white: 1, alpha: 0.12)
+    private static let footLineColor = UIColor(white: 1, alpha: 0.25)
+    private static let rowHighlight = UIColor(white: 1, alpha: 0.14)
+    // A row's own mark (already downloaded) when it isn't the one ticked: grey, so the red
+    // tick stays the pick.
+    private static let markGrey = UIColor(white: 0.5, alpha: 1)
 
     // MARK: - State
 
@@ -82,48 +79,58 @@ final class DownloadOptionsView: UIView {
     private var selection: [Set<Int>]
     // A greyed-out section keeps its ticks, so turning it back on restores them.
     private var sectionEnabled: [Bool]
-    private let confirmTitle: String
     private var onConfirm: (([[Int]]) -> Void)?
     private var onChange: ((DownloadOptionsView, [[Int]]) -> Void)?
+    private weak var owner: UIViewController?
+    private var done = false
 
     private let backdrop = UIButton(type: .custom)
-    private let card = UIView()
+    private let panel = UIView()
     private let titleLabel = UILabel()
+    private let scroll = UIScrollView()
+    private let footLine = UIView()
+    private let footDivider = UIView()
     private let confirmBtn = UIButton(type: .custom)
     private let cancelBtn = UIButton(type: .custom)
-    // Row buttons, flattened in the same order the sections declare them, so a button's index
+    // Row buttons, flattened in the same order the sections declare them, so a button's tag
     // maps back to (section, row) through rowIndexPaths.
     private var rowButtons: [UIButton] = []
+    private var rowLines: [UIView] = []
     private var rowIndexPaths: [(section: Int, row: Int)] = []
     // Held explicitly rather than reached through btn.subviews[n]: UIButton creates its own
     // titleLabel/imageView lazily, so subview order is not ours to depend on.
     private var rowNameLabels: [UILabel] = []
     private var rowDetailLabels: [UILabel] = []
     private var rowMarkLabels: [UILabel] = []
-    private var headerLabels: [UILabel] = []
     private var sectionHeaders: [Int: UILabel] = [:]
-    private var scroller = UIScrollView()
 
     // MARK: - Presentation
 
-    // Add to `host` (the presenting VC's view) and fade in. Sized from the host's bounds and
-    // flexible in both axes, so the iOS 8 build's iPad rotation reflows it for free and the
-    // portrait-locked iOS 6/7 builds compile the mask to [] exactly as every other view does.
-    // `onChange` runs after every tap, and once before the modal shows, with the ticks so far.
+    // Open over the whole window of `page`, above the mini bar and the iPad video card, and
+    // fade in. Nothing opens for a page that isn't on screen. `onChange` runs after every tap,
+    // and once before the picker shows, with the ticks so far.
     @discardableResult
-    static func present(in host: UIView, title: String, sections: [DownloadOptionSection],
+    static func present(from page: UIViewController, title: String, sections: [DownloadOptionSection],
                         confirmTitle: String,
                         onChange: ((DownloadOptionsView, [[Int]]) -> Void)? = nil,
-                        onConfirm: @escaping ([[Int]]) -> Void) -> DownloadOptionsView {
-        let v = DownloadOptionsView(frame: host.bounds, title: title, sections: sections,
+                        onConfirm: @escaping ([[Int]]) -> Void) -> DownloadOptionsView? {
+        guard let host = page.view.window else { return nil }
+        current?.close()
+        let v = DownloadOptionsView(frame: host.bounds, owner: page, title: title, sections: sections,
                                     confirmTitle: confirmTitle, onConfirm: onConfirm)
         v.onChange = onChange
         v.notifyChange()
-        v.autoresizingMask = iPadFlexWidthHeight
-        v.alpha = 0
         host.addSubview(v)
-        UIView.animate(withDuration: 0.18) { v.alpha = 1 }
+        current = v
+        v.present()
         return v
+    }
+
+    // Take down the picker `page` opened, if it is up, without an answer: for a page that is
+    // leaving (autoplay can move on to the next video under it).
+    static func dismiss(ownedBy page: UIViewController) {
+        guard let v = current, v.owner == nil || v.owner === page else { return }
+        v.close()
     }
 
     // MARK: - Changes from onChange
@@ -152,74 +159,69 @@ final class DownloadOptionsView: UIView {
         confirmBtn.setTitle(title, for: .normal)
     }
 
-    func dismiss() {
-        UIView.animate(withDuration: 0.15, animations: { self.alpha = 0 }) { _ in
-            self.removeFromSuperview()
-        }
-    }
-
-    private init(frame: CGRect, title: String, sections: [DownloadOptionSection],
-                 confirmTitle: String,
+    private init(frame: CGRect, owner: UIViewController, title: String,
+                 sections: [DownloadOptionSection], confirmTitle: String,
                  onConfirm: @escaping ([[Int]]) -> Void) {
         self.sections = sections
         self.selection = sections.map { Set($0.initialSelection) }
         self.sectionEnabled = sections.map { _ in true }
-        self.confirmTitle = confirmTitle
         self.onConfirm = onConfirm
+        self.owner = owner
         super.init(frame: frame)
-        buildUI(title: title)
+        buildUI(title: title, confirmTitle: confirmTitle)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
     // MARK: - Build
 
-    private func buildUI(title: String) {
-        backgroundColor = UIColor.clear
+    private func buildUI(title: String, confirmTitle: String) {
+        backgroundColor = .clear
+        // Follows the window when the iPad turns; layoutSubviews then refits the panel.
+        autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-        // Backdrop doubles as the tap-to-dismiss target. A full-bleed button rather than a
-        // gesture recognizer, so it cannot fire alongside a row button underneath it.
-        backdrop.frame = bounds
-        backdrop.autoresizingMask = iPadFlexWidthHeight
-        backdrop.backgroundColor = UIColor(white: 0, alpha: DownloadOptionsView.backdropAlpha)
-        backdrop.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
+        // Off the panel is Cancel.
+        backdrop.backgroundColor = UIColor(white: 0, alpha: 0.5)
+        backdrop.addTarget(self, action: #selector(pickerCancelTapped), for: .touchUpInside)
         addSubview(backdrop)
 
-        card.backgroundColor = DownloadOptionsView.cardBG
-        // No clipsToBounds: cornerRadius alone rounds the layer background, and clipping would
-        // force an off-screen render pass every frame (the OSR rule).
-        card.layer.cornerRadius = DownloadOptionsView.cardCorner
-        addSubview(card)
+        // Opaque, as AppMenu: the page's text must not show through behind the rows.
+        panel.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        panel.layer.cornerRadius = 10
+        addSubview(panel)
 
         titleLabel.text = title
-        titleLabel.textColor = UIColor.white
-        titleLabel.backgroundColor = UIColor.clear
-        titleLabel.font = UIFont.boldSystemFont(ofSize: 17)
+        titleLabel.textColor = UIColor(white: 0.6, alpha: 1)
+        titleLabel.backgroundColor = .clear
+        titleLabel.font = UIFont.boldSystemFont(ofSize: 13)
         titleLabel.textAlignment = .center
-        card.addSubview(titleLabel)
+        panel.addSubview(titleLabel)
 
-        scroller.showsVerticalScrollIndicator = true
-        scroller.backgroundColor = UIColor.clear
-        card.addSubview(scroller)
+        scroll.backgroundColor = .clear
+        scroll.indicatorStyle = .white
+        panel.addSubview(scroll)
 
         buildRows()
 
-        confirmBtn.setTitle(confirmTitle, for: .normal)
-        confirmBtn.setTitleColor(UIColor.white, for: .normal)
-        confirmBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
-        confirmBtn.backgroundColor = Theme.accent
-        confirmBtn.layer.cornerRadius = DownloadOptionsView.rowCorner
-        confirmBtn.addTarget(self, action: #selector(confirmTapped), for: .touchUpInside)
-        card.addSubview(confirmBtn)
+        footLine.backgroundColor = DownloadOptionsView.footLineColor
+        panel.addSubview(footLine)
+        footDivider.backgroundColor = DownloadOptionsView.footLineColor
+        panel.addSubview(footDivider)
 
+        // Cancel where a menu has it, and the confirm beside it in red.
         cancelBtn.setTitle("Cancel", for: .normal)
-        cancelBtn.setTitleColor(UIColor(white: 0.7, alpha: 1), for: .normal)
-        cancelBtn.titleLabel?.font = UIFont.systemFont(ofSize: 16)
-        cancelBtn.backgroundColor = UIColor.clear
-        cancelBtn.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
-        card.addSubview(cancelBtn)
+        cancelBtn.setTitleColor(.white, for: .normal)
+        cancelBtn.setTitleColor(UIColor(white: 0.5, alpha: 1), for: .highlighted)
+        cancelBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+        cancelBtn.addTarget(self, action: #selector(pickerCancelTapped), for: .touchUpInside)
+        panel.addSubview(cancelBtn)
 
-        layoutCard()
+        confirmBtn.setTitle(confirmTitle, for: .normal)
+        confirmBtn.setTitleColor(Theme.accent, for: .normal)
+        confirmBtn.setTitleColor(Theme.accent.withAlphaComponent(0.5), for: .highlighted)
+        confirmBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+        confirmBtn.addTarget(self, action: #selector(pickerConfirmTapped), for: .touchUpInside)
+        panel.addSubview(confirmBtn)
     }
 
     private func buildRows() {
@@ -228,48 +230,50 @@ final class DownloadOptionsView: UIView {
                 let header = UILabel()
                 header.text = section.title.uppercased()
                 header.textColor = UIColor(white: 0.55, alpha: 1)
-                header.backgroundColor = UIColor.clear
+                header.backgroundColor = .clear
                 header.font = UIFont.boldSystemFont(ofSize: 11)
-                scroller.addSubview(header)
-                headerLabels.append(header)
+                scroll.addSubview(header)
                 sectionHeaders[s] = header
             }
             for (r, row) in section.rows.enumerated() {
                 let btn = UIButton(type: .custom)
-                btn.backgroundColor = DownloadOptionsView.rowBG
-                btn.layer.cornerRadius = DownloadOptionsView.rowCorner
                 btn.isEnabled = row.enabled
-                btn.addTarget(self, action: #selector(rowTapped(_:)), for: .touchUpInside)
                 btn.tag = rowButtons.count
-                scroller.addSubview(btn)
+                btn.addTarget(self, action: #selector(pickerRowDown(_:)), for: [.touchDown, .touchDragEnter])
+                btn.addTarget(self, action: #selector(pickerRowUp(_:)), for: [.touchUpOutside, .touchCancel, .touchDragExit])
+                btn.addTarget(self, action: #selector(pickerRowTapped(_:)), for: .touchUpInside)
+                scroll.addSubview(btn)
 
+                let sep = UIView()
+                sep.backgroundColor = DownloadOptionsView.lineColor
+                sep.isUserInteractionEnabled = false
+                scroll.addSubview(sep)
+
+                // Font and colour come from refreshSelectionMarks: red and bold when ticked.
                 let name = UILabel()
                 name.text = row.title
-                name.textColor = row.enabled ? UIColor.white : UIColor(white: 0.45, alpha: 1)
-                name.backgroundColor = UIColor.clear
-                name.font = UIFont.boldSystemFont(ofSize: 15)
+                name.backgroundColor = .clear
+                name.lineBreakMode = .byTruncatingTail
                 btn.addSubview(name)
 
                 let detail = UILabel()
                 detail.text = row.detail
                 detail.textColor = UIColor(white: 0.6, alpha: 1)
-                detail.backgroundColor = UIColor.clear
-                detail.font = UIFont.systemFont(ofSize: 12)
+                detail.backgroundColor = .clear
+                detail.font = UIFont.systemFont(ofSize: 13)
                 detail.textAlignment = .right
                 btn.addSubview(detail)
 
-                // Selection tick. Kept as a label (not an image) so it costs nothing and
-                // renders identically on every build; "\u{2713}" predates iOS 6's font by
-                // decades, unlike the Unicode 7.0 glyphs that render blank there.
+                // The tick. A label, not an image: "\u{2713}" is in iOS 5's font, unlike the
+                // Unicode 7.0 glyphs that render blank there.
                 let mark = UILabel()
-                mark.text = row.mark
-                mark.textColor = Theme.accent
-                mark.backgroundColor = UIColor.clear
-                mark.font = UIFont.boldSystemFont(ofSize: 15)
+                mark.backgroundColor = .clear
+                mark.font = UIFont.boldSystemFont(ofSize: 16)
                 mark.textAlignment = .center
                 btn.addSubview(mark)
 
                 rowButtons.append(btn)
+                rowLines.append(sep)
                 rowIndexPaths.append((s, r))
                 rowNameLabels.append(name)
                 rowDetailLabels.append(detail)
@@ -281,81 +285,77 @@ final class DownloadOptionsView: UIView {
 
     // MARK: - Layout
 
+    // Everything is placed from the picker's current size, so the first layout and a refit
+    // after the iPad turns are the same code (AppMenu's layout, with headings and a two-button
+    // bar).
     override func layoutSubviews() {
         super.layoutSubviews()
-        layoutCard()
-    }
+        backdrop.frame = bounds
+        let line = 1 / UIScreen.main.scale
+        let rowH = DownloadOptionsView.rowH, headerH = DownloadOptionsView.headerH
+        let topH = DownloadOptionsView.titleH, footH = DownloadOptionsView.footH
+        let markW = DownloadOptionsView.markW, detailW = DownloadOptionsView.detailW
+        let pw = min(bounds.width - 40, DownloadOptionsView.maxWidth)
+        // The status bar overlays the window's top edge: the panel centres in the room below.
+        let top: CGFloat = superview is UIWindow ? UIApplication.shared.statusBarFrame.height : 0
 
-    private func layoutCard() {
-        let W = bounds.width, H = bounds.height
-        guard W > 0, H > 0 else { return }
-        let pad = DownloadOptionsView.cardPadding
-        let cardW = min(W - pad * 2, DownloadOptionsView.maxCardWidth)
+        titleLabel.frame = CGRect(x: 12, y: 0, width: pw - 24, height: topH)
 
-        // Natural content height, then clamp the scroller so the card always fits on screen
-        // (a 1080p-capable video can list five tiers, and a 3.5-inch screen is 480pt tall).
-        var contentH: CGFloat = 0
-        for section in sections {
-            if !section.title.isEmpty { contentH += DownloadOptionsView.headerHeight }
-            contentH += CGFloat(section.rows.count) * DownloadOptionsView.rowHeight
-            contentH += 6
-        }
-        let chromeH: CGFloat = 44 + DownloadOptionsView.footerHeight + pad
-        let maxCardH = H - pad * 2
-        let scrollH = min(contentH, maxCardH - chromeH)
-        let cardH = chromeH + scrollH
-
-        card.frame = CGRect(x: (W - cardW) / 2, y: (H - cardH) / 2, width: cardW, height: cardH)
-        titleLabel.frame = CGRect(x: pad, y: 12, width: cardW - pad * 2, height: 22)
-        scroller.frame = CGRect(x: pad, y: 44, width: cardW - pad * 2, height: scrollH)
-
-        // Rows inside the scroller.
-        let rowW = scroller.bounds.width
+        // Headings and rows, in the scroller's own coordinates.
         var y: CGFloat = 0
-        var btnIdx = 0
-        var headerIdx = 0
-        let markW: CGFloat = 26
-        let detailW: CGFloat = 92
-        for section in sections {
-            if !section.title.isEmpty, headerIdx < headerLabels.count {
-                headerLabels[headerIdx].frame = CGRect(x: 4, y: y + 6, width: rowW - 8,
-                                                       height: DownloadOptionsView.headerHeight - 6)
-                headerIdx += 1
-                y += DownloadOptionsView.headerHeight
+        var idx = 0
+        for (s, section) in sections.enumerated() {
+            if let header = sectionHeaders[s] {
+                header.frame = CGRect(x: 12, y: y + 8, width: pw - 24, height: headerH - 8)
+                y += headerH
             }
             for _ in section.rows {
-                guard btnIdx < rowButtons.count else { break }
-                let btn = rowButtons[btnIdx]
-                btn.frame = CGRect(x: 0, y: y, width: rowW, height: DownloadOptionsView.rowHeight - 4)
-                let h = btn.bounds.height
-                // name | detail | mark, the last two right-anchored
-                rowNameLabels[btnIdx].frame = CGRect(x: 12, y: 0,
-                                                     width: max(0, rowW - markW - detailW - 20), height: h)
-                rowDetailLabels[btnIdx].frame = CGRect(x: rowW - markW - detailW - 4, y: 0,
-                                                       width: detailW, height: h)
-                rowMarkLabels[btnIdx].frame = CGRect(x: rowW - markW - 6, y: 0, width: markW, height: h)
-                y += DownloadOptionsView.rowHeight
-                btnIdx += 1
+                guard idx < rowButtons.count else { break }
+                rowButtons[idx].frame = CGRect(x: 0, y: y, width: pw, height: rowH)
+                rowLines[idx].frame = CGRect(x: 0, y: y, width: pw, height: line)
+                // name | detail | tick, the last two right-anchored
+                rowNameLabels[idx].frame = CGRect(x: 12, y: 0, width: max(0, pw - 12 - detailW - markW - 8),
+                                                  height: rowH)
+                rowDetailLabels[idx].frame = CGRect(x: pw - markW - detailW - 4, y: 0, width: detailW, height: rowH)
+                rowMarkLabels[idx].frame = CGRect(x: pw - markW - 6, y: 0, width: markW, height: rowH)
+                y += rowH
+                idx += 1
             }
-            y += 6
         }
-        scroller.contentSize = CGSize(width: rowW, height: y)
+        let contentH = y
 
-        let footY = cardH - DownloadOptionsView.footerHeight
-        confirmBtn.frame = CGRect(x: pad, y: footY, width: cardW - pad * 2 - 86, height: 42)
-        cancelBtn.frame = CGRect(x: cardW - pad - 80, y: footY, width: 80, height: 42)
+        // The rows scroll when the screen is short of room (five video tiers, the audio, the
+        // destinations and the captions outgrow a 3.5-inch screen).
+        let roomH = bounds.height - top - 2 * DownloadOptionsView.margin - topH - line - footH
+        let scrollH = max(min(contentH, roomH), min(contentH, rowH))
+        let ph = topH + scrollH + line + footH
+        let roomY = bounds.height - top
+        panel.frame = CGRect(x: floor((bounds.width - pw) / 2), y: top + max(floor((roomY - ph) / 2), 0),
+                             width: pw, height: ph)
+        scroll.frame = CGRect(x: 0, y: topH, width: pw, height: scrollH)
+        scroll.contentSize = CGSize(width: pw, height: contentH)
+        scroll.isScrollEnabled = contentH > scrollH
+        let maxOffset = max(contentH - scrollH, 0)
+        if scroll.contentOffset.y > maxOffset { scroll.contentOffset = CGPoint(x: 0, y: maxOffset) }
+
+        let footY = topH + scrollH
+        footLine.frame = CGRect(x: 0, y: footY, width: pw, height: line)
+        let cancelW = floor(pw * 0.4)
+        cancelBtn.frame = CGRect(x: 0, y: footY + line, width: cancelW, height: footH)
+        footDivider.frame = CGRect(x: cancelW, y: footY + line, width: line, height: footH)
+        confirmBtn.frame = CGRect(x: cancelW + line, y: footY + line, width: pw - cancelW - line, height: footH)
+    }
+
+    private func present() {
+        layoutIfNeeded()
+        alpha = 0
+        UIView.animate(withDuration: 0.2, animations: { self.alpha = 1 }, completion: { _ in
+            // The rows run past the panel: the indicator says there is more below.
+            if self.scroll.isScrollEnabled { self.scroll.flashScrollIndicators() }
+        })
     }
 
     // MARK: - Selection
-
-    @objc private func rowTapped(_ sender: UIButton) {
-        let idx = sender.tag
-        guard idx >= 0, idx < rowIndexPaths.count else { return }
-        let path = rowIndexPaths[idx]
-        apply(section: path.section, row: path.row)
-        refreshSelectionMarks()
-        notifyChange()
-    }
 
     private func apply(section: Int, row: Int) {
         switch sections[section].mode {
@@ -380,31 +380,68 @@ final class DownloadOptionsView: UIView {
         onChange?(self, selection.map { Array($0).sorted() })
     }
 
-    // The selected row in each section is tinted and ticked; a row that carries its own mark
-    // (already downloaded / the Settings default) keeps showing it when it isn't selected.
+    // A ticked row is red and bold with a red tick, as the choice in force in a menu. A row
+    // that carries its own mark (already downloaded) keeps it in grey when it isn't ticked.
     private func refreshSelectionMarks() {
         for (i, path) in rowIndexPaths.enumerated() {
-            let isSelected = selection[path.section].contains(path.row)
+            let picked = selection[path.section].contains(path.row)
             let row = sections[path.section].rows[path.row]
-            rowButtons[i].backgroundColor = isSelected
-                ? Theme.accent.withAlphaComponent(0.28)
-                : DownloadOptionsView.rowBG
-            rowMarkLabels[i].text = isSelected ? "\u{2713}" : row.mark
+            let name = rowNameLabels[i]
+            name.font = picked ? UIFont.boldSystemFont(ofSize: 16) : UIFont.systemFont(ofSize: 16)
+            name.textColor = picked ? Theme.accent
+                : (row.enabled ? UIColor.white : UIColor(white: 0.45, alpha: 1))
+            rowMarkLabels[i].text = picked ? "\u{2713}" : row.mark
+            rowMarkLabels[i].textColor = picked ? Theme.accent : DownloadOptionsView.markGrey
         }
     }
 
     // MARK: - Actions
 
-    @objc private func confirmTapped() {
+    @objc private func pickerRowTapped(_ sender: UIButton) {
+        sender.backgroundColor = .clear
+        let idx = sender.tag
+        guard !done, idx >= 0, idx < rowIndexPaths.count else { return }
+        let path = rowIndexPaths[idx]
+        apply(section: path.section, row: path.row)
+        refreshSelectionMarks()
+        notifyChange()
+    }
+
+    @objc private func pickerRowDown(_ sender: UIButton) { sender.backgroundColor = DownloadOptionsView.rowHighlight }
+    @objc private func pickerRowUp(_ sender: UIButton) { sender.backgroundColor = .clear }
+
+    @objc private func pickerConfirmTapped() {
         let picked = selection.map { Array($0).sorted() }
         let handler = onConfirm
-        onConfirm = nil                  // a double tap must not fire two downloads
-        dismiss()
+        guard finish() else { return }   // a double tap must not fire two downloads
+        // A page no longer on screen is not answered: its picker outlived it.
+        guard owner?.view.window != nil else { return }
         handler?(picked)
     }
 
-    @objc private func cancelTapped() {
+    @objc private func pickerCancelTapped() {
+        _ = finish()
+    }
+
+    // One answer per picker, however fast the taps come. False when it already had one.
+    private func finish() -> Bool {
+        guard !done else { return false }
+        done = true
         onConfirm = nil
-        dismiss()
+        isUserInteractionEnabled = false
+        if DownloadOptionsView.current === self { DownloadOptionsView.current = nil }
+        UIView.animate(withDuration: 0.15, animations: { self.alpha = 0 }, completion: { _ in
+            self.removeFromSuperview()
+        })
+        return true
+    }
+
+    // Gone at once and unanswered: replaced by another picker, or its page is leaving.
+    private func close() {
+        guard !done else { return }
+        done = true
+        onConfirm = nil
+        if DownloadOptionsView.current === self { DownloadOptionsView.current = nil }
+        removeFromSuperview()
     }
 }

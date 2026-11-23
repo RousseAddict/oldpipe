@@ -407,7 +407,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     // The target is any visible button whose touch-up action is named `action`, with or
     // without the colon of a sender argument.
     // - An open menu (AppMenu) covers everything under it, so a press goes to the menu alone:
-    //   press/menuRowTapped/<n> picks its n-th row, press/menuCancelTapped closes it.
+    //   press/menuRowTapped/<n> picks its n-th row, press/menuCancelTapped closes it. The
+    //   Download picker the same: press/pickerRowTapped/<n> ticks its n-th row (all sections
+    //   counted in order), then press/pickerConfirmTapped or press/pickerCancelTapped.
     // - Otherwise bar items come first (Home's menu is one), then the page's view, then what
     //   sits in the window above the page: the fullscreen overlay's controls (its gear opens
     //   the Playback menu) and the mini bar. Last, a method of the page itself (below).
@@ -416,7 +418,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         func wired(_ name: String) -> Bool { return name == action || name == action + ":" }
         var skip = nth
         var queue: [UIView]
-        if let menu = AppMenu.current {
+        let cover: UIView? = AppMenu.current ?? DownloadOptionsView.current
+        if let menu = cover {
             queue = [menu]
         } else {
             let items = (page.navigationItem.leftBarButtonItems ?? []) + (page.navigationItem.rightBarButtonItems ?? [])
@@ -446,7 +449,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // argument. A tap on the video is a touch view rather than a button, so this is how
         // press/videoAreaTapped brings back the auto-hidden control bar (gear, fullscreen).
         let sel = NSSelectorFromString(action)
-        if AppMenu.current == nil, page.responds(to: sel) { _ = page.perform(sel) }
+        if cover == nil, page.responds(to: sel) { _ = page.perform(sel) }
     }
 
     // Breadth-first, so the page's own list wins over one nested further down.

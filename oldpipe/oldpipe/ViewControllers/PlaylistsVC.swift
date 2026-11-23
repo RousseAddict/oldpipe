@@ -121,7 +121,7 @@ class PlaylistsVC: UIViewController, UITableViewDataSource, UITableViewDelegate,
         cell.detailTextLabel?.font = UIFont.systemFont(ofSize: 12)
         let count = pl.videos.count
         cell.detailTextLabel?.text = count == 1 ? "1 video" : "\(count) videos"
-        cell.accessoryType = .disclosureIndicator
+        if cell.accessoryView == nil { cell.accessoryView = Theme.chevron() }
 
         let sel = UIView()
         sel.backgroundColor = UIColor(white: 0.15, alpha: 1)
