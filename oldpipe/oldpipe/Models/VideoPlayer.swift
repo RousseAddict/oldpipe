@@ -54,6 +54,12 @@ class VideoPlayer {
     // Seconds of no progress before the stream is presumed dead. Generous enough to ride out
     // ordinary rebuffering on a slow connection, short enough not to feel like a hang.
     private static let stallTicks = 8
+    // A stream on air is given longer. AVPlayer refills a live stream that ran dry by itself
+    // (seen on iOS 5.1.1: 4-5 s gaps that picked up again on their own), and a reconnect costs
+    // ~10 s of black screen anyway. A
+    // slow start is the usual cause: the page loads its related videos right as playback
+    // begins, and the stream starts only ~15 s behind live, so those 15 s are all it has.
+    private static let liveStallTicks = 25
     private static let maxRecoveryAttempts = 3
     // Backoff between attempts. A drop is usually a blip, so try quickly first, then give a
     // genuinely-down network time to come back before spending the last attempt.
@@ -230,6 +236,7 @@ class VideoPlayer {
         }
         needsFreshPlayer = false
         lastLoadWasHLS = isHLS
+        isLiveStream = url.path.hasPrefix("/live/")
         if player == nil {
             let p = AVPlayer()
             player = p
@@ -377,6 +384,11 @@ class VideoPlayer {
     // The speed is intentionally sticky across videos (including queue auto-advance) for the
     // rest of the session, and not persisted to disk.
     private(set) var playbackRate: Float = 1.0
+    // A stream on air (StreamProxy's /live/ route). It plays at
+    // normal speed whatever speed is chosen: faster runs into the live edge, where there is
+    // nothing more to play, and slower falls behind until YouTube drops the part being
+    // played. The chosen speed is kept for the next video.
+    private(set) var isLiveStream = false
     // Consecutive ticks the player has sat at rate 0 while an off-speed rate was asked for.
     private var rateZeroTicks = 0
 
@@ -409,6 +421,7 @@ class VideoPlayer {
 
     @discardableResult
     func setPlaybackRate(_ rate: Float) -> Bool {
+        guard !isLiveStream else { return false }
         guard supportsRate(rate) else {
             DebugLog.log("VideoPlayer", "rate \(rate) unsupported by item (hls=\(lastLoadWasHLS))")
             return false
@@ -427,7 +440,10 @@ class VideoPlayer {
     // effectiveRate, so a reconnect during the hold keeps the boost.
     static let boostRate: Float = 2.0
     private(set) var isBoosting = false
-    var effectiveRate: Float { return isBoosting ? VideoPlayer.boostRate : playbackRate }
+    var effectiveRate: Float {
+        if isLiveStream { return 1.0 }
+        return isBoosting ? VideoPlayer.boostRate : playbackRate
+    }
 
     // Before iOS 7 an HLS item refuses every rate but 1.0, and says so straight away (iOS 6.1.3
     // log, 2026-11-08: canPlayFastForward=no, 1.25x reverted to 1.0 within a second). That is
@@ -437,7 +453,7 @@ class VideoPlayer {
     private static let osMajor = Int((UIDevice.current.systemVersion as NSString).intValue)
 
     var canBoost: Bool {
-        guard isReady, wantsPlayback, isPlaying, !recovering, !isBoosting,
+        guard isReady, wantsPlayback, isPlaying, !recovering, !isBoosting, !isLiveStream,
               playbackRate < VideoPlayer.boostRate else { return false }
         return !(lastLoadWasHLS && VideoPlayer.osMajor < 7)
     }
@@ -721,12 +737,19 @@ class VideoPlayer {
         let moved = lastTickSeconds < 0 || abs(cur - lastTickSeconds) > threshold
         lastTickSeconds = cur
         if moved {
+            if isLiveStream, stalledTicks >= 3 {
+                DebugLog.log("VideoPlayer", "live resumed by itself after \(stalledTicks)s at \(Int(cur))s")
+            }
             stalledTicks = 0
             recoveryAttempts = 0   // playback is healthy again — a later drop starts fresh
             return false
         }
         stalledTicks += 1
-        guard stalledTicks >= VideoPlayer.stallTicks else { return false }
+        // A live stream that ran dry, for the debug trail (it usually picks up by itself).
+        if isLiveStream, stalledTicks == 3 || stalledTicks % 5 == 0 {
+            DebugLog.log("VideoPlayer", "live stalled \(stalledTicks)s at \(Int(cur))s (keepUp=\(item?.isPlaybackLikelyToKeepUp ?? false) empty=\(item?.isPlaybackBufferEmpty ?? false) rate=\(player?.rate ?? -1))")
+        }
+        guard stalledTicks >= (isLiveStream ? VideoPlayer.liveStallTicks : VideoPlayer.stallTicks) else { return false }
         beginRecovery(reason: "stalled \(stalledTicks)s at \(Int(cur))s")
         return true
     }

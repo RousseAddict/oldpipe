@@ -235,6 +235,10 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     private var scrubber: UISlider?
     private var currentTimeLabel: UILabel?
     private var durationLabel: UILabel?
+    // A stream on air has no timeline. The bar shows this red tag
+    // where the slider and times go, and layoutControls notes which of the two it laid out.
+    private var liveTag: UILabel?
+    private var controlsLaidOutLive = false
     // Whether this video's times have an hours part (duration >= 1h) — picks the time layout
     // in layoutControls — and the bar width it last laid out at, to redo it when that flips.
     private var timesShowHours = false
@@ -2852,6 +2856,20 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         bar.addSubview(dur)
         durationLabel = dur
 
+        let tag = UILabel()
+        tag.backgroundColor = Theme.accent
+        tag.textColor = .white
+        tag.font = VideoRowCell.durationFont
+        tag.textAlignment = .center
+        tag.text = "  LIVE  "
+        tag.layer.cornerRadius = 3
+        tag.clipsToBounds = true   // rounded and clipped, so rasterized as the list badges are
+        tag.layer.shouldRasterize = true
+        tag.layer.rasterizationScale = UIScreen.main.scale
+        tag.isHidden = true
+        bar.addSubview(tag)
+        liveTag = tag
+
         let sl = UISlider()
         sl.minimumValue = 0
         sl.maximumValue = 1
@@ -2937,12 +2955,36 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             durationLabel?.textAlignment = .center
             durationLabel?.frame = CGRect(x: w - rightEdge + thumbInset, y: 0, width: colW, height: barH)
         }
+
+        // A stream on air: no slider and no times, the LIVE tag after the play (or next) button.
+        let live = isLiveVideo
+        controlsLaidOutLive = live
+        scrubber?.isHidden = live
+        currentTimeLabel?.isHidden = live
+        durationLabel?.isHidden = live
+        liveTag?.isHidden = !live
+        if live, let tag = liveTag {
+            tag.sizeToFit()
+            let tagH: CGFloat = 16
+            tag.frame = CGRect(x: btnW + nextW + 4, y: floor((barH - tagH) / 2),
+                               width: tag.bounds.width, height: tagH)
+        }
+    }
+
+    // This page's video is a stream on air — its answer carries the
+    // live playlist, or it is the live stream the player is on (a page reopened from the mini
+    // bar, before its answer is back).
+    private var isLiveVideo: Bool {
+        return streams.contains(where: { $0.itag == StreamTiers.liveHLS })
+            || (sp.isActive(video.id) && sp.isLiveStream)
     }
 
     private func showSpinner() { spinner?.startAnimating() }
     private func hideSpinner() { spinner?.stopAnimating() }
 
     private func showControls() {
+        // The bar may have been laid out before the page knew the video was live.
+        if isLiveVideo != controlsLaidOutLive, controlsLayoutWidth > 0 { layoutControls(width: controlsLayoutWidth) }
         controlsView?.isHidden = false
         syncPlayPauseIcon()
         updateProgress()
@@ -2974,7 +3016,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     // on-screen indicator. Read at tap time, so a change made in Settings applies to a page
     // that is already open underneath it.
     @objc private func seekBackwardTapped() {
-        guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
+        // No seeking in a stream on air: there is no timeline to land on.
+        guard sp.isActive(video.id), !cast.isCasting(video.id), !isLiveVideo else { return }
         let step = AppSettings.seekStepSeconds
         sp.seek(bySeconds: -Double(step))
         showSeekIndicator(forward: false, seconds: step)
@@ -2982,7 +3025,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
     }
 
     @objc private func seekForwardTapped() {
-        guard sp.isActive(video.id), !cast.isCasting(video.id) else { return }
+        // No seeking in a stream on air: there is no timeline to land on.
+        guard sp.isActive(video.id), !cast.isCasting(video.id), !isLiveVideo else { return }
         let step = AppSettings.seekStepSeconds
         sp.seek(bySeconds: Double(step))
         showSeekIndicator(forward: true, seconds: step)
@@ -3316,6 +3360,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             alert.addButton(withTitle: "OK")
             alert.cancelButtonIndex = 0
             alert.show()
+            return
+        }
+        // A stream on air has nothing to pick. It plays the Default
+        // Quality from Settings (StreamProxy.rewriteLiveMaster), and the speed stays normal
+        // (VideoPlayer.isLiveStream says why).
+        if streams.contains(where: { $0.itag == StreamTiers.liveHLS }) {
+            let note = UIActionSheet()
+            note.title = "Live stream: it plays at your Default Quality, \(AppSettings.defaultQualityLabel()), and at normal speed."
+            note.cancelButtonIndex = note.addButton(withTitle: "OK")
+            showMenu(note)
             return
         }
         qualitySheetIndex = -1
@@ -3751,6 +3805,26 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
             return
         }
 
+        // A stream on air plays its live HLS playlist through the proxy, on every iOS: one
+        // path (iOS 7+ could likely open it directly, but it is untested there).
+        if let live = streams.first(where: { $0.itag == StreamTiers.liveHLS }) {
+            guard let local = StreamProxy.shared.liveURL(masterURL: live.url) else {
+                statusLabel?.text = "Stream unavailable \u{2022} tap to retry"
+                statusLabel?.isHidden = false
+                playBtn?.isHidden = false
+                return
+            }
+            activeQualityLabel = "Live"
+            activeItag = nil
+            playBtn?.isHidden = true
+            statusLabel?.text = "Loading live stream..."
+            statusLabel?.isHidden = false
+            showSpinner()
+            DebugLog.log("Player", "id=\(video.id) LIVE via \(local.absoluteString)")
+            tryStream(urlStr: local.absoluteString, maxTicks: 80, live: true)
+            return
+        }
+
         // A tier already in effect for this video wins over the Settings default: this is also
         // the path a retry takes after the watchdog gave up, and coming back at a different
         // quality than the one being watched is exactly what the viewer notices. The muxed 360p
@@ -4132,14 +4206,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
     // Direct/proxied streaming. On failure it stops and re-shows the play button rather than
     // silently downloading the video behind the user's back — tapping > retries.
-    private func tryStream(urlStr: String, maxTicks: Int = 40) {
+    private func tryStream(urlStr: String, maxTicks: Int = 40, live: Bool = false) {
         guard let nsurl = URL(string: urlStr) else {
             statusLabel?.text = "Invalid stream URL"
             statusLabel?.isHidden = false
             playBtn?.isHidden = false
             return
         }
-        sp.load(video: video, url: nsurl, isLocal: false, resume: DownloadManager.position(for: video.id), artwork: thumbView?.image)
+        // A stream on air starts at the live edge: no saved position means anything there.
+        sp.load(video: video, url: nsurl, isLocal: false,
+                resume: live ? 0 : DownloadManager.position(for: video.id), artwork: thumbView?.image)
         // After load(), which clears the field when the video changed — the singleton's
         // reconnect watchdog re-resolves the stream and needs to know the tier it is on.
         sp.activeItag = activeItag

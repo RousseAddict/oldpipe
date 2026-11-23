@@ -1186,7 +1186,14 @@ class YoutubeAPI {
         // response looks healthy while yielding nothing playable. Counted to tell that case
         // apart from "the video is genuinely gated".
         var formatsWithoutURL = 0
-        if let sd = dict(root["streamingData"]) {
+        // A stream on air plays from its live HLS playlist, not from its formats. Its adaptiveFormats carry urls but no index ranges, so they would pass
+        // for plain files (isProgressive) and the 1080p video-only one would be tried first.
+        let onAir = (dict(root["videoDetails"])?["isLive"] as? NSNumber)?.boolValue ?? false
+        if onAir, let hls = str(dict(root["streamingData"])?["hlsManifestUrl"]), !hls.isEmpty {
+            DebugLog.log("YoutubeAPI", "player response id=\(videoId) is LIVE — using hlsManifestUrl")
+            streams.append(VideoStream(url: hls, itag: StreamTiers.liveHLS,
+                                       mimeType: "application/x-mpegURL", quality: "live"))
+        } else if let sd = dict(root["streamingData"]) {
             for key in ["formats", "adaptiveFormats"] {
                 guard let formats = sd[key] as? [[String: Any]] else { continue }
                 for fmt in formats {

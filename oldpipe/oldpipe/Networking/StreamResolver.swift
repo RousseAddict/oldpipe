@@ -19,6 +19,13 @@ enum StreamTiers {
     static let muxed360 = 18
     // The DASH audio track backing every transmuxed quality.
     static let audio = 140
+    // Not an itag but a stream on air. Its "url" is the live HLS master playlist from the
+    // player answer (streamingData.hlsManifestUrl), played through StreamProxy's live route.
+    static let liveHLS = -1
+
+    // The height a stream on air plays at: Settings > Default Quality, with Auto meaning 360p
+    // as it does for every other video.
+    static func liveHeight() -> Int { return Int(AppSettings.defaultQuality) ?? 360 }
     // 360p adaptive tier, offered only when a response carries no muxed format at all.
     static let base360 = 134
     // Video-only H.264 tiers the transmuxer can serve, ascending: 480p30, 720p30, 720p60,
@@ -150,6 +157,13 @@ final class StreamResolver {
             return
         }
         YoutubeAPI.getStreams(videoId: video.id) { streams, _, _, _, _ in
+            // A stream on air has one way to play, whatever quality was asked for.
+            if let live = streams.first(where: { $0.itag == StreamTiers.liveHLS }) {
+                let local = StreamProxy.shared.liveURL(masterURL: live.url)
+                DebugLog.log("StreamResolver", "resolve id=\(video.id) -> live HLS \(local == nil ? "FAILED" : "via proxy")")
+                completion(local.map { ResolvedStream(url: $0, isLocal: false) })
+                return
+            }
             if let itag = preferredItag {
                 // An explicit tier replaces the Settings default outright — including when it
                 // is the muxed 360p itag, where falling through must NOT re-apply a default
@@ -222,6 +236,9 @@ final class StreamResolver {
             guard let url = DownloadManager.playbackURL(for: videoId) else { return nil }
             return ResolvedStream(url: url, isLocal: true)
         case .remote(let streams):
+            if let live = streams.first(where: { $0.itag == StreamTiers.liveHLS }) {
+                return StreamProxy.shared.liveURL(masterURL: live.url).map { ResolvedStream(url: $0, isLocal: false) }
+            }
             if let vStream = defaultQualityStream(streams), let r = hlsResolvedStream(vStream, streams) {
                 return r
             }

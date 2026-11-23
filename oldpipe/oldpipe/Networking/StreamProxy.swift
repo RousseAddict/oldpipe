@@ -157,6 +157,38 @@ private final class HLSSession {
     }
 }
 
+// MARK: - Live session
+
+// A stream on air, played from YouTube's live HLS playlist. Nothing is transmuxed: a live
+// variant is already MPEG-TS with H.264 + AAC, the format iOS has played since HLS began. The
+// proxy is only there because iOS 5/6 cannot open googlevideo's TLS. It:
+//  - serves the master playlist with its variants pointed at itself (p<i>.m3u8),
+//  - fetches a variant playlist afresh each time AVPlayer polls it (every target duration)
+//    and points its segments at itself (s<n>.ts),
+//  - relays each segment untouched, through the same streaming path as a plain video.
+// Every field is guarded by StreamProxy.lock.
+private final class LiveSession {
+    let masterURL: String
+    // The one quality served, from the Settings: its height (Default Quality) and, between
+    // two variants of that height, its frame rate (Frame Rate).
+    let height: Int
+    let fps: Int
+    var gen: UInt64
+    // The variant playlists' real urls, by local index (p<i>.m3u8).
+    var playlists: [String] = []
+    // Real segment url by local number (s<n>.ts), and back. A segment keeps its number across
+    // playlist reloads, so the urls AVPlayer sees stay stable while the window slides.
+    var segments: [Int: String] = [:]
+    var segmentNumbers: [String: Int] = [:]
+    var nextSegment = 0
+    init(masterURL: String, height: Int, fps: Int, gen: UInt64) {
+        self.masterURL = masterURL
+        self.height = height
+        self.fps = fps
+        self.gen = gen
+    }
+}
+
 // The parsed heads of one stream pair, kept after its session for the next one (see
 // StreamProxy.ensureParsed).
 private struct CachedHeads {
@@ -184,6 +216,8 @@ final class StreamProxy: NSObject {
     private var routes: [String: (url: String, gen: UInt64)] = [:]
     // HLS transmux sessions, keyed by the <id> in /hls/<id>/... paths. Same lock as routes.
     private var hlsSessions: [String: HLSSession] = [:]
+    // The stream on air, keyed by the <id> in /live/<id>/... paths. One at a time.
+    private var liveSessions: [String: LiveSession] = [:]
     private var routeSeq: UInt64 = 0
     // Monotonic generation, bumped each time a new stream is requested. In-flight connections
     // from an older generation are aborted by proxyProgressCallback (see isSuperseded).
@@ -239,6 +273,22 @@ final class StreamProxy: NSObject {
         return URL(string: "http://127.0.0.1:\(port)/hls/\(id)/index.m3u8")
     }
 
+    // Register a stream on air and return the local master playlist for AVPlayer. Bumps the generation like the other routes, so whatever played before is
+    // aborted at the switch.
+    func liveURL(masterURL: String) -> URL? {
+        guard start() else { return nil }
+        lock.lock()
+        routeSeq += 1
+        currentGen += 1
+        dropReadAheadLocked()
+        let id = "\(routeSeq)"
+        liveSessions = [id: LiveSession(masterURL: masterURL, height: StreamTiers.liveHeight(),
+                                        fps: Int(AppSettings.defaultFps) ?? 30, gen: currentGen)]
+        lock.unlock()
+        DebugLog.log("StreamProxy", "liveURL id=\(id) port=\(port)")
+        return URL(string: "http://127.0.0.1:\(port)/live/\(id)/master.m3u8")
+    }
+
     // Serve a DOWNLOADED HLS bundle (downloads/<id>/) back to AVPlayer. Offline playback still
     // goes through the proxy rather than a file:// URL because AVPlayer on iOS 6/7 will not open
     // a playlist off the filesystem — the segments are local, the transport is not.
@@ -280,6 +330,7 @@ final class StreamProxy: NSObject {
         let bumped = currentGen
         for k in routes.keys { routes[k]?.gen = bumped }
         for s in hlsSessions.values { s.gen = bumped }
+        for s in liveSessions.values { s.gen = bumped }
         dropReadAheadLocked()
         lock.unlock()
         DebugLog.log("StreamProxy", "closeCurrentStream gen=\(bumped)")
@@ -473,6 +524,20 @@ final class StreamProxy: NSObject {
             return
         }
 
+        // Live: "live/<id>/master.m3u8", "live/<id>/p<i>.m3u8" or "live/<id>/s<n>.ts"
+        if token.hasPrefix("live/") {
+            let comps = token.components(separatedBy: "/")
+            lock.lock()
+            let session = comps.count == 3 ? liveSessions[comps[1]] : nil
+            lock.unlock()
+            guard let session = session else {
+                StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
+                return
+            }
+            serveLive(session, file: comps[2], clientFd: clientFd)
+            return
+        }
+
         lock.lock(); let route = routes[token]; lock.unlock()
         guard let route = route else {
             StreamProxy.sendAll(clientFd, Array("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".utf8))
@@ -486,6 +551,160 @@ final class StreamProxy: NSObject {
         }
 
         proxy(remoteURL: route.url, gen: route.gen, rangeHeader: rangeHeader, clientFd: clientFd)
+    }
+
+    // MARK: - Live serving
+
+    private func serveLive(_ session: LiveSession, file: String, clientFd: Int32) {
+        let notFound = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
+        let badGateway = "HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n"
+        lock.lock(); let gen = session.gen; lock.unlock()
+
+        if file == "master.m3u8" {
+            guard let text = StreamProxy.fetchText(session.masterURL) else {
+                DebugLog.log("StreamProxy", "live master fetch FAILED")
+                StreamProxy.sendAll(clientFd, Array(badGateway.utf8)); return
+            }
+            let body = rewriteLiveMaster(text, session)
+            sendResponse(clientFd, contentType: "application/vnd.apple.mpegurl", body: Data(body.utf8))
+            return
+        }
+
+        if file.hasPrefix("p"), file.hasSuffix(".m3u8"), let i = Int(String(file.dropFirst().dropLast(5))) {
+            lock.lock()
+            let remote = i >= 0 && i < session.playlists.count ? session.playlists[i] : nil
+            lock.unlock()
+            guard let r = remote else { StreamProxy.sendAll(clientFd, Array(notFound.utf8)); return }
+            guard let text = StreamProxy.fetchText(r) else {
+                DebugLog.log("StreamProxy", "live playlist p\(i) fetch FAILED")
+                StreamProxy.sendAll(clientFd, Array(badGateway.utf8)); return
+            }
+            let body = rewriteLiveMedia(text, base: r, session)
+            sendResponse(clientFd, contentType: "application/vnd.apple.mpegurl", body: Data(body.utf8))
+            return
+        }
+
+        if file.hasPrefix("s"), file.hasSuffix(".ts"), let n = Int(String(file.dropFirst().dropLast(3))) {
+            lock.lock(); let remote = session.segments[n]; lock.unlock()
+            guard let r = remote else {
+                DebugLog.log("StreamProxy", "live segment s\(n) unknown")
+                StreamProxy.sendAll(clientFd, Array(notFound.utf8)); return
+            }
+            proxy(remoteURL: r, gen: gen, rangeHeader: nil, clientFd: clientFd)
+            return
+        }
+
+        StreamProxy.sendAll(clientFd, Array(notFound.utf8))
+    }
+
+    private static func fetchText(_ url: String) -> String? {
+        guard let data = CurlFetcher.getSync(url: url, timeout: 15) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    // The master as iOS 5's player can take it, with ONE variant: the quality the Settings ask
+    // for, as every other video plays it (Default Quality, else the best below it; Frame Rate
+    // between two of the same height). Given several, the player moves between them by
+    // itself, up to qualities the device or the connection can't hold. Plain attributes only.
+    // Separate audio renditions (EXT-X-MEDIA) are not handled: the ANDROID client's master
+    // carries the sound in every variant.
+    private func rewriteLiveMaster(_ text: String, _ session: LiveSession) -> String {
+        var variants: [(height: Int, fps: Int, inf: String, url: String)] = []
+        var pendingInf: [String: String]?
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("#EXT-X-STREAM-INF:") {
+                pendingInf = StreamProxy.attributes(String(line.dropFirst(18)))
+            } else if !line.isEmpty, !line.hasPrefix("#"), let attrs = pendingInf {
+                pendingInf = nil
+                var height = 0
+                if let res = attrs["RESOLUTION"], let x = res.firstIndex(of: "x") {
+                    height = Int(res[res.index(after: x)...]) ?? 0
+                }
+                guard height > 0 else { continue }
+                let fps = Int((Double(attrs["FRAME-RATE"] ?? "") ?? 30).rounded())
+                var inf = "#EXT-X-STREAM-INF:BANDWIDTH=\(attrs["BANDWIDTH"] ?? "1000000")"
+                if let c = attrs["CODECS"] { inf += ",CODECS=\(c)" }
+                if let r = attrs["RESOLUTION"] { inf += ",RESOLUTION=\(r)" }
+                variants.append((height, fps, inf, line))
+            }
+        }
+        // The tallest at or under the asked height; with none that low, the lowest there is.
+        let fitting = variants.filter { $0.height <= session.height }
+        let target = fitting.map { $0.height }.max() ?? (variants.map { $0.height }.min() ?? 0)
+        let sameHeight = variants.filter { $0.height == target }
+        if let pick = sameHeight.first(where: { $0.fps == session.fps }) ?? sameHeight.first {
+            variants = [pick]
+            DebugLog.log("StreamProxy", "live quality \(pick.height)p\(pick.fps) (asked \(session.height)p\(session.fps))")
+        }
+        lock.lock()
+        session.playlists = variants.map { $0.url }
+        lock.unlock()
+        var out = ["#EXTM3U"]
+        for (i, v) in variants.enumerated() {
+            out.append(v.inf)
+            out.append("p\(i).m3u8")
+        }
+        return out.joined(separator: "\n") + "\n"
+    }
+
+    // One reload of a variant playlist: segments pointed at the proxy, tags newer than iOS 5's
+    // player dropped (the spec says to skip unknown tags; this doesn't count on it).
+    private func rewriteLiveMedia(_ text: String, base: String, _ session: LiveSession) -> String {
+        var out: [String] = []
+        lock.lock()
+        for raw in text.components(separatedBy: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            if line.hasPrefix("#") {
+                if line.hasPrefix("#EXT-X-DISCONTINUITY-SEQUENCE") || line.hasPrefix("#EXT-X-INDEPENDENT-SEGMENTS")
+                    || line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME") { continue }
+                out.append(line)
+                continue
+            }
+            let remote = line.hasPrefix("http") ? line
+                : (URL(string: line, relativeTo: URL(string: base))?.absoluteString ?? line)
+            let n: Int
+            if let known = session.segmentNumbers[remote] {
+                n = known
+            } else {
+                n = session.nextSegment
+                session.nextSegment += 1
+                session.segmentNumbers[remote] = n
+                session.segments[n] = remote
+            }
+            out.append("s\(n).ts")
+        }
+        // The window slides: forget segments long gone from it (all variants share the count).
+        let keepFrom = session.nextSegment - 200
+        if keepFrom > 0 {
+            for (k, v) in session.segments where k < keepFrom {
+                session.segments[k] = nil
+                session.segmentNumbers[v] = nil
+            }
+        }
+        lock.unlock()
+        return out.joined(separator: "\n") + "\n"
+    }
+
+    // An HLS attribute list ("BANDWIDTH=1,CODECS=\"a,b\",RESOLUTION=2x3") into its pairs, with
+    // quoted values kept quoted. Commas inside quotes don't split.
+    private static func attributes(_ list: String) -> [String: String] {
+        var out: [String: String] = [:]
+        var parts: [String] = []
+        var cur = ""
+        var quoted = false
+        for ch in list {
+            if ch == "\"" { quoted.toggle() }
+            if ch == ",", !quoted { parts.append(cur); cur = ""; continue }
+            cur.append(ch)
+        }
+        parts.append(cur)
+        for p in parts {
+            guard let eq = p.firstIndex(of: "=") else { continue }
+            out[String(p[..<eq])] = String(p[p.index(after: eq)...])
+        }
+        return out
     }
 
     // MARK: - HLS transmux serving

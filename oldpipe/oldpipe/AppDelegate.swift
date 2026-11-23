@@ -345,7 +345,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         }
         if url.host == "tap", let row = Int(url.lastPathComponent),
            let page = (window?.rootViewController as? UINavigationController)?.topViewController {
-            if let table = firstVisible(UITableView.self, in: page.view) {
+            // Only a row that exists: a list still loading has none, and the page's own
+            // handler indexes its data directly, as a real tap only ever reaches a shown row.
+            if let table = firstVisible(UITableView.self, in: page.view),
+               row >= 0, row < table.numberOfRows(inSection: 0) {
                 table.delegate?.tableView?(table, didSelectRowAt: IndexPath(row: row, section: 0))
             }
             return true
