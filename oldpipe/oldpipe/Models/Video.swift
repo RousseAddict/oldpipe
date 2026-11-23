@@ -13,6 +13,15 @@ struct Video {
     // "published" string. 0 = unknown. Persisted so a saved video's age stays current
     // instead of showing the frozen "3 days ago" text forever (see displayPublished).
     var publishedTimestamp: Double = 0
+    // On air right now: no length, the count is viewers ("9.8K watching"), and lists draw a
+    // red LIVE badge where the length goes.
+    var isLive: Bool = false
+
+    // The video page's info line: "4:05 • 3 days ago • 1.2M views", or "LIVE • 9.8K watching".
+    var metaLine: String {
+        let parts = isLive ? ["LIVE", viewCountText] : [durationText, displayPublished, viewCountText]
+        return parts.filter { !$0.isEmpty }.joined(separator: " • ")
+    }
 
     // The published label to show. When we have an absolute timestamp, recompute the
     // relative string from now so it stays fresh; otherwise fall back to the stored text.
@@ -30,7 +39,8 @@ struct Video {
             "durationText": durationText,
             "viewCountText": viewCountText,
             "publishedText": publishedText,
-            "publishedTimestamp": publishedTimestamp
+            "publishedTimestamp": publishedTimestamp,
+            "isLive": isLive
         ]
     }
 
@@ -46,7 +56,8 @@ struct Video {
             viewCountText: (dict["viewCountText"] as? String) ?? "",
             publishedText: (dict["publishedText"] as? String) ?? "",
             // NSNumber path: numeric `as? Double` silently fails on the iOS 6 5.1.5 runtime.
-            publishedTimestamp: ((dict["publishedTimestamp"] as? NSNumber)?.doubleValue) ?? 0
+            publishedTimestamp: ((dict["publishedTimestamp"] as? NSNumber)?.doubleValue) ?? 0,
+            isLive: ((dict["isLive"] as? NSNumber)?.boolValue) ?? false
         )
     }
 

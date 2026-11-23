@@ -740,8 +740,7 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         chanBtn?.isHidden = newVideo.channelId.isEmpty
         y += 24
 
-        let meta = [newVideo.durationText, newVideo.displayPublished, newVideo.viewCountText]
-            .filter { !$0.isEmpty }.joined(separator: " • ")
+        let meta = newVideo.metaLine
         metaLabel?.text = meta
         if !meta.isEmpty {
             metaLabel?.frame = CGRect(x: padding, y: y, width: w - padding * 2, height: 18)
@@ -1118,8 +1117,8 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         chanBtn = cb
         y += 24
 
-        // Meta (duration + published + views)
-        let meta = [video.durationText, video.displayPublished, video.viewCountText].filter { !$0.isEmpty }.joined(separator: " • ")
+        // Meta (duration + published + views, or LIVE + viewers)
+        let meta = video.metaLine
         if !meta.isEmpty {
             let metaL = UILabel()
             metaL.backgroundColor = .clear
@@ -2098,13 +2097,13 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         if !v.thumbnailURL.isEmpty { thumb.load(url: v.thumbnailURL) }
         row.addSubview(thumb)
 
-        if !v.durationText.isEmpty {
+        if let badge = VideoRowCell.badge(for: v) {
             let dur = UILabel()
-            dur.backgroundColor = VideoRowCell.durationBG
+            dur.backgroundColor = badge.color
             dur.textColor = .white
             dur.font = VideoRowCell.durationFont
             dur.textAlignment = .center
-            dur.text = "  \(v.durationText)  "
+            dur.text = "  \(badge.text)  "
             dur.sizeToFit()
             let dW = dur.bounds.width, dH = VideoRowCell.durationH
             dur.frame = CGRect(x: thumb.frame.maxX - dW - 4, y: thumb.frame.maxY - dH - 4, width: dW, height: dH)

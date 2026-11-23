@@ -24,6 +24,14 @@ class VideoRowCell: UITableViewCell {
     static let durationBG = UIColor(white: 0, alpha: 0.78)
     static let durationH: CGFloat = 16
 
+    // The thumbnail's corner badge: the length, or a red LIVE for a stream on air (which has
+    // no length). nil = no badge.
+    static func badge(for video: Video) -> (text: String, color: UIColor)? {
+        if video.isLive { return ("LIVE", Theme.accent) }
+        if video.durationText.isEmpty { return nil }
+        return (video.durationText, durationBG)
+    }
+
     // "channel • date • views", the order every video list uses.
     static func subtitle(for video: Video) -> String {
         return [video.channelName, video.displayPublished, video.viewCountText]
@@ -99,11 +107,12 @@ class VideoRowCell: UITableViewCell {
         titleLabel.text = video.title
         subtitleLabel.text = VideoRowCell.subtitle(for: video)
 
-        if video.durationText.isEmpty {
-            durationLabel.isHidden = true
-        } else {
+        if let b = VideoRowCell.badge(for: video) {
             durationLabel.isHidden = false
-            durationLabel.text = "  \(video.durationText)  "
+            durationLabel.text = "  \(b.text)  "
+            durationLabel.backgroundColor = b.color
+        } else {
+            durationLabel.isHidden = true
         }
 
         // load() cancels whatever this cell was previously fetching and clears the image,

@@ -811,15 +811,24 @@ class YoutubeAPI {
         let thumbURL = "https://i.ytimg.com/vi/\(videoId)/mqdefault.jpg"
 
         let duration = str(dict(vr["lengthText"])?["simpleText"]) ?? ""
-        let views = str(dict(vr["shortViewCountText"])?["simpleText"])
-            ?? str(arr(dict(vr["shortViewCountText"])?["runs"])?.first?["text"])
-            ?? ""
+        // Every run, not just the first: a stream on air writes ["9.8K", " watching"].
+        let viewCount = dict(vr["shortViewCountText"])
+        let views = str(viewCount?["simpleText"])
+            ?? (arr(viewCount?["runs"])?.compactMap { str($0["text"]) }.joined() ?? "")
         let published = str(dict(vr["publishedTimeText"])?["simpleText"]) ?? ""
+        // On air: a LIVE badge under the title (search), or a LIVE time overlay (some grids).
+        let liveBadge = (arr(vr["badges"]) ?? []).contains {
+            str(dict($0["metadataBadgeRenderer"])?["style"]) == "BADGE_STYLE_TYPE_LIVE_NOW"
+        }
+        let liveOverlay = (arr(vr["thumbnailOverlays"]) ?? []).contains {
+            str(dict($0["thumbnailOverlayTimeStatusRenderer"])?["style"]) == "LIVE"
+        }
 
         return Video(id: videoId, title: title, channelName: channel, channelId: channelId,
                      thumbnailURL: thumbURL, durationText: duration, viewCountText: views,
                      publishedText: published,
-                     publishedTimestamp: Video.timestamp(fromRelative: published))
+                     publishedTimestamp: Video.timestamp(fromRelative: published),
+                     isLive: liveBadge || liveOverlay)
     }
 
     // "209M", "2.5B", "938K", "512": a count with no word after it. Digits with an optional
@@ -852,8 +861,8 @@ class YoutubeAPI {
                 if let parts = arr(row["metadataParts"]) {
                     for part in parts {
                         guard let t = str(dict(part["text"])?["content"]), !t.isEmpty else { continue }
-                        if t.contains("view") {
-                            if views.isEmpty { views = t }
+                        if t.contains("view") || t.contains("watching") {
+                            if views.isEmpty { views = t }   // "watching": a stream on air
                         } else if rowIndex > 0, isBareCount(t) {
                             if views.isEmpty { views = t + " views" }
                         } else if t.contains("ago") || t.contains("Streamed") {
@@ -868,6 +877,7 @@ class YoutubeAPI {
 
         var duration = ""
         findDurationBadge(lm["contentImage"], into: &duration)
+        let live = hasLiveBadge(lm["contentImage"])
 
         // Prefer the page fallback (e.g. on a channel page every video shares one channel);
         // otherwise use the channel parsed from the lockup (the related-videos case).
@@ -879,7 +889,20 @@ class YoutubeAPI {
         return Video(id: videoId, title: title, channelName: channelName, channelId: channelId,
                      thumbnailURL: thumbURL, durationText: duration, viewCountText: views,
                      publishedText: published,
-                     publishedTimestamp: Video.timestamp(fromRelative: published))
+                     publishedTimestamp: Video.timestamp(fromRelative: published),
+                     isLive: live)
+    }
+
+    // A stream on air carries a LIVE thumbnail badge where a video has its length.
+    private static func hasLiveBadge(_ obj: Any?) -> Bool {
+        if let d = obj as? [String: Any] {
+            if let badge = dict(d["thumbnailBadgeViewModel"]),
+               str(badge["badgeStyle"]) == "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE" { return true }
+            for (_, v) in d where hasLiveBadge(v) { return true }
+        } else if let a = obj as? [Any] {
+            for v in a where hasLiveBadge(v) { return true }
+        }
+        return false
     }
 
     // Build a Video from a shortsLockupViewModel (the channel "Shorts" tab format).
@@ -1140,7 +1163,9 @@ class YoutubeAPI {
             let vid = str(details["videoId"]) ?? videoId
             let thumbURL = "https://i.ytimg.com/vi/\(vid)/mqdefault.jpg"
             let durSecs = str(details["lengthSeconds"]).flatMap({ Int($0) }) ?? 0
-            let durText = clockText(Double(durSecs))
+            // A stream on air has no length (lengthSeconds "0"), so no "0:00" either.
+            let live = (details["isLive"] as? NSNumber)?.boolValue ?? false
+            let durText = live ? "" : clockText(Double(durSecs))
             let viewsRaw = str(details["viewCount"]) ?? ""
             let views = viewsRaw.isEmpty ? "" : "\(formatViewCount(viewsRaw)) views"
             // publishDate from microformat: "2024-01-15" → keep the YYYY-MM-DD part
@@ -1151,7 +1176,7 @@ class YoutubeAPI {
             }
             video = Video(id: vid, title: title, channelName: channel, channelId: channelId,
                           thumbnailURL: thumbURL, durationText: durText, viewCountText: views,
-                          publishedText: published)
+                          publishedText: published, isLive: live)
         }
 
         // Stream URLs
