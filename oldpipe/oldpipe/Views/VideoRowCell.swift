@@ -9,6 +9,27 @@ class VideoRowCell: UITableViewCell {
     static let reuseId = "VideoRowCell"
     static let rowHeight: CGFloat = 80
 
+    // The row's measures, fonts and subtitle, shared with the video page's Related list. That
+    // list draws the same row out of plain views (it lives in the page's scroll view, not a
+    // table), and reads these so the two can't drift apart again.
+    static let pad: CGFloat = 8
+    static let thumbSize = CGSize(width: 120, height: 64)
+    static let textGap: CGFloat = 10
+    static let thumbBG = UIColor(white: 0.15, alpha: 1)
+    static let titleFont = UIFont.systemFont(ofSize: 14)
+    static let titleColor = UIColor(white: 0.95, alpha: 1)
+    static let subtitleFont = UIFont.systemFont(ofSize: 12)
+    static let subtitleColor = UIColor(white: 0.55, alpha: 1)
+    static let durationFont = UIFont.boldSystemFont(ofSize: 11)
+    static let durationBG = UIColor(white: 0, alpha: 0.78)
+    static let durationH: CGFloat = 16
+
+    // "channel • date • views", the order every video list uses.
+    static func subtitle(for video: Video) -> String {
+        return [video.channelName, video.displayPublished, video.viewCountText]
+            .filter { !$0.isEmpty }.joined(separator: " • ")
+    }
+
     // AsyncImageView (not a bare UIImageView) so that reusing this cell CANCELS the
     // outgoing thumbnail request instead of just discarding its result — see
     // prepareForReuse. progressTrack is still added as a subview of it, which is fine:
@@ -28,7 +49,7 @@ class VideoRowCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = UIColor(red: 0.07, green: 0.07, blue: 0.07, alpha: 1)
 
-        thumb.backgroundColor = UIColor(white: 0.15, alpha: 1)
+        thumb.backgroundColor = VideoRowCell.thumbBG
         thumb.contentMode = .scaleAspectFill
         thumb.clipsToBounds = true
         thumb.layer.cornerRadius = 4
@@ -36,9 +57,9 @@ class VideoRowCell: UITableViewCell {
         thumb.layer.rasterizationScale = UIScreen.main.scale
         contentView.addSubview(thumb)
 
-        durationLabel.backgroundColor = UIColor(white: 0, alpha: 0.78)
+        durationLabel.backgroundColor = VideoRowCell.durationBG
         durationLabel.textColor = .white
-        durationLabel.font = UIFont.boldSystemFont(ofSize: 11)
+        durationLabel.font = VideoRowCell.durationFont
         durationLabel.textAlignment = .center
         durationLabel.layer.cornerRadius = 3
         durationLabel.clipsToBounds = true
@@ -49,14 +70,14 @@ class VideoRowCell: UITableViewCell {
         contentView.addSubview(durationLabel)
 
         titleLabel.backgroundColor = .clear
-        titleLabel.textColor = UIColor(white: 0.95, alpha: 1)
-        titleLabel.font = UIFont.systemFont(ofSize: 14)
+        titleLabel.textColor = VideoRowCell.titleColor
+        titleLabel.font = VideoRowCell.titleFont
         titleLabel.numberOfLines = 2
         contentView.addSubview(titleLabel)
 
         subtitleLabel.backgroundColor = .clear
-        subtitleLabel.textColor = UIColor(white: 0.55, alpha: 1)
-        subtitleLabel.font = UIFont.systemFont(ofSize: 12)
+        subtitleLabel.textColor = VideoRowCell.subtitleColor
+        subtitleLabel.font = VideoRowCell.subtitleFont
         subtitleLabel.numberOfLines = 2
         contentView.addSubview(subtitleLabel)
 
@@ -76,8 +97,7 @@ class VideoRowCell: UITableViewCell {
     func configure(with video: Video) {
         playedFraction = 0   // reset for reuse; callers that want the bar set it after configure
         titleLabel.text = video.title
-        subtitleLabel.text = [video.channelName, video.displayPublished, video.viewCountText]
-            .filter { !$0.isEmpty }.joined(separator: " • ")
+        subtitleLabel.text = VideoRowCell.subtitle(for: video)
 
         if video.durationText.isEmpty {
             durationLabel.isHidden = true
@@ -100,17 +120,17 @@ class VideoRowCell: UITableViewCell {
     override func layoutSubviews() {
         super.layoutSubviews()
         let w = contentView.bounds.width
-        let pad: CGFloat = 8
-        let tW: CGFloat = 120, tH: CGFloat = 64
+        let pad = VideoRowCell.pad
+        let tW = VideoRowCell.thumbSize.width, tH = VideoRowCell.thumbSize.height
 
         thumb.frame = CGRect(x: pad, y: pad, width: tW, height: tH)
 
         durationLabel.sizeToFit()
         let dW = durationLabel.bounds.width
-        let dH: CGFloat = 16
+        let dH = VideoRowCell.durationH
         durationLabel.frame = CGRect(x: pad + tW - dW - 4, y: pad + tH - dH - 4, width: dW, height: dH)
 
-        let textX = pad + tW + 10
+        let textX = pad + tW + VideoRowCell.textGap
         let textW = max(0, w - textX - pad)
         titleLabel.frame = CGRect(x: textX, y: pad, width: textW, height: 36)
         subtitleLabel.frame = CGRect(x: textX, y: pad + 38, width: textW, height: 32)

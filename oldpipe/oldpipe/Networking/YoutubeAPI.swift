@@ -822,6 +822,15 @@ class YoutubeAPI {
                      publishedTimestamp: Video.timestamp(fromRelative: published))
     }
 
+    // "209M", "2.5B", "938K", "512": a count with no word after it. Digits with an optional
+    // decimal point or comma, then at most a K/M/B.
+    private static func isBareCount(_ t: String) -> Bool {
+        var body = Substring(t)
+        if let last = body.last, "KMB".contains(last) { body = body.dropLast() }
+        guard let first = body.first, first.isNumber else { return false }
+        return body.allSatisfy { $0.isNumber || $0 == "." || $0 == "," }
+    }
+
     // Build a Video from a lockupViewModel (the format channel/browse pages now use
     // instead of videoRenderer). Only handles video lockups (skips playlist/channel).
     private static func videoFromLockup(_ lm: [String: Any], fallbackChannelId: String, fallbackChannelName: String) -> Video? {
@@ -833,16 +842,20 @@ class YoutubeAPI {
 
         // metadataRows: row 0 is the channel name; a later row is [views, published-date].
         // Any part that's neither a view-count nor a relative date is taken as the channel.
+        // The related list writes its count bare ("209M", next to "17y ago"): past the first
+        // row, a bare count is the views too, and gets the word the other lists show.
         var views = ""
         var published = ""
         var channel = ""
         if let rows = arr(dict(dict(meta?["metadata"])?["contentMetadataViewModel"])?["metadataRows"]) {
-            for row in rows {
+            for (rowIndex, row) in rows.enumerated() {
                 if let parts = arr(row["metadataParts"]) {
                     for part in parts {
                         guard let t = str(dict(part["text"])?["content"]), !t.isEmpty else { continue }
                         if t.contains("view") {
                             if views.isEmpty { views = t }
+                        } else if rowIndex > 0, isBareCount(t) {
+                            if views.isEmpty { views = t + " views" }
                         } else if t.contains("ago") || t.contains("Streamed") {
                             if published.isEmpty { published = t }
                         } else if channel.isEmpty {

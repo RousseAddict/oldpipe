@@ -2078,14 +2078,16 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
         return startY + 32
     }
 
+    // One Related row, drawn as every other video list draws its rows: VideoRowCell's
+    // measures, fonts and "channel • date • views" line. Plain views rather than a cell, as
+    // the list lives in the page's scroll view.
     private func makeRelatedRow(_ v: Video, index: Int, width w: CGFloat) -> UIView {
-        let padding: CGFloat = 12
+        let pad = VideoRowCell.pad
+        let thumbW = VideoRowCell.thumbSize.width, thumbH = VideoRowCell.thumbSize.height
         let row = UIView()
 
-        let thumbW: CGFloat = 120
-        let thumbH: CGFloat = 68
-        let thumb = AsyncImageView(frame: CGRect(x: padding, y: 6, width: thumbW, height: thumbH))
-        thumb.backgroundColor = UIColor(white: 0.12, alpha: 1)
+        let thumb = AsyncImageView(frame: CGRect(x: pad, y: pad, width: thumbW, height: thumbH))
+        thumb.backgroundColor = VideoRowCell.thumbBG
         thumb.contentMode = .scaleAspectFill
         thumb.clipsToBounds = true
         thumb.layer.cornerRadius = 4
@@ -2098,40 +2100,40 @@ class VideoPlayerVC: UIViewController, UIActionSheetDelegate, UIAlertViewDelegat
 
         if !v.durationText.isEmpty {
             let dur = UILabel()
-            dur.backgroundColor = UIColor(white: 0, alpha: 0.75)
+            dur.backgroundColor = VideoRowCell.durationBG
             dur.textColor = .white
-            dur.font = UIFont.boldSystemFont(ofSize: 10)
+            dur.font = VideoRowCell.durationFont
             dur.textAlignment = .center
-            dur.text = " \(v.durationText) "
-            let dW = dur.sizeThatFits(CGSize(width: 100, height: 16)).width + 6
-            dur.frame = CGRect(x: thumb.frame.maxX - dW - 4, y: thumb.frame.maxY - 18, width: dW, height: 14)
-            dur.layer.cornerRadius = 2
+            dur.text = "  \(v.durationText)  "
+            dur.sizeToFit()
+            let dW = dur.bounds.width, dH = VideoRowCell.durationH
+            dur.frame = CGRect(x: thumb.frame.maxX - dW - 4, y: thumb.frame.maxY - dH - 4, width: dW, height: dH)
+            dur.layer.cornerRadius = 3
             dur.clipsToBounds = true
             dur.layer.shouldRasterize = true
             dur.layer.rasterizationScale = UIScreen.main.scale
             row.addSubview(dur)
         }
 
-        let textX = thumbW + padding + 8
-        let textW = w - textX - padding
+        let textX = pad + thumbW + VideoRowCell.textGap
+        let textW = max(0, w - textX - pad)
 
         let titleL = UILabel()
         titleL.backgroundColor = .clear
-        titleL.textColor = UIColor(white: 0.95, alpha: 1)
-        titleL.font = UIFont.systemFont(ofSize: 13)
+        titleL.textColor = VideoRowCell.titleColor
+        titleL.font = VideoRowCell.titleFont
         titleL.numberOfLines = 2
         titleL.text = v.title
-        titleL.frame = CGRect(x: textX, y: 6, width: textW, height: 34)
+        titleL.frame = CGRect(x: textX, y: pad, width: textW, height: 36)
         row.addSubview(titleL)
 
-        let subParts = [v.channelName, v.viewCountText, v.displayPublished].filter { !$0.isEmpty }
         let subL = UILabel()
         subL.backgroundColor = .clear
-        subL.textColor = UIColor(white: 0.5, alpha: 1)
-        subL.font = UIFont.systemFont(ofSize: 11)
+        subL.textColor = VideoRowCell.subtitleColor
+        subL.font = VideoRowCell.subtitleFont
         subL.numberOfLines = 2
-        subL.text = subParts.joined(separator: " • ")
-        subL.frame = CGRect(x: textX, y: 42, width: textW, height: 30)
+        subL.text = VideoRowCell.subtitle(for: v)
+        subL.frame = CGRect(x: textX, y: pad + 38, width: textW, height: 32)
         row.addSubview(subL)
 
         let tapBtn = UIButton(type: .custom)
